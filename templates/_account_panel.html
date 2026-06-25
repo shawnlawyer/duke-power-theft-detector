@@ -1,0 +1,412 @@
+{% set current_account = analysis.account if analysis else account %}
+{% set known_accounts = analysis.accounts if analysis else accounts %}
+{% set current_account_page = account_page if account_page is defined else none %}
+{% set current_profile = analysis.household_profile if analysis else household_profile %}
+{% set current_load_items = analysis.load_items if analysis else load_items %}
+{% set current_load_summary = analysis.load_summary if analysis else load_summary %}
+{% set current_comparison = analysis.inventory_comparison if analysis else none %}
+{% set current_account_access = account_access if account_access is defined else [] %}
+{% set current_utility_connections = utility_connections if utility_connections is defined else [] %}
+{% set is_customer = customer_mode|default(false) %}
+{% set account_list_endpoint = "customer_dashboard" if is_customer else "index" %}
+{% set selected_energy_company = current_account.energy_company or '' %}
+{% set selected_connection_provider = (current_utility_connections[0].provider_name if current_utility_connections else selected_energy_company) %}
+{% set current_section = setup_section if setup_section is defined else "all" %}
+{% set return_path = request.full_path if request.query_string else request.path %}
+
+{% if current_section in ["all", "account"] %}
+<section class="section-block">
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">{{ "Home account" if is_customer else "Customer" }}</p>
+      <h2>{{ selected_energy_company or "Electric account" }}</h2>
+      <p class="plain-note">Account {{ current_account.account_number }}</p>
+    </div>
+  </div>
+
+  <form class="account-search-form" action="{{ url_for('customer_dashboard') if is_customer else url_for('index') }}" method="get">
+    <label>
+      <span>{{ "Find account" if is_customer else "Find customer" }}</span>
+      <input
+        type="search"
+        name="account_search"
+        value="{{ current_account_page.search if current_account_page else '' }}"
+        placeholder="Energy company, address, or account number"
+      >
+    </label>
+    <button type="submit" class="button-secondary">Search</button>
+  </form>
+
+  {% if known_accounts %}
+    <div class="account-chip-list">
+      {% for known in known_accounts %}
+        <a
+          class="account-chip {% if known.account_number == current_account.account_number %}active{% endif %}"
+          href="{{ url_for(account_list_endpoint, account_number=known.account_number, account_search=current_account_page.search if current_account_page else '', account_page=current_account_page.page if current_account_page else 1) }}"
+        >
+          <strong>{{ known.energy_company or "Electric account" }}</strong>
+          {% if known.address %}
+            <span>{{ known.address }}</span>
+          {% else %}
+            <span>Account {{ known.account_number }}</span>
+          {% endif %}
+        </a>
+      {% endfor %}
+    </div>
+    {% if current_account_page %}
+      <div class="pagination-row">
+        <span>{{ current_account_page.total }} customer{{ '' if current_account_page.total == 1 else 's' }}</span>
+        <div>
+          {% if current_account_page.has_previous %}
+            <a class="inline-link" href="{{ url_for(account_list_endpoint, account_number=current_account.account_number, account_search=current_account_page.search, account_page=current_account_page.previous_page) }}">Previous</a>
+          {% endif %}
+          <span>Page {{ current_account_page.page }} of {{ current_account_page.total_pages }}</span>
+          {% if current_account_page.has_next %}
+            <a class="inline-link" href="{{ url_for(account_list_endpoint, account_number=current_account.account_number, account_search=current_account_page.search, account_page=current_account_page.next_page) }}">Next</a>
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+  {% endif %}
+
+  <form class="account-form" action="{{ url_for('save_account') }}" method="post">
+    <input type="hidden" name="return_to" value="{{ return_path }}">
+    <div class="field-grid">
+      <label class="wide-field">
+        <span>Address</span>
+        <input type="text" name="address" value="{{ current_profile.address }}">
+      </label>
+      <label>
+        <span>Account number</span>
+        <input type="text" name="account_number" value="{{ current_account.account_number }}" {% if is_customer %}readonly{% endif %} required>
+      </label>
+      <label>
+        <span>Energy company</span>
+        <select name="energy_company" required>
+          <option value="">Choose provider</option>
+          {% for group in energy_company_groups %}
+            <optgroup label="{{ group.label }}">
+              {% for company in group.companies %}
+                <option value="{{ company }}" {% if company == selected_energy_company %}selected{% endif %}>{{ company }}</option>
+              {% endfor %}
+            </optgroup>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>Reference day</span>
+        <input type="date" name="baseline_date" value="{{ current_account.baseline_date or '' }}">
+      </label>
+      <label>
+        <span>People on this meter</span>
+        <input type="number" name="occupant_count" min="0" step="1" value="{{ current_profile.occupant_count if current_profile.occupant_count is not none else '' }}">
+      </label>
+      <label>
+        <span>Year built</span>
+        <input type="number" name="year_built" min="1800" step="1" value="{{ current_profile.year_built if current_profile.year_built is not none else '' }}">
+      </label>
+      <label>
+        <span>Square feet</span>
+        <input type="number" name="square_footage" min="0" step="1" value="{{ current_profile.square_footage if current_profile.square_footage is not none else '' }}">
+      </label>
+      <label>
+        <span>Heating system</span>
+        <input type="text" name="heating_system" value="{{ current_profile.heating_system }}" placeholder="Heat pump, gas furnace, baseboard">
+      </label>
+      <label>
+        <span>Cooling system</span>
+        <input type="text" name="cooling_system" value="{{ current_profile.cooling_system }}" placeholder="Central air, heat pump, window units">
+      </label>
+      <label>
+        <span>Water heater</span>
+        <input type="text" name="water_heater" value="{{ current_profile.water_heater }}" placeholder="Electric tank, tankless, gas">
+      </label>
+      <label class="wide-field">
+        <span>House notes</span>
+        <input type="text" name="notes" value="{{ current_profile.notes }}" placeholder="Pool pump, well pump, EV charger, workshop, solar, crawlspace equipment">
+      </label>
+    </div>
+    <p class="plain-note">These details make it easier to tell the difference between expected household use and something that does not fit the home.</p>
+    {% if current_profile.weather_location %}
+      <p class="plain-note">Weather will use {{ current_profile.weather_location }}.</p>
+    {% else %}
+      <p class="plain-note">Weather unlocks after the address resolves to a location.</p>
+    {% endif %}
+    <button type="submit">Save account</button>
+  </form>
+</section>
+{% endif %}
+
+{% if not is_customer and current_section in ["all", "people"] %}
+<section class="section-block">
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">Account access</p>
+      <h2>People with account access</h2>
+      <p class="plain-note">Add each email address that should be able to review this electric account.</p>
+    </div>
+  </div>
+
+  <form class="account-form" action="{{ url_for('create_account_access') }}" method="post">
+    <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+    <input type="hidden" name="return_to" value="{{ return_path }}">
+    <div class="field-grid">
+      <label>
+        <span>Email</span>
+        <input type="email" name="email" placeholder="name@example.com" required>
+      </label>
+      <label>
+        <span>Name</span>
+        <input type="text" name="full_name" placeholder="Homeowner, family member, advisor">
+      </label>
+      <label>
+        <span>Access</span>
+        <select name="access_level">
+          {% for level in customer_access_levels %}
+            <option value="{{ level }}">{{ level }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <button type="submit">Add email</button>
+  </form>
+
+  {% if current_account_access %}
+    <div class="table-wrap compact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Email</th>
+            <th>Name</th>
+            <th>Access</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for person in current_account_access %}
+            <tr>
+              <td>{{ person.email }}</td>
+              <td>{{ person.full_name or 'Not set' }}</td>
+              <td>{{ person.access_level }}</td>
+              <td class="action-cell">
+                <form action="{{ url_for('remove_account_access', access_id=person.id) }}" method="post">
+                  <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+                  <input type="hidden" name="return_to" value="{{ return_path }}">
+                  <button type="submit" class="button-secondary button-small">Remove</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="plain-note">No shared email access has been added for this account yet.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if current_section in ["all", "utility"] %}
+<section class="section-block">
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">Utility connection</p>
+      <h2>Utility data connection</h2>
+      <p class="plain-note">Store the customer-approved access this system will use to collect future usage history.</p>
+    </div>
+  </div>
+
+  <form class="account-form" action="{{ url_for('save_connection') }}" method="post">
+    <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+    <input type="hidden" name="return_to" value="{{ return_path }}">
+    <div class="field-grid">
+      <label>
+        <span>Energy company</span>
+        <select name="provider_name" required>
+          <option value="">Choose provider</option>
+          {% for group in energy_company_groups %}
+            <optgroup label="{{ group.label }}">
+              {% for company in group.companies %}
+                <option value="{{ company }}" {% if company == selected_connection_provider %}selected{% endif %}>{{ company }}</option>
+              {% endfor %}
+            </optgroup>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>Connection name</span>
+        <input type="text" name="connection_label" placeholder="Main electric login" required>
+      </label>
+      <label>
+        <span>Access type</span>
+        <select name="access_method">
+          <option value="customer_api_key">Customer API key</option>
+          <option value="customer_login">Customer login</option>
+          <option value="utility_authorization">Utility authorization</option>
+        </select>
+      </label>
+      <label>
+        <span>Login or key name</span>
+        <input type="text" name="access_identifier" placeholder="name@example.com">
+      </label>
+      <label class="wide-field">
+        <span>Access key</span>
+        <input type="password" name="access_secret" autocomplete="new-password" placeholder="Paste the customer-approved key">
+      </label>
+    </div>
+    <button type="submit">Save connection</button>
+  </form>
+
+  {% if current_utility_connections %}
+    <div class="table-wrap compact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Power company</th>
+            <th>Connection</th>
+            <th>Status</th>
+            <th>Key</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for connection in current_utility_connections %}
+            <tr>
+              <td>{{ connection.provider_name }}</td>
+              <td>
+                <strong>{{ connection.connection_label }}</strong>
+                {% if connection.access_identifier %}
+                  <div class="table-note">{{ connection.access_identifier }}</div>
+                {% endif %}
+              </td>
+              <td>{{ connection.status }}</td>
+              <td>{% if connection.secret_last4 %}Ending {{ connection.secret_last4 }}{% else %}Not saved{% endif %}</td>
+              <td class="action-cell">
+                <form action="{{ url_for('sync_connection', connection_id=connection.id) }}" method="post">
+                  <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+                  <input type="hidden" name="return_to" value="{{ return_path }}">
+                  <button type="submit" class="button-secondary button-small">Sync now</button>
+                </form>
+                <form action="{{ url_for('remove_connection', connection_id=connection.id) }}" method="post">
+                  <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+                  <input type="hidden" name="return_to" value="{{ return_path }}">
+                  <button type="submit" class="button-secondary button-small">Remove</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="plain-note">No utility connection has been saved for this account yet.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if current_section in ["all", "inventory"] %}
+<section class="section-block">
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">House load list</p>
+      <h2>What should your meter be able to draw?</h2>
+      <p class="plain-note">Add each appliance, circuit, or always-on load with the wattage you expect.</p>
+    </div>
+  </div>
+
+  <div class="summary-strip inventory-strip">
+    <div>
+      <span class="label">Everything on</span>
+      <strong>{{ current_load_summary.all_on_kw }} kW</strong>
+    </div>
+    <div>
+      <span class="label">Mostly off</span>
+      <strong>{{ current_load_summary.off_kw }} kW</strong>
+    </div>
+    <div>
+      <span class="label">Loads tracked</span>
+      <strong>{{ current_load_summary.item_count }}</strong>
+    </div>
+    <div>
+      <span class="label">Peak on meter</span>
+      <strong>
+        {% if current_comparison and current_comparison.peak_kw is not none %}
+          {{ current_comparison.peak_kw }} kW
+        {% else %}
+          n/a
+        {% endif %}
+      </strong>
+    </div>
+  </div>
+
+  <form class="inventory-form" action="{{ url_for('create_load_item') }}" method="post">
+    <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+    <input type="hidden" name="return_to" value="{{ return_path }}">
+    <div class="inventory-grid">
+      <label>
+        <span>Load</span>
+        <input type="text" name="label" placeholder="Water heater" required>
+      </label>
+      <label>
+        <span>How many</span>
+        <input type="number" name="quantity" min="1" step="1" value="1" required>
+      </label>
+      <label>
+        <span>Watts each</span>
+        <input type="number" name="watts_each" min="1" step="1" placeholder="4500" required>
+      </label>
+      <label class="wide-field">
+        <span>Notes</span>
+        <input type="text" name="notes" placeholder="Two-stage heat strip, upstairs">
+      </label>
+      <label class="checkbox-field">
+        <input type="checkbox" name="include_when_off" value="1">
+        <span>Count this when the house should be mostly off</span>
+      </label>
+    </div>
+    <button type="submit">Add load</button>
+  </form>
+
+  {% if current_load_items %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Load</th>
+            <th>Qty</th>
+            <th>Watts each</th>
+            <th>Total watts</th>
+            <th>Mostly off</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in current_load_items %}
+            <tr>
+              <td>
+                <strong>{{ item.label }}</strong>
+                {% if item.notes %}
+                  <div class="table-note">{{ item.notes }}</div>
+                {% endif %}
+              </td>
+              <td>{{ item.quantity }}</td>
+              <td>{{ item.watts_each }}</td>
+              <td>{{ item.total_watts }}</td>
+              <td>{{ "Yes" if item.include_when_off else "No" }}</td>
+              <td class="action-cell">
+                <form action="{{ url_for('remove_load_item', item_id=item.id) }}" method="post">
+                  <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+                  <input type="hidden" name="return_to" value="{{ return_path }}">
+                  <button type="submit" class="button-secondary button-small">Remove</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="plain-note">Start with the biggest draws first: HVAC, water heater, dryer, oven, EV charger, pumps, and always-on equipment.</p>
+  {% endif %}
+</section>
+{% endif %}

@@ -1,0 +1,334 @@
+<section class="section-block snapshot">
+  <div class="section-header">
+    <div>
+      <h2>{{ analysis.account.energy_company or "Electric account" }}</h2>
+      <p>
+        {% if analysis.coverage_start and analysis.coverage_end %}
+          {{ analysis.coverage_start }} to {{ analysis.coverage_end }}
+        {% endif %}
+      </p>
+    </div>
+    {% if analysis.report_files %}
+      <div class="inline-link-row">
+        {% for report in analysis.report_files %}
+          <a class="inline-link" href="{{ url_for('download_report', filename=report.filename) }}">Download {{ report.label }}</a>
+        {% endfor %}
+      </div>
+    {% elif analysis.report_file %}
+      <a class="inline-link" href="{{ url_for('download_report', filename=analysis.report_file) }}">Download report</a>
+    {% endif %}
+  </div>
+
+  <div class="summary-strip">
+    <div>
+      <span class="label">Days analyzed</span>
+      <strong>{{ analysis.days_analyzed }}</strong>
+    </div>
+    <div>
+      <span class="label">Flagged days</span>
+      <strong>{{ analysis.suspicious_rows|length }}</strong>
+    </div>
+    <div>
+      <span class="label">Alert moments</span>
+      <strong>{{ analysis.alert_events|length }}</strong>
+    </div>
+    <div>
+      <span class="label">Overnight reference</span>
+      <strong>{{ analysis.baseline if analysis.baseline is not none else "n/a" }}{% if analysis.baseline is not none %} kW{% endif %}</strong>
+    </div>
+  </div>
+</section>
+
+{% if analysis.key_findings %}
+  <section class="section-block">
+    <div class="section-header">
+      <div>
+        <p class="section-kicker">What stands out</p>
+        <h2>Start here.</h2>
+      </div>
+    </div>
+
+    <div class="finding-list">
+      {% for finding in analysis.key_findings %}
+        <article class="finding-item">
+          <h3>{{ finding.title }}</h3>
+          <p>{{ finding.detail }}</p>
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+{% endif %}
+
+<section class="two-column">
+  <section class="section-block">
+    <div class="section-header">
+      <div>
+        <p class="section-kicker">Hourly pattern</p>
+        <h2>Median load by hour.</h2>
+      </div>
+    </div>
+
+    <div class="profile-list">
+      {% for hour in analysis.hourly_profile %}
+        <div class="profile-row {% if hour.overnight %}overnight{% endif %}">
+          <span class="profile-label">{{ hour.label }}</span>
+          <div class="profile-bar-track">
+            <div class="profile-bar" style="width: {{ hour.pct }}%"></div>
+          </div>
+          <span class="profile-value">{{ hour.kw if hour.kw is not none else "n/a" }}</span>
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="section-block">
+    <div class="section-header">
+      <div>
+        <p class="section-kicker">All-on check</p>
+        <h2>Meter versus the load list.</h2>
+      </div>
+    </div>
+
+    <div class="metric-stack">
+      <div class="metric-line">
+        <span>Everything on</span>
+        <strong>{{ analysis.load_summary.all_on_kw }} kW</strong>
+      </div>
+      <div class="metric-line">
+        <span>Mostly off</span>
+        <strong>{{ analysis.load_summary.off_kw }} kW</strong>
+      </div>
+      <div class="metric-line">
+        <span>Highest reading on the meter</span>
+        <strong>{{ analysis.inventory_comparison.peak_kw if analysis.inventory_comparison.peak_kw is not none else "n/a" }}{% if analysis.inventory_comparison.peak_kw is not none %} kW{% endif %}</strong>
+      </div>
+      <div class="metric-line">
+        <span>Gap between peak and all-on check</span>
+        <strong>{{ analysis.inventory_comparison.all_on_gap_kw if analysis.inventory_comparison.all_on_gap_kw is not none else "n/a" }}{% if analysis.inventory_comparison.all_on_gap_kw is not none %} kW{% endif %}</strong>
+      </div>
+    </div>
+  </section>
+</section>
+
+<section
+  class="section-block detail-panel"
+  id="day-detail-root"
+  data-api-url="{{ url_for('api_day_detail') }}"
+  data-account-number="{{ analysis.account.account_number }}"
+  data-tz="{{ analysis.settings.tz }}"
+  data-night-start="{{ analysis.settings.night_start }}"
+  data-night-end="{{ analysis.settings.night_end }}"
+  data-min-night-kw="{{ analysis.settings.min_night_kw }}"
+  data-night-multiplier="{{ analysis.settings.night_multiplier }}"
+>
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">Selected day</p>
+      <h2 id="detail-heading">{{ analysis.initial_day_detail.label if analysis.initial_day_detail else "Choose a flagged day" }}</h2>
+      <p class="plain-note" id="detail-subheading">
+        Click any flagged day below to see the actual curve, the previous day, and your reference day together.
+      </p>
+    </div>
+  </div>
+
+  <div class="detail-grid">
+    <div class="detail-card-group" id="detail-metrics"></div>
+    <div class="chart-block">
+      <div class="chart-legend" id="detail-legend"></div>
+      <div class="chart-frame" id="detail-chart"></div>
+    </div>
+  </div>
+
+  <div class="detail-grid secondary triple">
+    <div class="detail-column">
+      <h3>How it compares</h3>
+      <div class="detail-list" id="detail-comparison"></div>
+    </div>
+    <div class="detail-column">
+      <h3>Spike times</h3>
+      <div class="detail-list" id="detail-spikes"></div>
+    </div>
+    <div class="detail-column">
+      <h3>Weather that day</h3>
+      <div id="detail-weather"></div>
+    </div>
+  </div>
+
+  <script id="initial-day-detail" type="application/json">{{ analysis.initial_day_detail|tojson }}</script>
+</section>
+
+<section class="section-block">
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">Flagged days</p>
+      <h2>Click a day to see the curve.</h2>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Total use</th>
+          <th>Night average</th>
+          <th>Peak load</th>
+          <th>Status</th>
+          <th>Why</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in analysis.summary_rows|reverse %}
+          <tr class="day-row {% if row.date == analysis.focus_date %}active{% endif %}">
+            <td>
+              <button type="button" class="day-select" data-date="{{ row.date }}">
+                {{ row.date }}
+              </button>
+            </td>
+            <td>{{ row.total_kwh }}</td>
+            <td>{{ row.night_avg_kw if row.night_avg_kw is not none else "n/a" }}</td>
+            <td>{{ row.max_kw }}</td>
+            <td>
+              {% if row.suspicious %}
+                <span class="pill danger">Flagged</span>
+              {% else %}
+                <span class="pill">Normal</span>
+              {% endif %}
+            </td>
+            <td>{{ row.reasons if row.reasons else "No alert rule fired." }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="section-block">
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">Load test</p>
+      <h2>Count what is on and compare it to the meter.</h2>
+      <p class="plain-note">Use your saved load list, set how many are on, then compare that expected draw to any meter interval from the selected day.</p>
+    </div>
+  </div>
+
+  {% if analysis.load_items %}
+    <div class="load-test-grid">
+      <section class="load-test-panel">
+        <div class="field-grid compact-grid">
+          <label>
+            <span>Meter interval</span>
+            <select id="load-test-interval"></select>
+          </label>
+        </div>
+
+        <div class="summary-strip test-summary">
+          <div>
+            <span class="label">Expected draw</span>
+            <strong id="load-test-expected">0 kW</strong>
+          </div>
+          <div>
+            <span class="label">Meter reading</span>
+            <strong id="load-test-actual">n/a</strong>
+          </div>
+          <div>
+            <span class="label">Difference</span>
+            <strong id="load-test-difference">n/a</strong>
+          </div>
+          <div>
+            <span class="label">Status</span>
+            <strong id="load-test-status">Add counts</strong>
+          </div>
+        </div>
+
+        <div class="load-test-actions">
+          <button type="button" class="button-secondary button-small" id="load-test-all-on">Everything on</button>
+          <button type="button" class="button-secondary button-small" id="load-test-clear">Clear</button>
+        </div>
+      </section>
+
+      <section class="load-test-panel">
+        <div class="table-wrap">
+          <table class="load-test-table">
+            <thead>
+              <tr>
+                <th>Load</th>
+                <th>Available</th>
+                <th>Watts each</th>
+                <th>On now</th>
+                <th>Expected</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in analysis.load_items %}
+                <tr>
+                  <td>
+                    <strong>{{ item.label }}</strong>
+                    {% if item.notes %}
+                      <div class="table-note">{{ item.notes }}</div>
+                    {% endif %}
+                  </td>
+                  <td>{{ item.quantity }}</td>
+                  <td>{{ item.watts_each }}</td>
+                  <td>
+                    <input
+                      class="load-test-count"
+                      type="number"
+                      min="0"
+                      max="{{ item.quantity }}"
+                      step="1"
+                      value="0"
+                      data-item-id="{{ item.id }}"
+                      data-watts-each="{{ item.watts_each }}"
+                      data-quantity="{{ item.quantity }}"
+                    >
+                  </td>
+                  <td><span class="load-test-row-total" data-item-total="{{ item.id }}">0 W</span></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  {% else %}
+    <p class="plain-note">Add the house loads first so the test can compare your counted draw against the meter.</p>
+  {% endif %}
+</section>
+
+<section class="section-block">
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">Alert moments</p>
+      <h2>Exact times that broke the pattern.</h2>
+    </div>
+  </div>
+
+  {% if analysis.alert_events %}
+    <div class="table-wrap compact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Load</th>
+            <th>Jump</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for event in analysis.alert_events[:10] %}
+            <tr>
+              <td>
+                <strong>{{ event.timestamp }}</strong>
+                <div class="table-note">{{ event.reasons }}</div>
+              </td>
+              <td>{{ event.kw }} kW</td>
+              <td>{{ event.delta_kw if event.delta_kw is not none else "n/a" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="plain-note">No overnight moment crossed the alert thresholds in this account yet.</p>
+  {% endif %}
+</section>

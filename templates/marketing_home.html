@@ -1,0 +1,336 @@
+{% extends "marketing_base.html" %}
+
+{% block content %}
+  <main class="marketing-main">
+    <section class="hero-grid">
+      <div class="hero-copy">
+        <h1>See the pattern. Spot what matters.</h1>
+        <p class="hero-text">
+          Move through the utility export fast. Compare periods, switch metrics, and keep the nights that stand out
+          in view without losing the record behind them.
+        </p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="{{ start_home_url }}">Start as a homeowner</a>
+          <a class="button button-secondary" href="{{ commission_login_url }}">Open commission workspace</a>
+        </div>
+        <p class="hero-note">
+          Built for households, advocates, and commissions that need a cleaner way to move from raw data to evidence.
+        </p>
+      </div>
+
+      <div class="hero-report">
+        <div class="report-card">
+          <p class="report-title">Comparison snapshot</p>
+          <div class="report-metrics">
+            <article>
+              <span>Total kWh</span>
+              <strong>1,842</strong>
+              <small>+14.8%</small>
+            </article>
+            <article>
+              <span>Overnight baseline</span>
+              <strong>1.22 kW</strong>
+              <small>+0.31 kW</small>
+            </article>
+            <article>
+              <span>Flagged nights</span>
+              <strong>11</strong>
+              <small>+5 nights</small>
+            </article>
+          </div>
+          <table class="report-table">
+            <thead>
+              <tr>
+                <th>Period</th>
+                <th>Total kWh</th>
+                <th>Night baseline</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Jan 2025</td>
+                <td>812</td>
+                <td>0.91 kW</td>
+              </tr>
+              <tr>
+                <td>Jan 2026</td>
+                <td>932</td>
+                <td>1.22 kW</td>
+              </tr>
+              <tr>
+                <td>Reviewer note</td>
+                <td colspan="2">Late-month overnight load stayed elevated after the baseline shift.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="marketing-section explorer-section">
+      <div class="section-heading split-heading">
+        <div>
+          <h2>Watch the story change without losing context.</h2>
+          <p>Switch views, compare aligned periods, and keep the signal in front of you while the source file stays close.</p>
+        </div>
+        <div class="explorer-points">
+          <p>Month over month or year over year.</p>
+          <p>Total kWh, overnight baseline, and flagged nights side by side.</p>
+          <p>A short explanation that stays tied to the numbers.</p>
+        </div>
+      </div>
+      <div class="pattern-explorer" id="pattern-explorer" data-default-view="total_kwh">
+        <div class="explorer-tabs" role="tablist" aria-label="Comparison views">
+          <button type="button" class="explorer-tab active" data-pattern-tab="total_kwh" role="tab" aria-selected="true">Total kWh</button>
+          <button type="button" class="explorer-tab" data-pattern-tab="baseline_kw" role="tab" aria-selected="false">Overnight baseline</button>
+          <button type="button" class="explorer-tab" data-pattern-tab="flagged_nights" role="tab" aria-selected="false">Flagged nights</button>
+        </div>
+
+        <div class="explorer-body">
+          <aside class="explorer-sidebar">
+            <div>
+              <p class="mini-label">Compare with context</p>
+              <h3 id="pattern-title">Total kWh</h3>
+              <p id="pattern-summary">Month over month comparison for the main usage story.</p>
+            </div>
+
+            <dl class="explorer-stat-list">
+              <div>
+                <dt id="pattern-stat-one-label">This month</dt>
+                <dd id="pattern-stat-one-value">1,198 kWh</dd>
+              </div>
+              <div>
+                <dt id="pattern-stat-two-label">3-month change</dt>
+                <dd id="pattern-stat-two-value">+7%</dd>
+              </div>
+              <div>
+                <dt id="pattern-stat-three-label">What it means</dt>
+                <dd id="pattern-stat-three-value">Usage stayed elevated through the end of the period.</dd>
+              </div>
+            </dl>
+          </aside>
+
+          <div class="explorer-chart-panel">
+            <div class="comparison-header">
+              <div>
+                <p class="mini-label">Aligned comparison</p>
+                <p class="comparison-subtitle" id="pattern-subtitle">Apr 2025 vs May 2025</p>
+              </div>
+              <div class="comparison-legend">
+                <span><i class="legend-swatch legend-light"></i> Earlier period</span>
+                <span><i class="legend-swatch legend-dark"></i> Later period</span>
+              </div>
+            </div>
+
+            <div class="mini-chart" aria-hidden="true">
+              {% for month in ["Dec", "Jan", "Feb", "Mar", "Apr", "May"] %}
+                <div class="chart-group">
+                  <div class="chart-bars">
+                    <span class="chart-bar chart-bar-light" data-bar-earlier="{{ loop.index0 }}"></span>
+                    <span class="chart-bar chart-bar-dark" data-bar-later="{{ loop.index0 }}"></span>
+                  </div>
+                  <span class="chart-label">{{ month }}</span>
+                  <span class="chart-delta" data-bar-delta="{{ loop.index0 }}"></span>
+                </div>
+              {% endfor %}
+            </div>
+
+            <div class="explainer-card">
+              <p class="mini-label">What this shows</p>
+              <p id="pattern-note">Total usage increased from April to May, and the rise stayed broad instead of isolated to one night.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="marketing-section banded-section flow-section" id="review-flow" data-default-step="inspect">
+      <div class="section-heading split-heading">
+        <div>
+          <h2>Move from raw data to evidence in a few clear steps.</h2>
+          <p>The public front should show how fast the review moves, not just tell people the tool exists.</p>
+        </div>
+        <div class="explorer-points">
+          <p>Import once.</p>
+          <p>Align the periods.</p>
+          <p>Inspect the nights that matter.</p>
+          <p>Keep the artifact.</p>
+        </div>
+      </div>
+
+      <div class="flow-rail" role="tablist" aria-label="Review flow">
+        <button type="button" class="flow-step" data-flow-step="import" role="tab" aria-selected="false">
+          <span>1</span>
+          <strong>Import</strong>
+        </button>
+        <button type="button" class="flow-step" data-flow-step="align" role="tab" aria-selected="false">
+          <span>2</span>
+          <strong>Align periods</strong>
+        </button>
+        <button type="button" class="flow-step" data-flow-step="inspect" role="tab" aria-selected="true">
+          <span>3</span>
+          <strong>Inspect anomalies</strong>
+        </button>
+        <button type="button" class="flow-step" data-flow-step="report" role="tab" aria-selected="false">
+          <span>4</span>
+          <strong>Save artifact</strong>
+        </button>
+      </div>
+
+      <div class="flow-stage-grid">
+        <aside class="flow-sidebar">
+          <div class="flow-card" data-flow-panel="import" hidden>
+            <p class="mini-label">Import</p>
+            <h3>Bring in the file you already have.</h3>
+            <p>Upload the Duke export or interval file first, without rebuilding the data by hand.</p>
+            <ul class="flow-list">
+              <li>Saved history stays tied to the account.</li>
+              <li>Source files remain part of the record.</li>
+            </ul>
+          </div>
+          <div class="flow-card" data-flow-panel="align" hidden>
+            <p class="mini-label">Align periods</p>
+            <h3>Match the months that can actually be compared.</h3>
+            <p>Equivalent periods line up first, and unmatched ranges are called out instead of being blended away.</p>
+            <ul class="flow-list">
+              <li>Month over month when the files are offset.</li>
+              <li>Year over year when calendar months line up.</li>
+            </ul>
+          </div>
+          <div class="flow-card active" data-flow-panel="inspect">
+            <p class="mini-label">Inspect anomalies</p>
+            <h3>Switch quickly to the metric that explains the change.</h3>
+            <p>Review total kWh, baseline shifts, and flagged nights without leaving the comparison flow.</p>
+            <ul class="flow-list">
+              <li>Overnight spikes stay visible.</li>
+              <li>The follow-up note stays short and specific.</li>
+            </ul>
+          </div>
+          <div class="flow-card" data-flow-panel="report" hidden>
+            <p class="mini-label">Save artifact</p>
+            <h3>Keep a concise record for the next conversation.</h3>
+            <p>The exported artifact holds the matched periods, major deltas, and the plain-language reason they matter.</p>
+            <ul class="flow-list">
+              <li>Useful for households.</li>
+              <li>Useful for commission follow-up.</li>
+            </ul>
+          </div>
+        </aside>
+
+        <div class="flow-canvas">
+          <div class="flow-visual" data-flow-visual="import" hidden>
+            <div class="file-stack">
+              <article>
+                <strong>duke_export_apr_2025.xml</strong>
+                <span>Imported and saved</span>
+              </article>
+              <article>
+                <strong>duke_export_may_2025.xml</strong>
+                <span>Ready to compare</span>
+              </article>
+            </div>
+          </div>
+
+          <div class="flow-visual" data-flow-visual="align" hidden>
+            <div class="alignment-board">
+              <div>
+                <span>Apr 2025</span>
+                <span>May 2025</span>
+                <span>Jun 2025</span>
+              </div>
+              <div>
+                <span>Apr 2026</span>
+                <span>May 2026</span>
+                <span class="muted">Jul 2026 only</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="flow-visual active" data-flow-visual="inspect">
+            <div class="signal-strip">
+              <div class="signal-header">
+                <span>May 2025 vs Apr 2025</span>
+                <span>Flagged nights</span>
+              </div>
+              <div class="signal-line">
+                {% for value in [12, 14, 13, 15, 18, 12, 16, 28, 17, 14, 19, 15, 11, 13, 24, 12] %}
+                  <span class="signal-dot{% if value >= 24 %} signal-dot-alert{% endif %}" style="--dot-level: {{ value }};"></span>
+                {% endfor %}
+              </div>
+              <div class="signal-note">
+                Two late-month nights stand out above the baseline and stay visible when the view changes.
+              </div>
+            </div>
+          </div>
+
+          <div class="flow-visual" data-flow-visual="report" hidden>
+            <div class="artifact-card">
+              <p class="mini-label">Report preview</p>
+              <h3>Power review report</h3>
+              <p>Matched periods, baseline shifts, flagged nights, and major deltas ready for follow-up.</p>
+              <div class="artifact-bars">
+                <span style="height: 34%;"></span>
+                <span style="height: 46%;"></span>
+                <span style="height: 54%;"></span>
+                <span style="height: 48%;"></span>
+                <span style="height: 72%;"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="marketing-section split-section">
+      <div class="split-copy">
+        <h2>Useful at home. Useful in a docket.</h2>
+        <p>
+          Homeowners need a grounded way to check whether the meter story fits the house. Commissions need a cleaner
+          record when a night-load question is not going away.
+        </p>
+      </div>
+      <div class="audience-cards">
+        <article class="audience-card">
+          <h3>For homeowners</h3>
+          <p>Keep your account history, compare export files, and bring a sharper record into a billing dispute or service call.</p>
+          <a href="{{ for_homeowners_url }}">See the homeowner path</a>
+        </article>
+        <article class="audience-card">
+          <h3>For commissions</h3>
+          <p>Review one account or a small group of accounts and keep the comparison notes in a form that staff can revisit later.</p>
+          <a href="{{ for_commissions_url }}">See the commission path</a>
+        </article>
+      </div>
+    </section>
+
+    <section class="marketing-section">
+      <div class="section-heading">
+        <h2>Simple pricing</h2>
+        <p>Start with one household, then move up when the review reaches more accounts.</p>
+      </div>
+      <div class="plan-grid">
+        {% for plan in billing_plans %}
+          <article class="marketing-plan">
+            <p class="plan-price">{{ plan.monthly_price_label }}</p>
+            <h3>{{ plan.name }}</h3>
+            <p>{{ plan.summary }}</p>
+          </article>
+        {% endfor %}
+      </div>
+      <div class="section-actions">
+        <a class="button button-secondary" href="{{ pricing_url }}">See plan details</a>
+      </div>
+    </section>
+
+    <section class="marketing-section final-call">
+      <div>
+        <h2>Start with the export you already have.</h2>
+        <p>Keep the public site simple, keep the app on its own subdomain, and keep the evidence in one place.</p>
+      </div>
+      <div class="hero-actions">
+        <a class="button button-primary" href="{{ start_home_url }}">Create a homeowner account</a>
+        <a class="button button-secondary" href="{{ commission_login_url }}">Open the review workspace</a>
+      </div>
+    </section>
+  </main>
+{% endblock %}

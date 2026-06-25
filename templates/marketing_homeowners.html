@@ -1,0 +1,36 @@
+{% extends "marketing_base.html" %}
+
+{% block content %}
+  <main class="marketing-main compact-main">
+    <section class="page-intro">
+      <h1>For homeowners trying to make sense of the meter story.</h1>
+      <p>When the overnight load feels wrong, you need something more useful than a bill total and a guess.</p>
+    </section>
+
+    <section class="feature-grid single-column-grid">
+      <article class="feature-card">
+        <h2>Keep your own record</h2>
+        <p>Bring in the export, store the history, and compare periods without starting from scratch every time a new file arrives.</p>
+      </article>
+      <article class="feature-card">
+        <h2>See whether the overnight pattern really changed</h2>
+        <p>Look at the baseline, the flagged nights, and the months where total use moved enough to deserve a second look.</p>
+      </article>
+      <article class="feature-card">
+        <h2>Bring something concrete into the next call</h2>
+        <p>The point is not to flood the utility with charts. The point is to carry a clean comparison into the next conversation.</p>
+      </article>
+    </section>
+
+    <section class="marketing-section final-call">
+      <div>
+        <h2>Start with one account and your latest export.</h2>
+        <p>The setup is meant to be practical, not technical.</p>
+      </div>
+      <div class="hero-actions">
+        <a class="button button-primary" href="{{ start_home_url }}">Create a homeowner account</a>
+        <a class="button button-secondary" href="{{ home_login_url }}">Sign in</a>
+      </div>
+    </section>
+  </main>
+{% endblock %}

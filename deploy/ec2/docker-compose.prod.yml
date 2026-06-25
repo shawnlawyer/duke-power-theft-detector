@@ -1,0 +1,46 @@
+services:
+  power-detector:
+    build:
+      context: ../..
+    image: home-energy-watch:latest
+    ports:
+      - "${POWER_WEB_PORT:-80}:8000"
+    environment:
+      POWER_DATABASE_URL: ${POWER_DATABASE_URL}
+      POWER_APP_SECRET: ${POWER_APP_SECRET}
+      POWER_PUBLIC_BASE_URL: ${POWER_PUBLIC_BASE_URL}
+      POWER_MARKETING_BASE_URL: ${POWER_MARKETING_BASE_URL:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_HOME: ${STRIPE_PRICE_HOME:-}
+      STRIPE_PRICE_REVIEW: ${STRIPE_PRICE_REVIEW:-}
+      STRIPE_PRICE_AGENCY: ${STRIPE_PRICE_AGENCY:-}
+      POWER_INPUT_DIR: /srv/home-energy-watch/input
+      POWER_OUTPUT_DIR: /srv/home-energy-watch/output
+      POWER_TIMEZONE: ${POWER_TIMEZONE:-America/New_York}
+      POWER_NIGHT_START: ${POWER_NIGHT_START:-02:00}
+      POWER_NIGHT_END: ${POWER_NIGHT_END:-04:00}
+      POWER_MIN_NIGHT_KW: ${POWER_MIN_NIGHT_KW:-1.0}
+      POWER_NIGHT_MULTIPLIER: ${POWER_NIGHT_MULTIPLIER:-2.0}
+      POWER_ALERT_WINDOW_START: ${POWER_ALERT_WINDOW_START:-00:00}
+      POWER_ALERT_WINDOW_END: ${POWER_ALERT_WINDOW_END:-05:00}
+      POWER_ALERT_MIN_KW: ${POWER_ALERT_MIN_KW:-1.2}
+      POWER_ALERT_MULTIPLIER: ${POWER_ALERT_MULTIPLIER:-1.5}
+      POWER_ALERT_JUMP_KW: ${POWER_ALERT_JUMP_KW:-0.75}
+      POWER_WEB_CONCURRENCY: ${POWER_WEB_CONCURRENCY:-3}
+      POWER_GUNICORN_TIMEOUT: ${POWER_GUNICORN_TIMEOUT:-120}
+    volumes:
+      - /opt/home-energy-watch/input:/srv/home-energy-watch/input
+      - /opt/home-energy-watch/output:/srv/home-energy-watch/output
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped

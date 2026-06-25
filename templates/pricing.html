@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout">
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Pricing</p>
+          <h2>Choose the level that fits the review.</h2>
+          <p class="plain-note">Start with one home, then move up when you need to review more accounts.</p>
+        </div>
+      </div>
+
+      <div class="pricing-grid">
+        {% for plan in billing_plans %}
+          <article class="plan-card">
+            <div>
+              <p class="section-kicker">{{ plan.monthly_price_label }}</p>
+              <h3>{{ plan.name }}</h3>
+              <p class="plain-note">{{ plan.summary }}</p>
+            </div>
+            <p class="plain-note">
+              {% if plan.account_limit %}
+                Up to {{ plan.account_limit }} electric account{{ '' if plan.account_limit == 1 else 's' }}.
+              {% else %}
+                Built around the review team and the number of accounts involved.
+              {% endif %}
+            </p>
+            {% if customer_user %}
+              <form action="{{ url_for('billing_checkout') }}" method="post">
+                <input type="hidden" name="plan_id" value="{{ plan.id }}">
+                <button type="submit">
+                  {% if billing and billing.plan_id == plan.id and billing.status in ["active", "trialing"] %}
+                    Current plan
+                  {% elif plan.price_id %}
+                    Start {{ plan.name }}
+                  {% else %}
+                    Ask about {{ plan.name }}
+                  {% endif %}
+                </button>
+              </form>
+            {% else %}
+              <a class="button-link" href="{{ url_for('customer_signup') }}">Create account</a>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+  </main>
+{% endblock %}

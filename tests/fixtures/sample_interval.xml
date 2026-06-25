@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<UsagePoint>
+  <IntervalBlock>
+    <IntervalReading>
+      <timePeriod>
+        <start>1704092400</start>
+        <duration>3600</duration>
+      </timePeriod>
+      <value>1500</value>
+    </IntervalReading>
+    <IntervalReading>
+      <timePeriod>
+        <start>1704096000</start>
+        <duration>3600</duration>
+      </timePeriod>
+      <value>1500</value>
+    </IntervalReading>
+    <IntervalReading>
+      <timePeriod>
+        <start>1704103200</start>
+        <duration>3600</duration>
+      </timePeriod>
+      <value>200</value>
+    </IntervalReading>
+    <IntervalReading>
+      <timePeriod>
+        <start>1704178800</start>
+        <duration>3600</duration>
+      </timePeriod>
+      <value>400</value>
+    </IntervalReading>
+    <IntervalReading>
+      <timePeriod>
+        <start>1704182400</start>
+        <duration>3600</duration>
+      </timePeriod>
+      <value>400</value>
+    </IntervalReading>
+    <IntervalReading>
+      <timePeriod>
+        <start>1704189600</start>
+        <duration>3600</duration>
+      </timePeriod>
+      <value>250</value>
+    </IntervalReading>
+  </IntervalBlock>
+</UsagePoint>

@@ -1,0 +1,40 @@
+services:
+  power-detector:
+    build: .
+    ports:
+      - "${POWER_WEB_PORT:-8001}:8000"
+    environment:
+      POWER_INPUT_DIR: /data/input
+      POWER_OUTPUT_DIR: /data/output
+      POWER_DB_PATH: /data/output/power-history.db
+      POWER_DATABASE_URL: ${POWER_DATABASE_URL:-}
+      POWER_APP_SECRET: ${POWER_APP_SECRET:-local-power-data-only}
+      POWER_PUBLIC_BASE_URL: ${POWER_PUBLIC_BASE_URL:-http://localhost:8001}
+      POWER_MARKETING_BASE_URL: ${POWER_MARKETING_BASE_URL:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_HOME: ${STRIPE_PRICE_HOME:-}
+      STRIPE_PRICE_REVIEW: ${STRIPE_PRICE_REVIEW:-}
+      STRIPE_PRICE_AGENCY: ${STRIPE_PRICE_AGENCY:-}
+      POWER_TIMEZONE: America/New_York
+      POWER_NIGHT_START: "02:00"
+      POWER_NIGHT_END: "04:00"
+      POWER_MIN_NIGHT_KW: "1.0"
+      POWER_NIGHT_MULTIPLIER: "2.0"
+      POWER_WEB_CONCURRENCY: ${POWER_WEB_CONCURRENCY:-2}
+      POWER_GUNICORN_TIMEOUT: ${POWER_GUNICORN_TIMEOUT:-120}
+    volumes:
+      - ./data/input:/data/input
+      - ./data/output:/data/output
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped

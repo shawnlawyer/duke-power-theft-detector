@@ -1,0 +1,35 @@
+{% extends "marketing_base.html" %}
+
+{% block content %}
+  <main class="marketing-main compact-main">
+    <section class="page-intro">
+      <h1>For commissions that need a cleaner overnight-load review.</h1>
+      <p>Keep the source files, line up comparable periods, and hold onto a tighter record when the question needs follow-up.</p>
+    </section>
+
+    <section class="feature-grid single-column-grid">
+      <article class="feature-card">
+        <h2>Review one account or a small set of accounts</h2>
+        <p>The workspace is built for staff who need the file history, the household context, and the comparison notes in one place.</p>
+      </article>
+      <article class="feature-card">
+        <h2>Compare exports without losing the date alignment</h2>
+        <p>The compare flow matches equivalent periods, reports unmatched months, and points to the biggest kWh or baseline shifts.</p>
+      </article>
+      <article class="feature-card">
+        <h2>Keep the result in plain language</h2>
+        <p>The output is short enough to use in a follow-up and concrete enough to support the next regulator question.</p>
+      </article>
+    </section>
+
+    <section class="marketing-section final-call">
+      <div>
+        <h2>Open the review workspace on the app subdomain.</h2>
+        <p>The public site stays simple. The working review tools stay separate.</p>
+      </div>
+      <div class="hero-actions">
+        <a class="button button-primary" href="{{ commission_login_url }}">Commission sign in</a>
+      </div>
+    </section>
+  </main>
+{% endblock %}

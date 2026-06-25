@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ page_title }}</title>
+    <meta name="description" content="{{ page_description }}">
+    <meta name="robots" content="{{ robots_meta or 'index,follow' }}">
+    <link rel="canonical" href="{{ canonical_url }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='marketing.css') }}">
+    <script defer src="{{ url_for('static', filename='marketing.js') }}"></script>
+  </head>
+  <body class="marketing-body">
+    <div class="marketing-shell">
+      <header class="marketing-header">
+        <a class="brand-mark" href="{{ home_url }}">Home Energy Watch</a>
+        <nav class="marketing-nav" aria-label="Main">
+          <a href="{{ how_it_works_url }}" class="{% if active_page == 'how-it-works' %}active{% endif %}">How it works</a>
+          <a href="{{ for_homeowners_url }}" class="{% if active_page == 'for-homeowners' %}active{% endif %}">For homeowners</a>
+          <a href="{{ for_commissions_url }}" class="{% if active_page == 'for-commissions' %}active{% endif %}">For commissions</a>
+          <a href="{{ pricing_url }}" class="{% if active_page == 'pricing' %}active{% endif %}">Pricing</a>
+        </nav>
+        <div class="marketing-actions">
+          <a class="text-link" href="{{ home_login_url }}">Home sign in</a>
+          <a class="button button-primary" href="{{ commission_login_url }}">Open the app</a>
+        </div>
+      </header>
+
+      {% block content %}{% endblock %}
+
+      <footer class="marketing-footer">
+        <div>
+          <strong>Home Energy Watch</strong>
+          <p>Read the export you already have, keep the record straight, and follow the overnight load with more confidence.</p>
+        </div>
+        <div class="footer-links">
+          <a href="{{ home_url }}">Home</a>
+          <a href="{{ pricing_url }}">Pricing</a>
+          <a href="{{ how_it_works_url }}">How it works</a>
+          <a href="{{ for_commissions_url }}">For commissions</a>
+        </div>
+      </footer>
+    </div>
+  </body>
+</html>

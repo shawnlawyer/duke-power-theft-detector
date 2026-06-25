@@ -1,0 +1,48 @@
+{% extends "marketing_base.html" %}
+
+{% block content %}
+  <main class="marketing-main compact-main">
+    <section class="page-intro">
+      <h1>Plans that match the size of the review.</h1>
+      <p>
+        Start with one household, move up for a small review desk, or talk with us when the work belongs inside a commission
+        or agency workspace.
+      </p>
+    </section>
+
+    <section class="plan-grid large-plan-grid">
+      {% for plan in billing_plans %}
+        <article class="marketing-plan detail-plan">
+          <p class="plan-price">{{ plan.monthly_price_label }}</p>
+          <h2>{{ plan.name }}</h2>
+          <p>{{ plan.summary }}</p>
+          <ul class="plan-points">
+            {% if plan.account_limit %}
+              <li>Up to {{ plan.account_limit }} electric account{{ '' if plan.account_limit == 1 else 's' }}</li>
+            {% else %}
+              <li>Built around the review team and the number of accounts involved</li>
+            {% endif %}
+            <li>Interval uploads, overnight baselines, and flagged-night review</li>
+            <li>Comparison artifacts you can keep with the case record</li>
+          </ul>
+          {% if customer_user and not staff_user and plan.price_id %}
+            <form action="{{ app_base_url }}/billing/checkout" method="post">
+              <input type="hidden" name="plan_id" value="{{ plan.id }}">
+              <button type="submit" class="button button-primary">
+                {% if billing and billing.plan_id == plan.id and billing.status in ["active", "trialing"] %}
+                  Current plan
+                {% else %}
+                  Start {{ plan.name }}
+                {% endif %}
+              </button>
+            </form>
+          {% elif plan.id == "agency" %}
+            <a class="button button-secondary" href="{{ commission_login_url }}">Open commission workspace</a>
+          {% else %}
+            <a class="button button-primary" href="{{ start_home_url }}">Start {{ plan.name }}</a>
+          {% endif %}
+        </article>
+      {% endfor %}
+    </section>
+  </main>
+{% endblock %}

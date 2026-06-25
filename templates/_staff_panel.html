@@ -1,0 +1,74 @@
+<section class="section-block">
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">Commission access</p>
+      <h2>{{ staff_user.full_name }}</h2>
+      <p class="plain-note">{{ staff_user.role }} · {{ staff_user.email }}</p>
+    </div>
+  </div>
+
+  {% if staff_user.role == "Commissioner" %}
+    <form class="account-form" action="{{ url_for('invite_staff') }}" method="post">
+      <input type="hidden" name="return_to" value="{{ request.full_path if request.query_string else request.path }}">
+      <div class="field-grid">
+        <label>
+          <span>Name</span>
+          <input type="text" name="full_name" placeholder="Case analyst" required>
+        </label>
+        <label>
+          <span>Email</span>
+          <input type="email" name="email" placeholder="name@example.gov" required>
+        </label>
+        <label>
+          <span>Access</span>
+          <select name="role">
+            {% for role in staff_roles %}
+              <option value="{{ role }}" {% if role == "Analyst" %}selected{% endif %}>{{ role }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <p class="plain-note">Each person gets a one-time setup link and chooses their own password.</p>
+      <button type="submit">Invite staff member</button>
+    </form>
+
+    {% if latest_invite_url %}
+      <div class="invite-link-block">
+        <span class="label">Latest setup link</span>
+        <a class="invite-link" href="{{ latest_invite_url }}">{{ latest_invite_url }}</a>
+      </div>
+    {% endif %}
+  {% endif %}
+
+  <div class="table-wrap compact-table">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Access</th>
+          <th>Status</th>
+          <th>Last sign-in</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for member in staff_team %}
+          <tr>
+            <td>
+              <strong>{{ member.full_name }}</strong>
+              <div class="table-note">{{ member.email }}</div>
+            </td>
+            <td>{{ member.role }}</td>
+            <td>
+              {% if member.invite_pending %}
+                <span class="pill">Invite pending</span>
+              {% else %}
+                <span class="pill">{{ "Active" if member.is_active else "Inactive" }}</span>
+              {% endif %}
+            </td>
+            <td>{{ member.last_login_at or "Not yet" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout">
+    {% if analysis %}
+      {% include "_analysis_surface.html" %}
+    {% else %}
+      <section class="section-block empty-state">
+        <div>
+          <h2>Add history to start the review.</h2>
+          <p class="plain-note">Use History when you are ready to upload usage data for this account.</p>
+        </div>
+        <a class="button-link" href="{{ url_for('customer_history_page' if customer_mode|default(false) else 'history_page', account_number=account.account_number) }}">Add history</a>
+      </section>
+    {% endif %}
+  </main>
+{% endblock %}

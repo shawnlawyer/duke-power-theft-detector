@@ -1,0 +1,61 @@
+<section class="section-block upload-block">
+  <div class="section-header">
+    <div>
+      <h2>Add history</h2>
+      <p class="plain-note">Upload the next file for this account and it will become part of the same history.</p>
+    </div>
+  </div>
+
+  <div class="compatibility-list" aria-labelledby="supported-feeds-heading">
+    <h3 id="supported-feeds-heading">Files that work today</h3>
+    {% for feed in supported_feeds %}
+      <div class="compatibility-row">
+        <div>
+          <strong>{{ feed.customer_label }}</strong>
+          <span>{{ feed.customer_note }}</span>
+        </div>
+        <span class="file-type">{{ feed.file_types|join(", ") }}</span>
+      </div>
+    {% endfor %}
+  </div>
+
+  <form class="upload-form" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data">
+    <input type="hidden" name="account_number" value="{{ (analysis.account.account_number if analysis else account.account_number) }}">
+    <input type="hidden" name="display_name" value="{{ (analysis.account.display_name if analysis else account.display_name) }}">
+    <input type="hidden" name="energy_company" value="{{ (analysis.account.energy_company if analysis else account.energy_company) }}">
+    <input type="hidden" name="baseline_date" value="{{ (analysis.account.baseline_date if analysis and analysis.account.baseline_date else account.baseline_date or '') }}">
+
+    <label class="upload-field">
+      <span>History file</span>
+      <input type="file" name="xml_file" accept=".xml,.csv,application/xml,text/xml,text/csv" required>
+    </label>
+
+    <details class="advanced">
+      <summary>Alert rules</summary>
+      <div class="field-grid">
+        <label>
+          <span>Timezone</span>
+          <input type="text" name="tz" value="{{ defaults.tz }}">
+        </label>
+        <label>
+          <span>Night start</span>
+          <input type="time" name="night_start" value="{{ defaults.night_start }}">
+        </label>
+        <label>
+          <span>Night end</span>
+          <input type="time" name="night_end" value="{{ defaults.night_end }}">
+        </label>
+        <label>
+          <span>Minimum night kW</span>
+          <input type="number" name="min_night_kw" min="0" step="0.1" value="{{ defaults.min_night_kw }}">
+        </label>
+        <label>
+          <span>Night multiplier</span>
+          <input type="number" name="night_multiplier" min="1" step="0.1" value="{{ defaults.night_multiplier }}">
+        </label>
+      </div>
+    </details>
+
+    <button type="submit">Add history</button>
+  </form>
+</section>

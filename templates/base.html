@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ page_title or "Current Watch" }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+  </head>
+  <body>
+    <div class="shell">
+      {% set active_user = staff_user if staff_user else customer_user %}
+      <header class="site-header">
+        <div class="header-row">
+          <div>
+            <p class="eyebrow">Current Watch</p>
+            <h1>{{ page_title or ("Usage findings" if analysis else "Customer history") }}</h1>
+          </div>
+          {% if active_user %}
+            <div class="header-session">
+              <span>{{ active_user.full_name }}</span>
+              <span>{{ staff_user.role if staff_user else "Customer" }}</span>
+              <form action="{{ url_for('logout') }}" method="post">
+                <button type="submit" class="button-secondary button-small">Sign out</button>
+              </form>
+            </div>
+          {% endif %}
+        </div>
+        {% if active_user %}
+          {% set nav_account = active_account_number if active_account_number is defined else request.args.get('account_number', '') %}
+          <nav class="site-nav" aria-label="Main menu">
+            {% if staff_user %}
+              <a class="{% if request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('index', account_number=nav_account) }}">Review</a>
+              <a class="{% if request.endpoint == 'account_page' %}active{% endif %}" href="{{ url_for('account_page', account_number=nav_account) }}">Customer</a>
+              <a class="{% if request.endpoint == 'people_page' %}active{% endif %}" href="{{ url_for('people_page', account_number=nav_account) }}">People</a>
+              <a class="{% if request.endpoint == 'utility_page' %}active{% endif %}" href="{{ url_for('utility_page', account_number=nav_account) }}">Utility</a>
+              <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}">Inventory</a>
+              <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}">History</a>
+              <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}">Staff</a>
+            {% else %}
+              <a class="{% if request.endpoint == 'customer_dashboard' %}active{% endif %}" href="{{ url_for('customer_dashboard', account_number=nav_account) }}">Review</a>
+              <a class="{% if request.endpoint == 'customer_account_page' %}active{% endif %}" href="{{ url_for('customer_account_page', account_number=nav_account) }}">Account</a>
+              <a class="{% if request.endpoint == 'customer_utility_page' %}active{% endif %}" href="{{ url_for('customer_utility_page', account_number=nav_account) }}">Utility</a>
+              <a class="{% if request.endpoint == 'customer_inventory_page' %}active{% endif %}" href="{{ url_for('customer_inventory_page', account_number=nav_account) }}">Inventory</a>
+              <a class="{% if request.endpoint == 'customer_history_page' %}active{% endif %}" href="{{ url_for('customer_history_page', account_number=nav_account) }}">History</a>
+              <a class="{% if request.endpoint == 'customer_billing_page' %}active{% endif %}" href="{{ url_for('customer_billing_page', account_number=nav_account) }}">Billing</a>
+            {% endif %}
+          </nav>
+        {% endif %}
+      </header>
+
+      {% with messages = get_flashed_messages() %}
+        {% if messages %}
+          <section class="flash-list" aria-label="Messages">
+            {% for message in messages %}
+              <div class="flash">{{ message }}</div>
+            {% endfor %}
+          </section>
+        {% endif %}
+      {% endwith %}
+
+      {% block content %}{% endblock %}
+    </div>
+  </body>
+</html>

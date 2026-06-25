@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ns3:entry xmlns:espi="http://naesb.org/espi" xmlns:ns3="http://www.w3.org/2005/Atom">
+  <ns3:content>
+    <espi:IntervalBlock>
+      <espi:interval>
+        <espi:servicePointId>6003346123</espi:servicePointId>
+        <espi:serviceType>ELECTRIC</espi:serviceType>
+        <espi:unitOfMeasure>kWH</espi:unitOfMeasure>
+        <espi:secondsPerInterval>900</espi:secondsPerInterval>
+        <espi:duration>2700</espi:duration>
+        <espi:start>1688961600</espi:start>
+      </espi:interval>
+      <espi:IntervalReading>
+        <espi:timePeriod>
+          <espi:start>1688961600</espi:start>
+        </espi:timePeriod>
+        <espi:readingQuality>ACTUAL</espi:readingQuality>
+        <espi:value>0.35</espi:value>
+      </espi:IntervalReading>
+      <espi:IntervalReading>
+        <espi:timePeriod>
+          <espi:start>1688962500</espi:start>
+        </espi:timePeriod>
+        <espi:readingQuality>ACTUAL</espi:readingQuality>
+        <espi:value>0.33</espi:value>
+      </espi:IntervalReading>
+      <espi:IntervalReading>
+        <espi:timePeriod>
+          <espi:start>1688963400</espi:start>
+        </espi:timePeriod>
+        <espi:readingQuality>ACTUAL</espi:readingQuality>
+        <espi:value>0.82</espi:value>
+      </espi:IntervalReading>
+    </espi:IntervalBlock>
+  </ns3:content>
+</ns3:entry>

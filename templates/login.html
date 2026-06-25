@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout auth-layout">
+    <section class="section-block auth-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Commission sign in</p>
+          <h2>Open the review workspace.</h2>
+          <p class="plain-note">Use the email and password tied to your commission access.</p>
+        </div>
+      </div>
+
+      <form class="account-form" action="{{ url_for('login_post') }}" method="post">
+        <input type="hidden" name="next" value="{{ next_url or '' }}">
+        <label>
+          <span>Email</span>
+          <input type="email" name="email" required>
+        </label>
+        <label>
+          <span>Password</span>
+          <input type="password" name="password" required>
+        </label>
+        <button type="submit">Sign in</button>
+      </form>
+    </section>
+  </main>
+{% endblock %}

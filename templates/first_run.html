@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout auth-layout">
+    <section class="section-block auth-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Commission setup</p>
+          <h2>Create the first commissioner sign-in.</h2>
+          <p class="plain-note">This becomes the first person who can invite the rest of the review team.</p>
+        </div>
+      </div>
+
+      <form class="account-form" action="{{ url_for('create_first_run_user') }}" method="post">
+        <label>
+          <span>Name</span>
+          <input type="text" name="full_name" required>
+        </label>
+        <label>
+          <span>Email</span>
+          <input type="email" name="email" required>
+        </label>
+        <label>
+          <span>Password</span>
+          <input type="password" name="password" required>
+        </label>
+        <button type="submit">Create commissioner access</button>
+      </form>
+    </section>
+  </main>
+{% endblock %}

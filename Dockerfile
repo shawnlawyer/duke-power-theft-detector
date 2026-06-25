@@ -1,15 +1,15 @@
-# Use official Python runtime as a parent image
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Set working directory
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
-# Copy requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application
 COPY . .
 
-# Default command to run the application
-CMD ["python", "app.py", "--help"]
+EXPOSE 8000
+
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:8000 --workers ${POWER_WEB_CONCURRENCY:-2} --timeout ${POWER_GUNICORN_TIMEOUT:-120} app:web_app"]

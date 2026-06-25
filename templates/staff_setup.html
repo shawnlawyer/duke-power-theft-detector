@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout auth-layout">
+    <section class="section-block auth-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Finish sign in</p>
+          <h2>{{ invited_user.full_name }}</h2>
+          <p class="plain-note">{{ invited_user.role }} · {{ invited_user.email }}</p>
+        </div>
+      </div>
+
+      <form class="account-form" action="{{ url_for('accept_staff_invite_post', token=invite_token) }}" method="post">
+        <label>
+          <span>Name</span>
+          <input type="text" name="full_name" value="{{ invited_user.full_name }}" required>
+        </label>
+        <label>
+          <span>Password</span>
+          <input type="password" name="password" required>
+        </label>
+        <button type="submit">Set password and continue</button>
+      </form>
+    </section>
+  </main>
+{% endblock %}

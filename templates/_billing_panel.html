@@ -1,0 +1,28 @@
+{% set current_billing = billing if billing is defined and billing else none %}
+
+<section class="section-block">
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">Billing</p>
+      <h2>{{ current_billing.plan_name if current_billing else "Choose a plan" }}</h2>
+      {% if current_billing %}
+        <p class="plain-note">{{ current_billing.monthly_price_label }} · {{ current_billing.status_label }}</p>
+      {% else %}
+        <p class="plain-note">Pick the plan that matches how many accounts you want to review.</p>
+      {% endif %}
+    </div>
+    <a class="button-link" href="{{ url_for('pricing_page') }}">See plans</a>
+  </div>
+
+  {% if current_billing and current_billing.status in ["active", "trialing"] %}
+    <form action="{{ url_for('billing_portal') }}" method="post">
+      <button type="submit" class="button-secondary">Manage billing</button>
+    </form>
+  {% else %}
+    <form class="billing-action-form" action="{{ url_for('billing_checkout') }}" method="post">
+      <input type="hidden" name="plan_id" value="{{ current_billing.plan_id if current_billing else 'home' }}">
+      <button type="submit">Start billing</button>
+    </form>
+    <p class="plain-note">You can review the plan before payment is collected.</p>
+  {% endif %}
+</section>
