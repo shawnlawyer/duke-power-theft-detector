@@ -255,6 +255,12 @@ h3 {
   gap: 14px;
 }
 
+.comparison-file-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .compatibility-list {
   display: grid;
   gap: 10px;
@@ -278,6 +284,46 @@ h3 {
 
 .compatibility-row span {
   color: var(--muted);
+}
+
+.guide-row {
+  align-items: start;
+}
+
+.guide-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.access-guide-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.access-guide-card {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.access-guide-card h3 {
+  margin: 0;
+  font-size: 1.04rem;
+  line-height: 1.2;
+}
+
+.access-guide-card .guide-actions {
+  justify-content: flex-start;
 }
 
 .file-type {
@@ -879,6 +925,7 @@ th {
   .summary-strip,
   .finding-list,
   .two-column,
+  .comparison-file-grid,
   .account-search-form,
   .field-grid,
   .inventory-grid,
@@ -921,6 +968,14 @@ th {
   .compatibility-row {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+
+  .guide-actions {
+    justify-content: flex-start;
+  }
+
+  .access-guide-grid {
+    grid-template-columns: 1fr;
   }
 
   .file-type {

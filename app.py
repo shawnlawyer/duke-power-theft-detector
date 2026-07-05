@@ -201,6 +201,42 @@ ENERGY_COMPANY_GROUPS = (
         ),
     },
 )
+DUKE_MY_ACCOUNT_URL = "https://www.duke-energy.com/my-account/sign-in"
+GREEN_BUTTON_CONNECT_URL = "https://www.greenbuttonalliance.org/green-button-connect-my-data-cmd"
+GREEN_BUTTON_DOWNLOAD_URL = "https://www.greenbuttonalliance.org/green-button-download-my-data-dmd"
+NCUC_DATA_ACCESS_ORDER_URL = "https://starw1.ncuc.gov/NCUC/ViewFile.aspx?Id=b18eb0c3-6968-47d0-adbf-9f1b6ea8f680"
+UTILITY_ACCESS_GUIDES = (
+    {
+        "id": "duke_download",
+        "name": "Download your Duke history",
+        "status": "Works now",
+        "summary": "Sign in to Duke My Account, open your usage history, download the detailed interval file, then upload it here.",
+        "action_label": "Go to Duke My Account",
+        "action_url": DUKE_MY_ACCOUNT_URL,
+        "secondary_label": "About Green Button files",
+        "secondary_url": GREEN_BUTTON_DOWNLOAD_URL,
+    },
+    {
+        "id": "green_button_connect",
+        "name": "Green Button customer connection",
+        "status": "Ready when Duke opens access",
+        "summary": "This is the clean long-term path: the customer approves Home Energy Watch, the utility sends usage history, and the customer can revoke access.",
+        "action_label": "See the Green Button connection standard",
+        "action_url": GREEN_BUTTON_CONNECT_URL,
+        "secondary_label": "",
+        "secondary_url": "",
+    },
+    {
+        "id": "ncuc_data_access",
+        "name": "North Carolina data-access track",
+        "status": "Watching the rule",
+        "summary": "North Carolina has ordered a machine-readable customer data path. Home Energy Watch is built to use that path when the utility registration process is available.",
+        "action_label": "Read the NCUC order",
+        "action_url": NCUC_DATA_ACCESS_ORDER_URL,
+        "secondary_label": "",
+        "secondary_url": "",
+    },
+)
 
 INPUT_DIR = DEFAULT_INPUT_DIR
 OUTPUT_DIR = DEFAULT_OUTPUT_DIR
@@ -214,6 +250,13 @@ POSTGRES_SCHEMA_LOCK_KEY = 104251906
 COMPARE_MAJOR_DELTA_KWH_PCT = 15.0
 COMPARE_MAJOR_DELTA_BASELINE_KW = 0.25
 COMPARE_MAJOR_DELTA_FLAGGED_NIGHTS = 2
+WEATHER_HEAT_HIGH_F = float(os.getenv("POWER_WEATHER_HEAT_HIGH_F", "90"))
+WEATHER_HEAT_APPARENT_F = float(os.getenv("POWER_WEATHER_HEAT_APPARENT_F", "95"))
+WEATHER_HEAT_LOW_F = float(os.getenv("POWER_WEATHER_HEAT_LOW_F", "75"))
+WEATHER_COLD_LOW_F = float(os.getenv("POWER_WEATHER_COLD_LOW_F", "32"))
+WEATHER_COLD_HIGH_F = float(os.getenv("POWER_WEATHER_COLD_HIGH_F", "45"))
+WEATHER_STORM_PRECIP_IN = float(os.getenv("POWER_WEATHER_STORM_PRECIP_IN", "0.5"))
+WEATHER_STORM_WIND_MPH = float(os.getenv("POWER_WEATHER_STORM_WIND_MPH", "25"))
 BILLING_PLAN_DEFINITIONS = (
     {
         "id": "home",
@@ -363,6 +406,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Path to save the single-file CSV report or compare artifact",
     )
     parser.add_argument("--tz", default=DEFAULT_TZ, help="Timezone for interpreting timestamps")
+    parser.add_argument(
+        "--account-number",
+        help="Saved account number to use when adding cached weather context to single-file exports",
+    )
     parser.add_argument("--night-start", type=str, default=DEFAULT_NIGHT_START, help="Night window start (HH:MM)")
     parser.add_argument("--night-end", type=str, default=DEFAULT_NIGHT_END, help="Night window end (HH:MM)")
     parser.add_argument(
@@ -378,6 +425,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Flag a day when night average kW exceeds baseline times this multiplier",
     )
     parser.add_argument("--serve", action="store_true", help="Run the local web app instead of a one-shot report")
+    parser.add_argument(
+        "--sync-utilities",
+        action="store_true",
+        help="Sync saved utility connections once and exit",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Web host to bind when using --serve")
     parser.add_argument("--port", type=int, default=8000, help="Web port to bind when using --serve")
     return parser
@@ -656,6 +708,9 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
             secret_last4 TEXT,
             status TEXT NOT NULL,
             last_sync_at TEXT,
+            last_sync_status TEXT,
+            last_sync_error TEXT,
+            last_sync_attempt_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(account_id) REFERENCES accounts(id)
@@ -663,6 +718,9 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         """
     )
     conn.execute("ALTER TABLE utility_connections ADD COLUMN IF NOT EXISTS secret_token TEXT")
+    conn.execute("ALTER TABLE utility_connections ADD COLUMN IF NOT EXISTS last_sync_status TEXT")
+    conn.execute("ALTER TABLE utility_connections ADD COLUMN IF NOT EXISTS last_sync_error TEXT")
+    conn.execute("ALTER TABLE utility_connections ADD COLUMN IF NOT EXISTS last_sync_attempt_at TEXT")
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_utility_connections_account_id
@@ -923,6 +981,9 @@ def migrate_database(conn: DatabaseConnection) -> None:
             secret_last4 TEXT,
             status TEXT NOT NULL,
             last_sync_at TEXT,
+            last_sync_status TEXT,
+            last_sync_error TEXT,
+            last_sync_attempt_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(account_id) REFERENCES accounts(id)
@@ -932,6 +993,12 @@ def migrate_database(conn: DatabaseConnection) -> None:
     utility_columns = table_columns(conn, "utility_connections")
     if "secret_token" not in utility_columns:
         conn.execute("ALTER TABLE utility_connections ADD COLUMN secret_token TEXT")
+    if "last_sync_status" not in utility_columns:
+        conn.execute("ALTER TABLE utility_connections ADD COLUMN last_sync_status TEXT")
+    if "last_sync_error" not in utility_columns:
+        conn.execute("ALTER TABLE utility_connections ADD COLUMN last_sync_error TEXT")
+    if "last_sync_attempt_at" not in utility_columns:
+        conn.execute("ALTER TABLE utility_connections ADD COLUMN last_sync_attempt_at TEXT")
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_utility_connections_account_id
@@ -1335,6 +1402,10 @@ def list_energy_companies() -> list[str]:
     for group in ENERGY_COMPANY_GROUPS:
         companies.extend(str(company) for company in group["companies"])
     return companies
+
+
+def list_utility_access_guides() -> list[dict[str, str]]:
+    return [dict(guide) for guide in UTILITY_ACCESS_GUIDES]
 
 
 def clean_energy_company(value: str | None) -> str:
@@ -2135,6 +2206,9 @@ def serialize_utility_connection_row(row: sqlite3.Row | None) -> dict[str, objec
         "secret_last4": mapping.get("secret_last4"),
         "status": mapping.get("status") or "Not connected",
         "last_sync_at": mapping.get("last_sync_at"),
+        "last_sync_status": mapping.get("last_sync_status"),
+        "last_sync_error": mapping.get("last_sync_error"),
+        "last_sync_attempt_at": mapping.get("last_sync_attempt_at"),
     }
 
 
@@ -2144,7 +2218,8 @@ def list_utility_connections(account_number: str | None) -> list[dict[str, objec
         rows = conn.execute(
             """
             SELECT id, provider_name, connection_label, access_method, access_identifier,
-                   secret_last4, status, last_sync_at
+                   secret_last4, status, last_sync_at, last_sync_status,
+                   last_sync_error, last_sync_attempt_at
             FROM utility_connections
             WHERE account_id = ?
             ORDER BY provider_name, connection_label
@@ -2156,6 +2231,38 @@ def list_utility_connections(account_number: str | None) -> list[dict[str, objec
         serialized = serialize_utility_connection_row(row)
         if serialized is not None:
             connections.append(serialized)
+    return connections
+
+
+def list_saved_utility_connections_for_sync(account_number: str | None = None) -> list[dict[str, object]]:
+    with get_db_connection() as conn:
+        params: list[object] = []
+        where_clause = ""
+        if account_number:
+            where_clause = "WHERE accounts.account_number = ?"
+            params.append(normalize_account_number(account_number))
+        rows = conn.execute(
+            f"""
+            SELECT utility_connections.id, accounts.account_number,
+                   utility_connections.provider_name, utility_connections.connection_label,
+                   utility_connections.access_method, utility_connections.access_identifier,
+                   utility_connections.secret_last4, utility_connections.status,
+                   utility_connections.last_sync_at, utility_connections.last_sync_status,
+                   utility_connections.last_sync_error, utility_connections.last_sync_attempt_at
+            FROM utility_connections
+            JOIN accounts ON accounts.id = utility_connections.account_id
+            {where_clause}
+            ORDER BY accounts.account_number, utility_connections.provider_name, utility_connections.connection_label
+            """,
+            params,
+        ).fetchall()
+    connections: list[dict[str, object]] = []
+    for row in rows:
+        serialized = serialize_utility_connection_row(row)
+        if serialized is None:
+            continue
+        serialized["account_number"] = dict(row)["account_number"]
+        connections.append(serialized)
     return connections
 
 
@@ -2280,6 +2387,49 @@ def fetch_utility_connection_export(connection: dict[str, object]) -> dict[str, 
     return {"filename": filename, "content": content}
 
 
+def clean_sync_error(error: Exception | str, max_length: int = 240) -> str:
+    message = str(error).strip()
+    if not message and isinstance(error, Exception):
+        message = error.__class__.__name__
+    if len(message) <= max_length:
+        return message
+    return f"{message[: max_length - 1].rstrip()}..."
+
+
+def record_utility_connection_sync_success(account_number: str | None, connection_id: int) -> str:
+    sync_time = timestamp_now()
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        conn.execute(
+            """
+            UPDATE utility_connections
+            SET status = ?, last_sync_at = ?, last_sync_status = ?, last_sync_error = ?,
+                last_sync_attempt_at = ?, updated_at = ?
+            WHERE account_id = ? AND id = ?
+            """,
+            ("Synced", sync_time, "success", None, sync_time, sync_time, account["id"], int(connection_id)),
+        )
+        conn.commit()
+    return sync_time
+
+
+def record_utility_connection_sync_failure(account_number: str | None, connection_id: int, error: Exception | str) -> str:
+    sync_time = timestamp_now()
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        conn.execute(
+            """
+            UPDATE utility_connections
+            SET status = ?, last_sync_status = ?, last_sync_error = ?,
+                last_sync_attempt_at = ?, updated_at = ?
+            WHERE account_id = ? AND id = ?
+            """,
+            ("Sync failed", "failed", clean_sync_error(error), sync_time, sync_time, account["id"], int(connection_id)),
+        )
+        conn.commit()
+    return sync_time
+
+
 def sync_utility_connection(account_number: str | None, connection_id: int) -> dict[str, object]:
     ensure_data_dirs()
     connection = load_utility_connection_for_sync(account_number, connection_id)
@@ -2297,19 +2447,54 @@ def sync_utility_connection(account_number: str | None, connection_id: int) -> d
         destination,
         account_number=connection["account_number"],
     )
-    sync_time = timestamp_now()
-    with get_db_connection() as conn:
-        account = get_or_create_account(conn, connection["account_number"])
-        conn.execute(
-            """
-            UPDATE utility_connections
-            SET status = ?, last_sync_at = ?, updated_at = ?
-            WHERE account_id = ? AND id = ?
-            """,
-            ("Synced", sync_time, sync_time, account["id"], int(connection_id)),
-        )
-        conn.commit()
+    sync_time = record_utility_connection_sync_success(connection["account_number"], connection_id)
     return {**imported, "status": "Synced", "last_sync_at": sync_time}
+
+
+def run_scheduled_utility_sync(account_number: str | None = None) -> dict[str, object]:
+    ensure_database()
+    connections = list_saved_utility_connections_for_sync(account_number=account_number)
+    results: list[dict[str, object]] = []
+    for connection in connections:
+        connection_id = int(connection["id"])
+        connection_account = str(connection["account_number"])
+        result: dict[str, object] = {
+            "id": connection_id,
+            "account_number": connection_account,
+            "provider_name": connection["provider_name"],
+            "connection_label": connection["connection_label"],
+        }
+        try:
+            synced = sync_utility_connection(connection_account, connection_id)
+        except Exception as exc:
+            attempt_at = record_utility_connection_sync_failure(connection_account, connection_id, exc)
+            results.append(
+                {
+                    **result,
+                    "success": False,
+                    "error": clean_sync_error(exc),
+                    "last_sync_attempt_at": attempt_at,
+                }
+            )
+            continue
+        results.append(
+            {
+                **result,
+                "success": True,
+                "interval_count": synced.get("interval_count", 0),
+                "last_sync_at": synced.get("last_sync_at"),
+                "last_sync_attempt_at": synced.get("last_sync_at"),
+            }
+        )
+    succeeded = sum(1 for result in results if result["success"])
+    failed = len(results) - succeeded
+    return {
+        "account_number": normalize_account_number(account_number) if account_number else None,
+        "total": len(results),
+        "succeeded": succeeded,
+        "failed": failed,
+        "connections": results,
+    }
 
 
 def delete_utility_connection(account_number: str | None, connection_id: int) -> None:
@@ -2633,6 +2818,130 @@ def build_weather_payload(hourly: dict[str, list[object]], location_name: str, w
     }
 
 
+def join_natural(items: list[str]) -> str:
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def weather_value(summary: dict[str, object], key: str) -> float | None:
+    value = summary.get(key)
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
+
+
+def weather_metric_text(label: str, value: float | None, suffix: str) -> str | None:
+    if value is None:
+        return None
+    return f"{label} {value:.1f}{suffix}"
+
+
+def condition_suggests_storm(conditions: str) -> bool:
+    normalized = conditions.lower()
+    storm_terms = (
+        "thunderstorm",
+        "storm",
+        "hail",
+        "heavy rain",
+        "rain shower",
+        "freezing rain",
+        "heavy snow",
+        "snow shower",
+    )
+    return any(term in normalized for term in storm_terms)
+
+
+def build_weather_context(weather: dict[str, object] | None) -> dict[str, object]:
+    if not weather or not weather.get("available"):
+        return {
+            "available": False,
+            "effect": "weather_unavailable",
+            "signals": [],
+            "summary": str((weather or {}).get("reason") or "Weather was not available for that day."),
+            "location_name": (weather or {}).get("location_name"),
+            "conditions": None,
+            "high_temp_f": None,
+            "low_temp_f": None,
+            "high_apparent_f": None,
+            "precipitation_in": None,
+            "max_wind_mph": None,
+        }
+
+    summary = weather.get("summary") or {}
+    if not isinstance(summary, dict):
+        summary = {}
+    conditions = str(summary.get("conditions") or "Weather")
+    high_temp = round_value(weather_value(summary, "high_temp_f"), 1)
+    low_temp = round_value(weather_value(summary, "low_temp_f"), 1)
+    high_apparent = round_value(weather_value(summary, "high_apparent_f"), 1)
+    precipitation = round_value(weather_value(summary, "precipitation_in"), 2)
+    max_wind = round_value(weather_value(summary, "max_wind_mph"), 1)
+
+    signals: list[str] = []
+    phrases: list[str] = []
+    if (
+        (high_temp is not None and high_temp >= WEATHER_HEAT_HIGH_F)
+        or (high_apparent is not None and high_apparent >= WEATHER_HEAT_APPARENT_F)
+        or (low_temp is not None and low_temp >= WEATHER_HEAT_LOW_F)
+    ):
+        signals.append("unusual_heat")
+        phrases.append("hot weather")
+    if (
+        (low_temp is not None and low_temp <= WEATHER_COLD_LOW_F)
+        or (high_temp is not None and high_temp <= WEATHER_COLD_HIGH_F)
+    ):
+        signals.append("unusual_cold")
+        phrases.append("cold weather")
+    if (
+        (precipitation is not None and precipitation >= WEATHER_STORM_PRECIP_IN)
+        or (max_wind is not None and max_wind >= WEATHER_STORM_WIND_MPH)
+        or condition_suggests_storm(conditions)
+    ):
+        signals.append("storm_conditions")
+        phrases.append("storm conditions")
+
+    metric_bits = [
+        weather_metric_text("high", high_temp, " F"),
+        weather_metric_text("feels like", high_apparent, " F"),
+        weather_metric_text("low", low_temp, " F"),
+        weather_metric_text("rain", precipitation, " in"),
+        weather_metric_text("wind", max_wind, " mph"),
+    ]
+    metrics_text = "; ".join(bit for bit in metric_bits if bit)
+    if signals:
+        summary_text = f"{join_natural(phrases).capitalize()} could explain part of the overnight spike."
+        if metrics_text:
+            summary_text = f"{summary_text} {metrics_text}."
+        effect = "plausible_explanation"
+    else:
+        summary_text = (
+            "No unusual heat, cold, or storm signal appears in the available weather; "
+            "that makes the spike stand out more."
+        )
+        if metrics_text:
+            summary_text = f"{summary_text} {conditions}: {metrics_text}."
+        effect = "makes_spike_stand_out"
+
+    return {
+        "available": True,
+        "effect": effect,
+        "signals": signals,
+        "summary": summary_text,
+        "location_name": weather.get("location_name"),
+        "conditions": conditions,
+        "high_temp_f": high_temp,
+        "low_temp_f": low_temp,
+        "high_apparent_f": high_apparent,
+        "precipitation_in": precipitation,
+        "max_wind_mph": max_wind,
+    }
+
+
 def fetch_historical_weather(latitude: float, longitude: float, weather_date: str, tz_name: str) -> dict[str, object]:
     params = urlencode(
         {
@@ -2733,6 +3042,85 @@ def load_day_weather(account_number: str | None, weather_date: str | None, tz_na
         )
         conn.commit()
     return weather
+
+
+def date_key(value: object) -> str:
+    if isinstance(value, ddate):
+        return value.isoformat()
+    return str(value)
+
+
+def load_weather_contexts_for_suspicious_days(
+    summary: pd.DataFrame,
+    account_number: str | None,
+    tz_name: str,
+) -> dict[str, dict[str, object]]:
+    contexts: dict[str, dict[str, object]] = {}
+    if summary.empty:
+        return contexts
+
+    for reading_date, row in summary.iterrows():
+        if not bool(row.get("suspicious", False)):
+            continue
+        weather_date = date_key(reading_date)
+        try:
+            weather = load_day_weather(account_number, weather_date, tz_name)
+        except Exception:
+            weather = {"available": False, "reason": "Weather could not be loaded for that day."}
+        contexts[weather_date] = build_weather_context(weather)
+    return contexts
+
+
+def attach_weather_context_to_summary(
+    summary: pd.DataFrame,
+    weather_contexts: dict[str, dict[str, object]],
+) -> pd.DataFrame:
+    enriched = summary.copy()
+    default_columns: dict[str, object] = {
+        "weather_context": "",
+        "weather_effect": "",
+        "weather_signals": "",
+        "weather_location": "",
+        "weather_conditions": "",
+        "weather_high_temp_f": pd.NA,
+        "weather_low_temp_f": pd.NA,
+        "weather_high_apparent_f": pd.NA,
+        "weather_precipitation_in": pd.NA,
+        "weather_max_wind_mph": pd.NA,
+    }
+    for column, default_value in default_columns.items():
+        if column not in enriched.columns:
+            enriched[column] = default_value
+
+    for reading_date, context in weather_contexts.items():
+        try:
+            index_value: object = ddate.fromisoformat(reading_date)
+        except ValueError:
+            index_value = reading_date
+        if index_value not in enriched.index:
+            continue
+        enriched.loc[index_value, "weather_context"] = context.get("summary") or ""
+        enriched.loc[index_value, "weather_effect"] = context.get("effect") or ""
+        enriched.loc[index_value, "weather_signals"] = ",".join(str(signal) for signal in context.get("signals", []))
+        enriched.loc[index_value, "weather_location"] = context.get("location_name") or ""
+        enriched.loc[index_value, "weather_conditions"] = context.get("conditions") or ""
+        enriched.loc[index_value, "weather_high_temp_f"] = context.get("high_temp_f")
+        enriched.loc[index_value, "weather_low_temp_f"] = context.get("low_temp_f")
+        enriched.loc[index_value, "weather_high_apparent_f"] = context.get("high_apparent_f")
+        enriched.loc[index_value, "weather_precipitation_in"] = context.get("precipitation_in")
+        enriched.loc[index_value, "weather_max_wind_mph"] = context.get("max_wind_mph")
+    return enriched
+
+
+def attach_weather_context_to_rows(
+    rows: list[dict[str, object]],
+    weather_contexts: dict[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    for row in rows:
+        context = weather_contexts.get(str(row.get("date")))
+        if context is not None:
+            row["weather_context"] = context
+    return rows
 
 
 def serialize_load_item_row(row: sqlite3.Row | None) -> dict[str, object] | None:
@@ -3311,6 +3699,75 @@ def load_intervals_from_db(account_number: str | None = None, tz_name: str = DEF
     return frame
 
 
+def import_interval_frame_to_db(
+    frame: pd.DataFrame,
+    source_path: str,
+    account_number: str | None = None,
+    display_name: str | None = None,
+    energy_company: str | None = None,
+    baseline_date: str | None = None,
+    modified_time: float | None = None,
+    adapter_id: str = "interval_frame",
+    adapter_name: str = "Interval readings",
+) -> dict[str, object]:
+    if frame.empty:
+        raise ValueError("No interval rows were found to import.")
+
+    imported_at = timestamp_now()
+    modified_time = modified_time if modified_time is not None else datetime.now(tz.UTC).timestamp()
+
+    with get_db_connection() as conn:
+        account = get_or_create_account(
+            conn,
+            account_number,
+            display_name=display_name,
+            energy_company=energy_company,
+            baseline_date=baseline_date,
+        )
+        conn.executemany(
+            """
+            INSERT INTO interval_readings (account_id, start_epoch, duration_s, wh, source_path, imported_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, start_epoch, duration_s) DO UPDATE SET
+                wh = excluded.wh,
+                source_path = excluded.source_path,
+                imported_at = excluded.imported_at
+            """,
+            [
+                (
+                    int(account["id"]),
+                    int(row.start_epoch),
+                    int(row.duration_s),
+                    float(row.wh),
+                    source_path,
+                    imported_at,
+                )
+                for row in frame.itertuples(index=False)
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO imported_files (account_id, path, modified_time, interval_count, imported_at, service_point_id)
+            VALUES (?, ?, ?, ?, ?, NULL)
+            ON CONFLICT(account_id, path) DO UPDATE SET
+                modified_time = excluded.modified_time,
+                interval_count = excluded.interval_count,
+                imported_at = excluded.imported_at
+            """,
+            (int(account["id"]), source_path, modified_time, int(frame.shape[0]), imported_at),
+        )
+        conn.commit()
+
+    return {
+        "path": source_path,
+        "imported": True,
+        "interval_count": int(frame.shape[0]),
+        "account_number": account["account_number"],
+        "adapter_id": adapter_id,
+        "adapter_name": adapter_name,
+    }
+
+
 def import_interval_file_to_db(
     path: str | Path,
     account_number: str | None = None,
@@ -3352,58 +3809,17 @@ def import_interval_file_to_db(
 
     parsed = parse_interval_xml(path)
     frame = parsed.frame
-    imported_at = timestamp_now()
-
-    with get_db_connection() as conn:
-        account = get_or_create_account(
-            conn,
-            account_number,
-            display_name=display_name,
-            energy_company=energy_company,
-            baseline_date=baseline_date,
-        )
-        conn.executemany(
-            """
-            INSERT INTO interval_readings (account_id, start_epoch, duration_s, wh, source_path, imported_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(account_id, start_epoch, duration_s) DO UPDATE SET
-                wh = excluded.wh,
-                source_path = excluded.source_path,
-                imported_at = excluded.imported_at
-            """,
-            [
-                (
-                    int(account["id"]),
-                    int(row.start_epoch),
-                    int(row.duration_s),
-                    float(row.wh),
-                    path.as_posix(),
-                    imported_at,
-                )
-                for row in frame.itertuples(index=False)
-            ],
-        )
-        conn.execute(
-            """
-            INSERT INTO imported_files (account_id, path, modified_time, interval_count, imported_at, service_point_id)
-            VALUES (?, ?, ?, ?, ?, NULL)
-            ON CONFLICT(account_id, path) DO UPDATE SET
-                modified_time = excluded.modified_time,
-                interval_count = excluded.interval_count,
-                imported_at = excluded.imported_at
-            """,
-            (int(account["id"]), path.as_posix(), modified_time, int(frame.shape[0]), imported_at),
-        )
-        conn.commit()
-
-    return {
-        "path": path.as_posix(),
-        "imported": True,
-        "interval_count": int(frame.shape[0]),
-        "account_number": account["account_number"],
-        "adapter_id": parsed.adapter.adapter_id,
-        "adapter_name": parsed.adapter.display_name,
-    }
+    return import_interval_frame_to_db(
+        frame,
+        source_path=path.as_posix(),
+        account_number=account_number,
+        display_name=display_name,
+        energy_company=energy_company,
+        baseline_date=baseline_date,
+        modified_time=modified_time,
+        adapter_id=parsed.adapter.adapter_id,
+        adapter_name=parsed.adapter.display_name,
+    )
 
 
 def sync_input_files_to_db(
@@ -4004,10 +4420,14 @@ def build_analysis_snapshot(
     baseline: float | None,
     report_path: Path | None,
     settings: dict[str, object],
+    weather_contexts: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     rows = serialize_summary(summary)
+    weather_contexts = weather_contexts or {}
     suspicious_rows = [row for row in rows if row["suspicious"]]
     ranked_suspicious_days = build_ranked_suspicious_days(rows, alert_events, baseline, settings)
+    attach_weather_context_to_rows(suspicious_rows, weather_contexts)
+    attach_weather_context_to_rows(ranked_suspicious_days, weather_contexts)
     coverage_start = df["date"].min().isoformat() if not df.empty else None
     coverage_end = df["date"].max().isoformat() if not df.empty else None
     focus_date = ranked_suspicious_days[0]["date"] if ranked_suspicious_days else choose_focus_date(rows)
@@ -4046,6 +4466,7 @@ def analyze_interval_file(
     min_night_kw: float = DEFAULT_MIN_NIGHT_KW,
     night_multiplier: float = DEFAULT_NIGHT_MULTIPLIER,
     baseline_date: str | None = None,
+    account_number: str | None = None,
 ) -> tuple[pd.DataFrame, float | None, Path]:
     ensure_data_dirs()
 
@@ -4068,20 +4489,23 @@ def analyze_interval_file(
         night_multiplier=night_multiplier,
         baseline_date=baseline_date,
     )
-    summary_with_flags.to_csv(report_path, index=True)
+    weather_contexts = load_weather_contexts_for_suspicious_days(summary_with_flags, account_number, tz_name)
+    report_summary = attach_weather_context_to_summary(summary_with_flags, weather_contexts)
+    report_summary.to_csv(report_path, index=True)
     save_json_report(
         report_path,
         build_analysis_snapshot(
             input_path.name,
             df,
-            summary_with_flags,
+            report_summary,
             alert_events,
             baseline,
             report_path,
             settings,
+            weather_contexts=weather_contexts,
         ),
     )
-    return summary_with_flags, baseline, report_path
+    return report_summary, baseline, report_path
 
 
 def summarize_monthly_usage(summary: pd.DataFrame) -> pd.DataFrame:
@@ -4388,7 +4812,7 @@ def render_comparison_markdown(comparison: dict[str, object]) -> str:
             f"({overview['flagged_nights_delta']:+d})"
         ),
         "",
-        "Months worth a closer look:",
+        "Biggest follow-up points:",
     ]
 
     major_deltas = comparison["major_deltas"]
@@ -4442,6 +4866,122 @@ def save_comparison_artifact(report_path: Path, comparison: dict[str, object]) -
         pd.DataFrame(comparison["rows"]).to_csv(report_path, index=False)
         return
     report_path.write_text(render_comparison_markdown(comparison), encoding="utf-8")
+
+
+def build_web_comparison_csv_path(report_path: Path) -> Path:
+    return report_path.with_suffix(".csv")
+
+
+def build_comparison_downloads(report_path: Path, csv_report_path: Path | None = None) -> list[dict[str, str]]:
+    downloads = [
+        {
+            "label": "Markdown" if report_path.suffix.lower() == ".md" else report_path.suffix.lstrip(".").upper(),
+            "filename": report_path.name,
+        }
+    ]
+    if csv_report_path is not None:
+        downloads.append({"label": "CSV", "filename": csv_report_path.name})
+    return downloads
+
+
+def build_comparison_packet_context(
+    comparison: dict[str, object],
+    report_path: Path,
+    csv_report_path: Path | None = None,
+) -> dict[str, object]:
+    overview = comparison["overview"]
+    total_kwh_detail = (
+        f"{format_number(overview['left_total_kwh'], 1, ' kWh')} to "
+        f"{format_number(overview['right_total_kwh'], 1, ' kWh')} "
+        f"({format_percent(overview['total_kwh_delta_pct'])})."
+    )
+    baseline_detail = (
+        f"{format_number(overview['left_baseline_kw'], 2, ' kW')} to "
+        f"{format_number(overview['right_baseline_kw'], 2, ' kW')} "
+        f"({format_percent(overview['baseline_delta_pct'])})."
+    )
+    flagged_delta = int(overview["flagged_nights_delta"])
+    metrics = [
+        {
+            "label": "Matched months",
+            "value": str(overview["matched_periods"]),
+            "detail": f"Compared with {comparison['alignment_label']} matching.",
+        },
+        {
+            "label": "Total kWh change",
+            "value": format_signed_number(overview["total_kwh_delta"], 1, " kWh"),
+            "detail": total_kwh_detail,
+        },
+        {
+            "label": "Overnight baseline shift",
+            "value": format_signed_number(overview["baseline_delta_kw"], 2, " kW"),
+            "detail": baseline_detail,
+        },
+        {
+            "label": "Flagged-night change",
+            "value": f"{flagged_delta:+d}",
+            "detail": (
+                f"{overview['left_flagged_nights']} to {overview['right_flagged_nights']} flagged nights."
+            ),
+        },
+    ]
+
+    follow_up_points = [
+        {
+            "label": row["comparison_label"],
+            "detail": (
+                f"Total kWh {format_percent(row['total_kwh_delta_pct'])}, "
+                f"overnight baseline {format_signed_number(row['overnight_baseline_delta_kw'], 2, ' kW')}, "
+                f"flagged nights {int(row['flagged_nights_delta']):+d}."
+            ),
+        }
+        for row in comparison["major_deltas"]
+    ]
+    if not follow_up_points:
+        follow_up_points.append(
+            {
+                "label": "No large monthly swing",
+                "detail": "The matched months stayed below the review thresholds for kWh, baseline, and flagged nights.",
+            }
+        )
+
+    matched_rows = [
+        {
+            "label": row["comparison_label"],
+            "total_kwh": (
+                f"{format_number(row['left_total_kwh'], 1)} to "
+                f"{format_number(row['right_total_kwh'], 1)}"
+            ),
+            "total_delta": (
+                f"{format_signed_number(row['total_kwh_delta'], 1)} / "
+                f"{format_percent(row['total_kwh_delta_pct'])}"
+            ),
+            "overnight_baseline": (
+                f"{format_number(row['left_overnight_baseline_kw'], 2, ' kW')} to "
+                f"{format_number(row['right_overnight_baseline_kw'], 2, ' kW')}"
+            ),
+            "baseline_delta": (
+                f"{format_signed_number(row['overnight_baseline_delta_kw'], 2, ' kW')} / "
+                f"{format_percent(row['overnight_baseline_delta_pct'])}"
+            ),
+            "flagged_nights": f"{row['left_flagged_nights']} to {row['right_flagged_nights']}",
+            "flagged_delta": f"{int(row['flagged_nights_delta']):+d}",
+        }
+        for row in comparison["rows"]
+    ]
+
+    return {
+        "report_file": report_path.name,
+        "report_files": build_comparison_downloads(report_path, csv_report_path),
+        "left_label": comparison["left_label"],
+        "right_label": comparison["right_label"],
+        "alignment_label": comparison["alignment_label"],
+        "metrics": metrics,
+        "follow_up_points": follow_up_points,
+        "matched_rows": matched_rows,
+        "left_only_periods": comparison["left_only_periods"],
+        "right_only_periods": comparison["right_only_periods"],
+    }
 
 
 def analyze_interval_file_comparison(
@@ -4512,6 +5052,9 @@ def print_human_report(summary: pd.DataFrame, baseline: float | None) -> None:
         )
         if row["reasons"]:
             print(f"    reasons: {row['reasons']}")
+        weather_context = row.get("weather_context", "")
+        if weather_context:
+            print(f"    weather: {weather_context}")
     print("")
 
 
@@ -4673,6 +5216,7 @@ def build_report_context(
     household_profile: dict[str, object],
     load_items: list[dict[str, object]],
     imported_files_count: int = 0,
+    weather_contexts: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     snapshot = build_analysis_snapshot(
         subject_name,
@@ -4682,6 +5226,7 @@ def build_report_context(
         baseline,
         report_path,
         settings,
+        weather_contexts=weather_contexts,
     )
     focus_date = snapshot["focus_date"]
     load_summary = build_load_inventory_summary(load_items)
@@ -5060,6 +5605,7 @@ def create_web_app() -> Flask:
             "billing_plans": list_billing_plans(),
             "energy_company_groups": list_energy_company_groups(),
             "supported_feeds": list_supported_utility_adapters(),
+            "utility_access_guides": list_utility_access_guides(),
             "app_base_url": build_public_base_url(),
             "marketing_base_url": build_marketing_base_url(),
             "request_on_marketing_host": is_marketing_host(current_request_host()),
@@ -5597,6 +6143,43 @@ def create_web_app() -> Flask:
             return actor
         return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
 
+    @app.post("/compare")
+    def compare_exports():
+        ensure_data_dirs()
+        settings = parse_settings(request.form)
+        account_number = request.form.get("account_number")
+        actor = require_account_actor(account_number)
+        if not isinstance(actor, dict):
+            return actor
+
+        try:
+            left_path = save_uploaded_file(request.files.get("left_file"))
+            right_path = save_uploaded_file(request.files.get("right_file"))
+            comparison, report_path = analyze_interval_file_comparison(
+                left_input_path=left_path,
+                right_input_path=right_path,
+                tz_name=settings["tz"],
+                night_start_str=settings["night_start"],
+                night_end_str=settings["night_end"],
+                min_night_kw=settings["min_night_kw"],
+                night_multiplier=settings["night_multiplier"],
+            )
+            csv_report_path = build_web_comparison_csv_path(report_path)
+            save_comparison_artifact(csv_report_path, comparison)
+        except Exception as exc:
+            flash(str(exc))
+            endpoint = "customer_history_page" if actor["kind"] == "customer" else "history_page"
+            return redirect(url_for(endpoint, account_number=normalize_account_number(account_number)))
+
+        return render_template(
+            "comparison_report.html",
+            comparison_packet=build_comparison_packet_context(comparison, report_path, csv_report_path),
+            account=load_account(account_number),
+            active_account_number=normalize_account_number(account_number),
+            customer_mode=actor["kind"] == "customer",
+            page_title="Comparison packet",
+        )
+
     @app.get("/api/files")
     def api_files():
         staff_user = require_staff_user(api=True)
@@ -5709,14 +6292,20 @@ def create_web_app() -> Flask:
             baseline_date=account.get("baseline_date"),
         )
         report_path = build_output_path(Path("combined-history.xml"))
-        summary.to_csv(report_path, index=True)
+        weather_contexts = load_weather_contexts_for_suspicious_days(
+            summary,
+            account["account_number"],
+            settings["tz"],
+        )
+        report_summary = attach_weather_context_to_summary(summary, weather_contexts)
+        report_summary.to_csv(report_path, index=True)
         visible_accounts = list_accounts()
         if actor["kind"] == "customer":
             visible_accounts = list_customer_account_page(str(actor["user"]["email"]))["accounts"]
         analysis = build_report_context(
             "Customer history",
             df,
-            summary,
+            report_summary,
             alert_events,
             baseline,
             report_path,
@@ -5726,6 +6315,7 @@ def create_web_app() -> Flask:
             household_profile=load_household_profile(account["account_number"]),
             load_items=list_load_items(account["account_number"]),
             imported_files_count=count_imported_files(account["account_number"]),
+            weather_contexts=weather_contexts,
         )
         save_json_report(report_path, analysis)
         return jsonify(analysis)
@@ -5806,6 +6396,10 @@ def create_web_app() -> Flask:
             sync_utility_connection(account_number, connection_id)
             flash("Utility history synced.")
         except Exception as exc:
+            try:
+                record_utility_connection_sync_failure(account_number, connection_id, exc)
+            except Exception:
+                pass
             flash(str(exc))
         return redirect_back_or_account(account_number)
 
@@ -5884,7 +6478,13 @@ def create_web_app() -> Flask:
                 baseline_date=account.get("baseline_date"),
             )
             report_path = build_output_path(Path("combined-history.xml"))
-            summary.to_csv(report_path, index=True)
+            weather_contexts = load_weather_contexts_for_suspicious_days(
+                summary,
+                account["account_number"],
+                settings["tz"],
+            )
+            report_summary = attach_weather_context_to_summary(summary, weather_contexts)
+            report_summary.to_csv(report_path, index=True)
         except Exception as exc:
             flash(str(exc))
             return redirect(url_for("index", account_number=normalize_account_number(account_number)))
@@ -5892,7 +6492,7 @@ def create_web_app() -> Flask:
         analysis = build_report_context(
             "Customer history",
             df,
-            summary,
+            report_summary,
             alert_events,
             baseline,
             report_path,
@@ -5902,6 +6502,7 @@ def create_web_app() -> Flask:
             household_profile=load_household_profile(account["account_number"]),
             load_items=list_load_items(account["account_number"]),
             imported_files_count=count_imported_files(account["account_number"]),
+            weather_contexts=weather_contexts,
         )
         account_page = list_account_page()
         rendered_accounts = list_accounts()
@@ -5934,6 +6535,21 @@ def create_web_app() -> Flask:
 web_app = create_web_app()
 
 
+def print_scheduled_utility_sync_report(summary: dict[str, object]) -> None:
+    total = int(summary["total"])
+    succeeded = int(summary["succeeded"])
+    failed = int(summary["failed"])
+    print(f"Utility sync: {succeeded}/{total} succeeded, {failed} failed")
+    for connection in summary["connections"]:
+        account_number = connection["account_number"]
+        label = f"{account_number} {connection['provider_name']} - {connection['connection_label']}"
+        if connection["success"]:
+            interval_count = int(connection.get("interval_count") or 0)
+            print(f"[ok] {label}: imported {interval_count} intervals")
+        else:
+            print(f"[failed] {label}: {connection['error']}")
+
+
 def main() -> None:
     parser = build_cli_parser()
     args = parser.parse_args()
@@ -5943,8 +6559,19 @@ def main() -> None:
         web_app.run(host=args.host, port=args.port, debug=False)
         return
 
+    if args.sync_utilities:
+        try:
+            sync_summary = run_scheduled_utility_sync(account_number=args.account_number)
+        except Exception as exc:
+            print(f"Error syncing utilities: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print_scheduled_utility_sync_report(sync_summary)
+        if sync_summary["failed"]:
+            sys.exit(1)
+        return
+
     if not args.input:
-        parser.error("--input is required unless --serve is used")
+        parser.error("--input is required unless --serve or --sync-utilities is used")
 
     try:
         if args.compare_to:
@@ -5970,6 +6597,7 @@ def main() -> None:
             night_end_str=args.night_end,
             min_night_kw=args.min_night_kw,
             night_multiplier=args.night_multiplier,
+            account_number=args.account_number,
         )
     except Exception as exc:
         print(f"Error analyzing XML: {exc}", file=sys.stderr)

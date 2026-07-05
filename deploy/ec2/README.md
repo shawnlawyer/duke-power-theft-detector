@@ -25,3 +25,25 @@ docker compose --env-file deploy/ec2/.env.production -f deploy/ec2/docker-compos
 The app will create or update its tables on startup. Local file uploads and CSV exports stay on the EC2 host under `/opt/home-energy-watch`.
 
 The same app service can answer both hostnames. The apex domain serves the public pages, and the `app.` subdomain serves the working app.
+
+## Scheduled utility sync
+
+Run the saved utility-connection sync once from the EC2 checkout:
+
+```bash
+docker compose --env-file deploy/ec2/.env.production -f deploy/ec2/docker-compose.prod.yml run --rm power-detector python app.py --sync-utilities
+```
+
+To limit the job to one account:
+
+```bash
+docker compose --env-file deploy/ec2/.env.production -f deploy/ec2/docker-compose.prod.yml run --rm power-detector python app.py --sync-utilities --account-number primary
+```
+
+Cron example for a daily 2:15 a.m. sync:
+
+```cron
+15 2 * * * cd /home/ubuntu/home-energy-watch && docker compose --env-file deploy/ec2/.env.production -f deploy/ec2/docker-compose.prod.yml run --rm power-detector python app.py --sync-utilities >> /var/log/home-energy-watch-utility-sync.log 2>&1
+```
+
+The command exits `0` when all saved connections sync and exits `1` when any connection fails. The app still records per-connection status, last attempt time, last successful sync time, and the latest error so the account page shows what happened after the cron run.

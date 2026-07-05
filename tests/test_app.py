@@ -1,4 +1,5 @@
 import json
+from io import BytesIO
 from datetime import date as ddate
 from pathlib import Path
 
@@ -50,6 +51,13 @@ def make_summary(rows):
     return frame.set_index("date")
 
 
+def comparison_csv(values):
+    rows = ["interval_start,interval_end,usage_kwh"]
+    for start, end, usage_kwh in values:
+        rows.append(f"{start},{end},{usage_kwh}")
+    return ("\n".join(rows) + "\n").encode()
+
+
 def test_analyze_interval_file_flags_expected_day(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
 
@@ -77,6 +85,49 @@ def test_analyze_interval_file_writes_ranked_json_report(tmp_path, monkeypatch):
     assert payload["ranked_suspicious_days"][0]["alert_count"] >= 1
     assert report_path.name in app.list_report_files()
     assert json_path.name in app.list_report_files()
+
+
+def test_analyze_interval_file_writes_weather_context_to_artifacts(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+
+    def fake_load_day_weather(account_number, weather_date, tz_name):
+        assert account_number == "acct-1"
+        assert weather_date == "2024-01-01"
+        assert tz_name == "America/New_York"
+        return {
+            "available": True,
+            "location_name": "Charlotte, North Carolina, United States",
+            "summary": {
+                "high_temp_f": 96.4,
+                "low_temp_f": 77.2,
+                "high_apparent_f": 103.1,
+                "precipitation_in": 0.02,
+                "max_wind_mph": 12.5,
+                "conditions": "Clear",
+            },
+            "hourly": [],
+        }
+
+    monkeypatch.setattr(app, "load_day_weather", fake_load_day_weather)
+
+    _, _, report_path = app.analyze_interval_file(
+        FIXTURE,
+        output_path=tmp_path / "output" / "weather-report.csv",
+        account_number="acct-1",
+    )
+    payload = json.loads(report_path.with_suffix(".json").read_text())
+    csv_rows = pd.read_csv(report_path)
+
+    flagged_day = payload["ranked_suspicious_days"][0]
+    assert flagged_day["weather_context"]["available"] is True
+    assert flagged_day["weather_context"]["signals"] == ["unusual_heat"]
+    assert flagged_day["weather_context"]["effect"] == "plausible_explanation"
+    assert "hot weather" in flagged_day["weather_context"]["summary"].lower()
+
+    csv_row = csv_rows[csv_rows["date"] == "2024-01-01"].iloc[0]
+    assert csv_row["weather_signals"] == "unusual_heat"
+    assert "hot weather" in csv_row["weather_context"].lower()
+    assert csv_row["weather_high_temp_f"] == 96.4
 
 
 def test_compute_alert_events_finds_midnight_spike():
@@ -384,6 +435,105 @@ def test_sync_utility_connection_imports_customer_history(tmp_path, monkeypatch)
     assert app.list_utility_connections("acct-1")[0]["last_sync_at"]
 
 
+def test_run_scheduled_utility_sync_records_success_and_failure(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setenv("POWER_APP_SECRET", "sync-test-secret")
+
+    successful = app.save_utility_connection(
+        "acct-1",
+        {
+            "provider_name": "Duke Energy",
+            "connection_label": "Main meter",
+            "access_method": "customer_api_key",
+            "access_identifier": "https://utility.example.test/success.xml",
+            "access_secret": "customer-approved-key-1234",
+        },
+    )
+    failed = app.save_utility_connection(
+        "acct-2",
+        {
+            "provider_name": "Duke Energy",
+            "connection_label": "Garage meter",
+            "access_method": "customer_api_key",
+            "access_identifier": "https://utility.example.test/fail.xml",
+            "access_secret": "customer-approved-key-5678",
+        },
+    )
+
+    def fake_fetch(connection_for_sync):
+        if connection_for_sync["access_identifier"].endswith("fail.xml"):
+            raise RuntimeError("utility export unavailable")
+        return {"filename": "duke-history.xml", "content": FIXTURE.read_bytes()}
+
+    monkeypatch.setattr(app, "fetch_utility_connection_export", fake_fetch)
+
+    result = app.run_scheduled_utility_sync()
+
+    assert result["total"] == 2
+    assert result["succeeded"] == 1
+    assert result["failed"] == 1
+    assert [item["success"] for item in result["connections"]] == [True, False]
+    assert app.count_imported_files("acct-1") == 1
+    assert app.count_imported_files("acct-2") == 0
+
+    successful_status = app.list_utility_connections("acct-1")[0]
+    failed_status = app.list_utility_connections("acct-2")[0]
+    assert successful_status["id"] == successful["id"]
+    assert successful_status["status"] == "Synced"
+    assert successful_status["last_sync_status"] == "success"
+    assert successful_status["last_sync_error"] is None
+    assert successful_status["last_sync_at"]
+    assert successful_status["last_sync_attempt_at"]
+    assert failed_status["id"] == failed["id"]
+    assert failed_status["status"] == "Sync failed"
+    assert failed_status["last_sync_status"] == "failed"
+    assert failed_status["last_sync_at"] is None
+    assert failed_status["last_sync_attempt_at"]
+    assert "utility export unavailable" in failed_status["last_sync_error"]
+
+
+def test_run_scheduled_utility_sync_can_limit_to_one_account(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setenv("POWER_APP_SECRET", "sync-test-secret")
+
+    app.save_utility_connection(
+        "acct-1",
+        {
+            "provider_name": "Duke Energy",
+            "connection_label": "Main meter",
+            "access_method": "customer_api_key",
+            "access_identifier": "https://utility.example.test/acct-1.xml",
+            "access_secret": "customer-approved-key-1234",
+        },
+    )
+    app.save_utility_connection(
+        "acct-2",
+        {
+            "provider_name": "Duke Energy",
+            "connection_label": "Garage meter",
+            "access_method": "customer_api_key",
+            "access_identifier": "https://utility.example.test/acct-2.xml",
+            "access_secret": "customer-approved-key-5678",
+        },
+    )
+    synced_accounts = []
+
+    def fake_fetch(connection_for_sync):
+        synced_accounts.append(connection_for_sync["account_number"])
+        return {"filename": "duke-history.xml", "content": FIXTURE.read_bytes()}
+
+    monkeypatch.setattr(app, "fetch_utility_connection_export", fake_fetch)
+
+    result = app.run_scheduled_utility_sync(account_number="acct-2")
+
+    assert result["total"] == 1
+    assert result["succeeded"] == 1
+    assert result["failed"] == 0
+    assert synced_accounts == ["acct-2"]
+    assert app.list_utility_connections("acct-1")[0]["last_sync_status"] is None
+    assert app.list_utility_connections("acct-2")[0]["last_sync_status"] == "success"
+
+
 def test_customer_can_sync_own_utility_connection(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
@@ -421,6 +571,41 @@ def test_customer_can_sync_own_utility_connection(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert b"Utility history synced." in response.data
     assert app.count_imported_files("acct-1") == 1
+
+
+def test_customer_utility_page_does_not_offer_chrome_helper_duke_flow(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+
+    app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.save_account_profile(
+        "acct-1",
+        display_name="Allowed home",
+        energy_company="Duke Energy Carolinas, LLC",
+    )
+    app.add_account_access_email("acct-1", "owner@example.com", full_name="Home Owner", access_level="Manager")
+
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+    response = client.get("/customer/utility", query_string={"account_number": "acct-1"})
+    start_response = client.get(
+        "/utility-connection/duke/start",
+        query_string={"account_number": "acct-1"},
+    )
+    finish_response = client.post(
+        "/utility-connection/duke/complete",
+        data={"account_number": "acct-1", "authorization_code": "duke-code-123"},
+    )
+
+    assert response.status_code == 200
+    assert b"Download your Duke history" in response.data
+    assert b"Go to Duke My Account" in response.data
+    assert b"Green Button customer connection" in response.data
+    assert b"North Carolina data-access track" in response.data
+    assert b"Open Duke sign-in" not in response.data
+    assert b"Duke sign-in code" not in response.data
+    assert start_response.status_code == 404
+    assert finish_response.status_code == 404
 
 
 def test_account_page_filters_by_name_or_address_and_paginates(tmp_path, monkeypatch):
@@ -871,6 +1056,19 @@ def test_supported_feeds_endpoint_returns_registry(tmp_path, monkeypatch):
     }
 
 
+def test_utility_access_guides_cover_manual_connect_and_ncuc_paths():
+    guides = app.list_utility_access_guides()
+
+    assert {guide["id"] for guide in guides} == {
+        "duke_download",
+        "green_button_connect",
+        "ncuc_data_access",
+    }
+    assert any("Duke My Account" in guide["action_label"] for guide in guides)
+    assert any("Green Button" in guide["name"] for guide in guides)
+    assert any("NCUC" in guide["action_label"] for guide in guides)
+
+
 def test_load_day_weather_uses_geocoded_address_and_cache(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.save_account_profile("acct-1", display_name="Test Home")
@@ -930,6 +1128,61 @@ def test_load_day_weather_uses_geocoded_address_and_cache(tmp_path, monkeypatch)
     assert calls["count"] == 2
     assert round(float(profile["latitude"]), 4) == 35.2271
     assert profile["weather_location"] == "Charlotte, North Carolina, United States"
+
+
+def test_build_weather_context_classifies_heat_storm_and_mild_days():
+    hot = app.build_weather_context(
+        {
+            "available": True,
+            "location_name": "Charlotte, North Carolina, United States",
+            "summary": {
+                "high_temp_f": 95.0,
+                "low_temp_f": 76.0,
+                "high_apparent_f": 101.2,
+                "precipitation_in": 0.0,
+                "max_wind_mph": 9.0,
+                "conditions": "Clear",
+            },
+        }
+    )
+    storm = app.build_weather_context(
+        {
+            "available": True,
+            "location_name": "Charlotte, North Carolina, United States",
+            "summary": {
+                "high_temp_f": 67.0,
+                "low_temp_f": 54.0,
+                "high_apparent_f": 67.0,
+                "precipitation_in": 0.8,
+                "max_wind_mph": 31.0,
+                "conditions": "Thunderstorm",
+            },
+        }
+    )
+    mild = app.build_weather_context(
+        {
+            "available": True,
+            "location_name": "Charlotte, North Carolina, United States",
+            "summary": {
+                "high_temp_f": 72.0,
+                "low_temp_f": 55.0,
+                "high_apparent_f": 72.0,
+                "precipitation_in": 0.0,
+                "max_wind_mph": 7.0,
+                "conditions": "Mostly clear",
+            },
+        }
+    )
+
+    assert hot["signals"] == ["unusual_heat"]
+    assert hot["effect"] == "plausible_explanation"
+    assert "hot weather" in hot["summary"].lower()
+    assert storm["signals"] == ["storm_conditions"]
+    assert storm["effect"] == "plausible_explanation"
+    assert "storm" in storm["summary"].lower()
+    assert mild["signals"] == []
+    assert mild["effect"] == "makes_spike_stand_out"
+    assert "stand out" in mild["summary"].lower()
 
 
 def test_ensure_schema_ready_uses_postgres_advisory_lock(monkeypatch):
@@ -998,6 +1251,100 @@ def test_day_detail_api_returns_series_and_inventory(tmp_path, monkeypatch):
     assert payload["previous_day"] is None
     assert payload["baseline_day"]["date"] == "2024-01-02"
     assert payload["load_summary"]["all_on_kw"] == 4.515
+
+
+def test_history_page_offers_two_file_comparison_upload(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+
+    client = app.web_app.test_client()
+    sign_in(client)
+
+    response = client.get("/history")
+
+    assert response.status_code == 200
+    assert b"Add history" in response.data
+    assert b'name="xml_file"' in response.data
+    assert b"Compare two exports" in response.data
+    assert b'action="/compare"' in response.data
+    assert b'name="left_file"' in response.data
+    assert b'name="right_file"' in response.data
+    assert b"Download a packet with matched months" in response.data
+
+
+def test_web_comparison_upload_creates_downloadable_packet(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+
+    client = app.web_app.test_client()
+    sign_in(client)
+
+    left_csv = comparison_csv(
+        [
+            ("2024-01-01T02:00:00-05:00", "2024-01-01T03:00:00-05:00", 0.5),
+            ("2024-01-01T03:00:00-05:00", "2024-01-01T04:00:00-05:00", 0.5),
+            ("2024-01-02T02:00:00-05:00", "2024-01-02T03:00:00-05:00", 0.6),
+            ("2024-01-02T03:00:00-05:00", "2024-01-02T04:00:00-05:00", 0.6),
+        ]
+    )
+    right_csv = comparison_csv(
+        [
+            ("2024-01-01T02:00:00-05:00", "2024-01-01T03:00:00-05:00", 1.2),
+            ("2024-01-01T03:00:00-05:00", "2024-01-01T04:00:00-05:00", 1.2),
+            ("2024-01-02T02:00:00-05:00", "2024-01-02T03:00:00-05:00", 1.4),
+            ("2024-01-02T03:00:00-05:00", "2024-01-02T04:00:00-05:00", 1.4),
+        ]
+    )
+
+    response = client.post(
+        "/compare",
+        data={
+            "account_number": "acct-1",
+            "display_name": "Main house",
+            "energy_company": "Duke Energy Carolinas, LLC",
+            "baseline_date": "",
+            "left_file": (BytesIO(left_csv), "earlier.csv"),
+            "right_file": (BytesIO(right_csv), "later.csv"),
+            "tz": "America/New_York",
+            "night_start": "02:00",
+            "night_end": "04:00",
+            "min_night_kw": "1.0",
+            "night_multiplier": "2.0",
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 200
+    assert b"Comparison packet" in response.data
+    assert b"Matched months" in response.data
+    assert b"Total kWh change" in response.data
+    assert b"Download Markdown" in response.data
+    assert b"Download CSV" in response.data
+
+    packets = list((tmp_path / "output").glob("*.md"))
+    csv_artifacts = list((tmp_path / "output").glob("*.csv"))
+    assert len(packets) == 1
+    assert len(csv_artifacts) == 1
+    packet_text = packets[0].read_text()
+    csv_text = csv_artifacts[0].read_text()
+    assert "# Duke interval comparison" in packet_text
+    assert "- Matched months: 1" in packet_text
+    assert "- Total kWh: 2.2 -> 5.2 (+3.0 / +136.4%)" in packet_text
+    assert "- Overnight baseline: 0.55 kW -> 1.30 kW (+0.75 kW / +136.4%)" in packet_text
+    assert "- Flagged nights: 0 -> 2 (+2)" in packet_text
+    assert "Biggest follow-up points:" in packet_text
+    assert "comparison_label" in csv_text
+    assert "Jan 2024 vs Jan 2024" in csv_text
+
+    download = client.get(f"/reports/{packets[0].name}")
+    assert download.status_code == 200
+    assert b"# Duke interval comparison" in download.data
+    assert "attachment" in download.headers["Content-Disposition"]
+
+    csv_download = client.get(f"/reports/{csv_artifacts[0].name}")
+    assert csv_download.status_code == 200
+    assert b"comparison_label" in csv_download.data
+    assert "attachment" in csv_download.headers["Content-Disposition"]
 
 
 def test_database_settings_redact_postgres_password(monkeypatch):

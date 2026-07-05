@@ -92,6 +92,7 @@ sync_repo() {
     --exclude '*.pyc' \
     --exclude '.env.omen' \
     --exclude 'data/' \
+    --exclude 'runtime/' \
     -e "ssh -i $OMEN_SSH_KEY -o StrictHostKeyChecking=no" \
     "$ROOT_DIR"/ \
     "$SSH_TARGET:$OMEN_REMOTE_ROOT/"

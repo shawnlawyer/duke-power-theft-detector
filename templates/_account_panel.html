@@ -212,8 +212,24 @@
     <div>
       <p class="section-kicker">Utility connection</p>
       <h2>Utility data connection</h2>
-      <p class="plain-note">Store the customer-approved access this system will use to collect future usage history.</p>
+      <p class="plain-note">Use the file download today. Save a customer-approved utility connection when the utility provides one.</p>
     </div>
+  </div>
+
+  <div class="access-guide-grid" aria-label="Ways to bring in utility history">
+    {% for guide in utility_access_guides %}
+      <article class="access-guide-card">
+        <p class="section-kicker">{{ guide.status }}</p>
+        <h3>{{ guide.name }}</h3>
+        <p class="plain-note">{{ guide.summary }}</p>
+        <div class="guide-actions">
+          <a class="button-link" href="{{ guide.action_url }}" target="_blank" rel="noopener">{{ guide.action_label }}</a>
+          {% if guide.secondary_url %}
+            <a class="inline-link" href="{{ guide.secondary_url }}" target="_blank" rel="noopener">{{ guide.secondary_label }}</a>
+          {% endif %}
+        </div>
+      </article>
+    {% endfor %}
   </div>
 
   <form class="account-form" action="{{ url_for('save_connection') }}" method="post">
@@ -235,23 +251,23 @@
       </label>
       <label>
         <span>Connection name</span>
-        <input type="text" name="connection_label" placeholder="Main electric login" required>
+        <input type="text" name="connection_label" placeholder="Main electric account" required>
       </label>
       <label>
         <span>Access type</span>
         <select name="access_method">
-          <option value="customer_api_key">Customer API key</option>
-          <option value="customer_login">Customer login</option>
-          <option value="utility_authorization">Utility authorization</option>
+          <option value="utility_authorization">Customer-approved utility feed</option>
+          <option value="customer_api_key">Customer-approved key</option>
+          <option value="customer_login">Customer-provided export link</option>
         </select>
       </label>
       <label>
-        <span>Login or key name</span>
-        <input type="text" name="access_identifier" placeholder="name@example.com">
+        <span>Export link</span>
+        <input type="text" name="access_identifier" placeholder="https://utility.example.com/export.xml">
       </label>
       <label class="wide-field">
         <span>Access key</span>
-        <input type="password" name="access_secret" autocomplete="new-password" placeholder="Paste the customer-approved key">
+        <input type="password" name="access_secret" autocomplete="new-password" placeholder="Paste the customer-approved key, if one was issued">
       </label>
     </div>
     <button type="submit">Save connection</button>
@@ -265,6 +281,7 @@
             <th>Power company</th>
             <th>Connection</th>
             <th>Status</th>
+            <th>Recent sync</th>
             <th>Key</th>
             <th></th>
           </tr>
@@ -279,7 +296,24 @@
                   <div class="table-note">{{ connection.access_identifier }}</div>
                 {% endif %}
               </td>
-              <td>{{ connection.status }}</td>
+              <td>
+                {{ connection.status }}
+                {% if connection.last_sync_error %}
+                  <div class="table-note">{{ connection.last_sync_error }}</div>
+                {% endif %}
+              </td>
+              <td>
+                {% if connection.last_sync_attempt_at %}
+                  {{ connection.last_sync_attempt_at }}
+                  {% if connection.last_sync_at and connection.last_sync_status != "success" %}
+                    <div class="table-note">Last successful sync {{ connection.last_sync_at }}</div>
+                  {% endif %}
+                {% elif connection.last_sync_at %}
+                  {{ connection.last_sync_at }}
+                {% else %}
+                  Not synced yet
+                {% endif %}
+              </td>
               <td>{% if connection.secret_last4 %}Ending {{ connection.secret_last4 }}{% else %}Not saved{% endif %}</td>
               <td class="action-cell">
                 <form action="{{ url_for('sync_connection', connection_id=connection.id) }}" method="post">

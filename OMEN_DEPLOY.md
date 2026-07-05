@@ -2,7 +2,7 @@
 
 Omen is the local-network staging server for Home Energy Watch.
 
-The deploy keeps the app in Docker, syncs this repo to Omen over SSH, rebuilds the image on Omen, restarts the container, and checks `/health` before reporting success.
+The deploy keeps the app in Docker, syncs this repo to Omen over SSH, rebuilds the image on Omen, restarts the container, and checks `/health` before reporting success. Runtime input and output data stay outside the synced app tree so a deploy does not wipe staging history.
 
 ## Current target
 
@@ -29,7 +29,7 @@ Useful commands:
 ./scripts/omen-deploy.sh url
 ```
 
-Runtime data persists on Omen under `runtime/input` and `runtime/output`.
+Runtime data persists on Omen under `runtime/input` and `runtime/output`. The sync step preserves `runtime/`, and the Docker build context ignores it.
 
 ## Billing on Omen
 

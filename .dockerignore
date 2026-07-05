@@ -1,9 +1,11 @@
 __pycache__/
 .pytest_cache/
 .venv/
+.git/
 *.pyc
 *.pyo
 *.pyd
 data/
+runtime/
 .env.omen
-data/output/*.csv
+.tmp-*
