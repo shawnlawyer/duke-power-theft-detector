@@ -507,6 +507,36 @@ def test_customer_signup_creates_login_and_account_access(tmp_path, monkeypatch)
     assert b"Duke Energy Progress, LLC" in account_page.data
 
 
+def test_customer_signup_keeps_entered_values_on_validation_error(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+
+    response = client.post(
+        "/signup",
+        data={
+            "full_name": "Home Owner",
+            "email": "owner@example.com",
+            "password": "short",
+            "account_number": "duke-123",
+            "energy_company": "Duke Energy Progress, LLC",
+            "address": "123 Main St Charlotte NC",
+            "plan_id": "review",
+        },
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert b"Use at least 10 characters for the password." in response.data
+    assert b'value="Home Owner"' in response.data
+    assert b'value="owner@example.com"' in response.data
+    assert b'value="duke-123"' in response.data
+    assert b'value="123 Main St Charlotte NC"' in response.data
+    assert b'value="review"' in response.data
+    assert b"checked" in response.data
+    assert b'<option value="Duke Energy Progress, LLC" selected>' in response.data
+
+
 def test_account_forms_use_energy_company_select_instead_of_home_name(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True

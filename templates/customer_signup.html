@@ -31,28 +31,28 @@
         <div class="field-grid">
           <label>
             <span>Name</span>
-            <input type="text" name="full_name" required>
+            <input type="text" name="full_name" value="{{ signup_form.full_name }}" required>
           </label>
           <label>
             <span>Email</span>
-            <input type="email" name="email" required>
+            <input type="email" name="email" value="{{ signup_form.email }}" required>
           </label>
           <label>
             <span>Password</span>
-            <input type="password" name="password" required>
+            <input type="password" name="password" value="{{ signup_form.password }}" autocomplete="new-password" required>
           </label>
           <label>
             <span>Electric account number</span>
-            <input type="text" name="account_number" required>
+            <input type="text" name="account_number" value="{{ signup_form.account_number }}" required>
           </label>
           <label>
             <span>Energy company</span>
             <select name="energy_company" required>
-              <option value="">Choose provider</option>
+              <option value="" {% if not signup_form.energy_company %}selected{% endif %}>Choose provider</option>
               {% for group in energy_company_groups %}
                 <optgroup label="{{ group.label }}">
                   {% for company in group.companies %}
-                    <option value="{{ company }}">{{ company }}</option>
+                    <option value="{{ company }}" {% if company == signup_form.energy_company %}selected{% endif %}>{{ company }}</option>
                   {% endfor %}
                 </optgroup>
               {% endfor %}
@@ -60,7 +60,7 @@
           </label>
           <label>
             <span>Address</span>
-            <input type="text" name="address" placeholder="Street, city, state">
+            <input type="text" name="address" value="{{ signup_form.address }}" placeholder="Street, city, state">
           </label>
         </div>
         <button type="submit">Create account</button>

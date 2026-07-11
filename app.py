@@ -5050,6 +5050,35 @@ def create_web_app() -> Flask:
             return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True)
         return render_template("setup_section.html", **context)
 
+    def build_customer_signup_form_state(form_like=None) -> dict[str, str]:
+        source = form_like or {}
+
+        def value(name: str, default: str = "") -> str:
+            raw = source.get(name, default)
+            if raw is None:
+                return default
+            return str(raw)
+
+        selected_plan_id = value("plan_id", "home").strip().lower() or "home"
+        return {
+            "full_name": value("full_name"),
+            "email": value("email"),
+            "password": value("password"),
+            "account_number": value("account_number"),
+            "energy_company": value("energy_company"),
+            "address": value("address"),
+            "plan_id": selected_plan_id,
+        }
+
+    def render_customer_signup_page(form_like=None):
+        signup_form = build_customer_signup_form_state(form_like)
+        return render_template(
+            "customer_signup.html",
+            page_title="Create Your Account",
+            selected_plan_id=signup_form["plan_id"],
+            signup_form=signup_form,
+        )
+
     @app.context_processor
     def inject_layout_context():
         return {
@@ -5169,7 +5198,7 @@ def create_web_app() -> Flask:
     def customer_signup():
         if current_customer_user() is not None and current_staff_user() is None:
             return redirect(url_for("customer_dashboard"))
-        return render_template("customer_signup.html", page_title="Create Your Account", selected_plan_id="home")
+        return render_customer_signup_page()
 
     @app.post("/signup")
     def customer_signup_post():
@@ -5194,7 +5223,7 @@ def create_web_app() -> Flask:
             record_customer_plan_selection(int(customer_user["id"]), request.form.get("plan_id") or "home")
         except Exception as exc:
             flash(str(exc))
-            return redirect(url_for("customer_signup"))
+            return render_customer_signup_page(request.form)
 
         session["customer_user_id"] = int(customer_user["id"])
         session.pop("staff_user_id", None)
