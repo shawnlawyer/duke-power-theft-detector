@@ -16,13 +16,15 @@
 
   {% if current_billing and current_billing.status in ["active", "trialing"] %}
     <form action="{{ url_for('billing_portal') }}" method="post">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
       <button type="submit" class="button-secondary">Manage billing</button>
     </form>
   {% else %}
     <form class="billing-action-form" action="{{ url_for('billing_checkout') }}" method="post">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="plan_id" value="{{ current_billing.plan_id if current_billing else 'home' }}">
-      <button type="submit">Start billing</button>
+      <button type="submit">Continue to secure payment</button>
     </form>
-    <p class="plain-note">You can review the plan before payment is collected.</p>
+    <p class="plain-note">Card details are entered on the secure Payments checkout page.</p>
   {% endif %}
 </section>

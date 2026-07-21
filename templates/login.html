@@ -12,6 +12,7 @@
       </div>
 
       <form class="account-form" action="{{ url_for('login_post') }}" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="next" value="{{ next_url or '' }}">
         <label>
           <span>Email</span>
@@ -23,6 +24,9 @@
         </label>
         <button type="submit">Sign in</button>
       </form>
+      <p class="plain-note auth-note">
+        <a class="inline-link" href="{{ url_for('staff_forgot_password') }}">Forgot your password?</a>
+      </p>
     </section>
   </main>
 {% endblock %}

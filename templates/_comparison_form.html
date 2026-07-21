@@ -1,3 +1,5 @@
+{% set is_customer_history = customer_mode|default(false) %}
+{% set can_manage_history = not is_customer_history or (customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager") %}
 <section class="section-block upload-block">
   <div class="section-header">
     <div>
@@ -6,7 +8,9 @@
     </div>
   </div>
 
-  <form class="upload-form" action="{{ url_for('compare_exports') }}" method="post" enctype="multipart/form-data">
+  {% if can_manage_history %}
+    <form class="upload-form" action="{{ url_for('compare_exports') }}" method="post" enctype="multipart/form-data">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="account_number" value="{{ (analysis.account.account_number if analysis else account.account_number) }}">
     <input type="hidden" name="display_name" value="{{ (analysis.account.display_name if analysis else account.display_name) }}">
     <input type="hidden" name="energy_company" value="{{ (analysis.account.energy_company if analysis else account.energy_company) }}">
@@ -50,5 +54,8 @@
     </details>
 
     <button type="submit">Compare exports</button>
-  </form>
+    </form>
+  {% else %}
+    <p class="plain-note">You have view-only access. An account manager can create a new comparison.</p>
+  {% endif %}
 </section>

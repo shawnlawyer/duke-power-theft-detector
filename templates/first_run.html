@@ -12,6 +12,7 @@
       </div>
 
       <form class="account-form" action="{{ url_for('create_first_run_user') }}" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <label>
           <span>Name</span>
           <input type="text" name="full_name" required>

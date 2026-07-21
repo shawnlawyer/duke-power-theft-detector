@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout">
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Sign-in security</p>
+          <h2>Authenticator protection.</h2>
+          {% if staff_user.mfa_enabled %}
+            <p class="plain-note">Your commission sign-in requires your password and a second code.</p>
+          {% elif mfa_required %}
+            <p class="plain-note">Set up an authenticator before opening the commission workspace.</p>
+          {% else %}
+            <p class="plain-note">Add an authenticator so a password alone cannot open your commission account.</p>
+          {% endif %}
+        </div>
+        <span class="pill{% if not staff_user.mfa_enabled %} danger{% endif %}">{{ "On" if staff_user.mfa_enabled else "Off" }}</span>
+      </div>
+
+      {% if enrollment %}
+        <div class="mfa-setup-grid">
+          <img class="mfa-qr" src="{{ enrollment.qr_data_uri }}" alt="Authenticator setup code">
+          <div>
+            <h3>Scan this code.</h3>
+            <p class="plain-note">Open an authenticator app, add an account, then scan the square code.</p>
+            <p class="plain-note">If scanning is not available, enter this setup key:</p>
+            <code class="mfa-secret">{{ enrollment.display_secret }}</code>
+            <form class="account-form" action="{{ url_for('staff_mfa_confirm') }}" method="post">
+              <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+              <label>
+                <span>Six-digit code</span>
+                <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required>
+              </label>
+              <button type="submit">Finish setup</button>
+            </form>
+            <form action="{{ url_for('staff_mfa_cancel') }}" method="post">
+              <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="button-secondary button-small">Cancel setup</button>
+            </form>
+          </div>
+        </div>
+      {% elif staff_user.mfa_enabled %}
+        <div class="metric-stack">
+          <div class="metric-line">
+            <span>Unused recovery codes</span>
+            <strong>{{ recovery_code_count }}</strong>
+          </div>
+        </div>
+
+        <form class="account-form security-form" action="{{ url_for('staff_mfa_recovery_codes') }}" method="post">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+          <h3>Replace recovery codes</h3>
+          <p class="plain-note">The old recovery codes will stop working immediately.</p>
+          <label>
+            <span>Authenticator or recovery code</span>
+            <input type="text" name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required>
+          </label>
+          <button type="submit">Create new recovery codes</button>
+        </form>
+
+        {% if not mfa_required %}
+          <form class="account-form security-form" action="{{ url_for('staff_mfa_disable') }}" method="post">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <h3>Turn off authenticator protection</h3>
+            <p class="plain-note">Confirm with your password and a current code.</p>
+            <label>
+              <span>Password</span>
+              <input type="password" name="password" autocomplete="current-password" required>
+            </label>
+            <label>
+              <span>Authenticator or recovery code</span>
+              <input type="text" name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required>
+            </label>
+            <button type="submit" class="button-secondary">Turn off authenticator</button>
+          </form>
+        {% endif %}
+      {% else %}
+        <form action="{{ url_for('staff_mfa_start') }}" method="post">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+          <button type="submit">Set up an authenticator</button>
+        </form>
+      {% endif %}
+    </section>
+  </main>
+{% endblock %}

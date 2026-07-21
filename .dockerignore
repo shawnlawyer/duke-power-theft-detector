@@ -8,4 +8,5 @@ __pycache__/
 data/
 runtime/
 .env.omen
+deploy/ec2/.env.production
 .tmp-*

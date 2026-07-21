@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout">
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Account recovery</p>
+          <h2>Keep these recovery codes.</h2>
+          <p class="plain-note">Each code works once when your authenticator is unavailable. This is the only time the full codes are shown.</p>
+        </div>
+      </div>
+      <div class="recovery-code-grid" aria-label="Recovery codes">
+        {% for code in recovery_codes %}
+          <code>{{ code }}</code>
+        {% endfor %}
+      </div>
+      <p class="plain-note">Store them somewhere separate from this account.</p>
+      <a class="button-link" href="{{ url_for('staff_security') }}">Continue</a>
+    </section>
+  </main>
+{% endblock %}

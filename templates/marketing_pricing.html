@@ -25,21 +25,18 @@
             <li>Interval uploads, overnight baselines, and flagged-night review</li>
             <li>Comparison artifacts you can keep with the case record</li>
           </ul>
-          {% if customer_user and not staff_user and plan.price_id %}
-            <form action="{{ app_base_url }}/billing/checkout" method="post">
-              <input type="hidden" name="plan_id" value="{{ plan.id }}">
-              <button type="submit" class="button button-primary">
+          {% if customer_user and not staff_user and plan.payment_ready %}
+            <a class="button button-primary" href="{{ app_base_url }}/signup?plan_id={{ plan.id|urlencode }}">
                 {% if billing and billing.plan_id == plan.id and billing.status in ["active", "trialing"] %}
                   Current plan
                 {% else %}
-                  Start {{ plan.name }}
+                  Continue to secure payment
                 {% endif %}
-              </button>
-            </form>
+            </a>
           {% elif plan.id == "agency" %}
             <a class="button button-secondary" href="{{ commission_login_url }}">Open commission workspace</a>
           {% else %}
-            <a class="button button-primary" href="{{ start_home_url }}">Start {{ plan.name }}</a>
+            <a class="button button-primary" href="{{ app_base_url }}/signup?plan_id={{ plan.id|urlencode }}">Start {{ plan.name }}</a>
           {% endif %}
         </article>
       {% endfor %}

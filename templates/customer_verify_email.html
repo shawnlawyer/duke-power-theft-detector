@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout auth-layout">
+    <section class="section-block auth-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Email confirmation</p>
+          {% if token_valid %}
+            <h2>Confirm {{ masked_email }}.</h2>
+            <p class="plain-note">This connects the sign-in address to your Home Energy Watch account.</p>
+          {% else %}
+            <h2>This link is no longer available.</h2>
+            <p class="plain-note">Ask for another confirmation message to continue.</p>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if token_valid %}
+        <form class="account-form" action="{{ url_for('customer_verify_email_post') }}" method="post">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="token" value="{{ token }}">
+          <button type="submit">Confirm email address</button>
+        </form>
+      {% else %}
+        <a class="button-link" href="{{ url_for('customer_verification_sent') }}">Send another confirmation</a>
+      {% endif %}
+    </section>
+  </main>
+{% endblock %}

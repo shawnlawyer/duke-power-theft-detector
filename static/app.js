@@ -1,4 +1,69 @@
 (function () {
+  function setupUtilityLookups() {
+    document.querySelectorAll("[data-utility-lookup]").forEach((form) => {
+      const zipInput = form.querySelector("[data-utility-zip]");
+      const addressInput = form.querySelector("[data-utility-address]");
+      const matchOutput = form.querySelector("[data-utility-match]");
+      const apiUrl = form.dataset.utilityUrl;
+      if (!zipInput || !matchOutput || !apiUrl) {
+        return;
+      }
+
+      let timer = null;
+      let activeRequest = null;
+
+      async function findUtility() {
+        const zipCode = zipInput.value.trim();
+        if (!/^\d{5}(?:-\d{4})?$/.test(zipCode)) {
+          matchOutput.textContent = "Enter the service ZIP code and address.";
+          return;
+        }
+
+        if (activeRequest) {
+          activeRequest.abort();
+        }
+        activeRequest = new AbortController();
+        matchOutput.textContent = "Finding the electric company...";
+
+        const params = new URLSearchParams({ zip_code: zipCode });
+        const address = addressInput ? addressInput.value.trim() : "";
+        if (address) {
+          params.set("address", address);
+        }
+
+        try {
+          const response = await fetch(`${apiUrl}?${params.toString()}`, {
+            headers: { Accept: "application/json" },
+            signal: activeRequest.signal,
+          });
+          const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result.error || "We could not identify the electric company.");
+          }
+          matchOutput.textContent = result.energy_company || "We could not identify the electric company.";
+        } catch (error) {
+          if (error.name === "AbortError") {
+            return;
+          }
+          matchOutput.textContent = error.message;
+        }
+      }
+
+      function scheduleLookup() {
+        window.clearTimeout(timer);
+        timer = window.setTimeout(findUtility, 450);
+      }
+
+      zipInput.addEventListener("input", scheduleLookup);
+      if (addressInput) {
+        addressInput.addEventListener("input", scheduleLookup);
+      }
+      if (/^\d{5}(?:-\d{4})?$/.test(zipInput.value.trim())) {
+        scheduleLookup();
+      }
+    });
+  }
+
   function setupPasswordToggles() {
     document.querySelectorAll('input[type="password"]').forEach((input, index) => {
       if (input.dataset.passwordToggleReady === "true") {
@@ -32,6 +97,7 @@
     });
   }
 
+  setupUtilityLookups();
   setupPasswordToggles();
 
   const root = document.getElementById("day-detail-root");

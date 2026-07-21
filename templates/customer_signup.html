@@ -1,17 +1,24 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <main class="app-layout auth-layout">
+  <main class="app-layout auth-layout signup-layout">
     <section class="section-block auth-block">
       <div class="section-header">
         <div>
           <p class="section-kicker">Home account</p>
           <h2>Start watching your energy history.</h2>
-          <p class="plain-note">Create an account, add your electric account number, and upload your first usage file when you are ready.</p>
+          <p class="plain-note">Create an account, choose a plan, and continue to secure payment before uploading your first usage file.</p>
         </div>
       </div>
 
-      <form class="account-form" action="{{ url_for('customer_signup_post') }}" method="post">
+      <form
+        class="account-form"
+        action="{{ url_for('customer_signup_post') }}"
+        method="post"
+        data-utility-lookup
+        data-utility-url="{{ url_for('utility_lookup_api') }}"
+      >
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <div class="pricing-grid signup-pricing">
           {% for plan in billing_plans %}
             <label class="plan-card choice-card">
@@ -31,39 +38,37 @@
         <div class="field-grid">
           <label>
             <span>Name</span>
-            <input type="text" name="full_name" required>
+            <input type="text" name="full_name" value="{{ signup_form.full_name }}" required>
           </label>
           <label>
             <span>Email</span>
-            <input type="email" name="email" required>
+            <input type="email" name="email" value="{{ signup_form.email }}" required>
           </label>
           <label>
             <span>Password</span>
-            <input type="password" name="password" required>
+            <input type="password" name="password" autocomplete="new-password" required>
           </label>
           <label>
             <span>Electric account number</span>
-            <input type="text" name="account_number" required>
+            <input type="text" name="account_number" value="{{ signup_form.account_number }}" required>
           </label>
           <label>
-            <span>Energy company</span>
-            <select name="energy_company" required>
-              <option value="">Choose provider</option>
-              {% for group in energy_company_groups %}
-                <optgroup label="{{ group.label }}">
-                  {% for company in group.companies %}
-                    <option value="{{ company }}">{{ company }}</option>
-                  {% endfor %}
-                </optgroup>
-              {% endfor %}
-            </select>
+            <span>Service ZIP code</span>
+            <input type="text" name="zip_code" value="{{ signup_form.zip_code }}" inputmode="numeric" autocomplete="postal-code" pattern="[0-9]{5}(-[0-9]{4})?" maxlength="10" data-utility-zip required>
+          </label>
+          <label class="wide-field">
+            <span>Service address</span>
+            <input type="text" name="address" value="{{ signup_form.address }}" placeholder="Street, city, state" autocomplete="street-address" data-utility-address required>
           </label>
           <label>
-            <span>Address</span>
-            <input type="text" name="address" placeholder="Street, city, state">
+            <span>Your electric company</span>
+            <output class="utility-match" data-utility-match aria-live="polite">
+              Enter the service ZIP code and address.
+            </output>
+            <small>We match it to the service area for this address.</small>
           </label>
         </div>
-        <button type="submit">Create account</button>
+        <button type="submit">Create account and continue to payment</button>
       </form>
 
       <p class="plain-note auth-note">

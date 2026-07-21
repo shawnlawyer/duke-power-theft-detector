@@ -31,17 +31,24 @@ Useful commands:
 
 Runtime data persists on Omen under `runtime/input` and `runtime/output`. The sync step preserves `runtime/`, and the Docker build context ignores it.
 
+Omen runs with `POWER_ENV=staging`. Set a unique `POWER_APP_SECRET` and, when saved utility connections are being tested, a dedicated Fernet key in `POWER_DATA_ENCRYPTION_KEY`. Keep both values only in the ignored `.env.omen` file.
+
+Omen defaults to `POWER_EMAIL_BACKEND=disabled`, so staging accounts are immediately usable and no email is sent. Set `POWER_EMAIL_BACKEND=memory` only when testing confirmation or password-reset flows inside the app test suite.
+
 ## Billing on Omen
 
-Set these in `.env.omen` before deploying if you want live Stripe checkout on staging:
+Set these in `.env.omen` before deploying if you want checkout through Stripe:
 
 ```bash
-STRIPE_SECRET_KEY=sk_test_...
-STRIPE_WEBHOOK_SECRET=whsec_...
-STRIPE_PRICE_HOME=price_...
-STRIPE_PRICE_REVIEW=price_...
-STRIPE_PRICE_AGENCY=price_...
+STRIPE_ACCOUNT_ID=acct_1TEP6v39IosmExPF
+STRIPE_SECRET_KEY=...
+STRIPE_WEBHOOK_SECRET=...
+STRIPE_API_VERSION=2026-02-25.clover
+STRIPE_PRICE_HOME=...
+STRIPE_PRICE_REVIEW=...
 ```
+
+Keep Stripe secret values out of git and chat. Configure the Stripe webhook endpoint as `https://app.homeenergywatch.com/stripe/webhook` for production.
 
 Then redeploy:
 

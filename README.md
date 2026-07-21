@@ -1,6 +1,8 @@
-# PowerPattern
+# Home Energy Watch
 
 Home Energy Watch is a home energy audit and review tool. It keeps customer history in one place, compares meter readings against household load expectations, and helps surface spikes that do not fit the home.
+
+Customers can download a tenant-bounded ZIP archive of their authorized account profile, inventory, interval history, weather context, and generated reports from the Account page.
 
 ## Supported utility feeds
 
@@ -67,16 +69,26 @@ The straight-to-production shape is:
 ## Key environment settings
 
 - `POWER_DATABASE_URL`
+- `POWER_ENV`
 - `POWER_APP_SECRET`
+- `POWER_AUDIT_SIGNING_KEY`
+- `POWER_DATA_ENCRYPTION_KEY`
 - `POWER_PUBLIC_BASE_URL`
 - `POWER_MARKETING_BASE_URL`
 - `POWER_APP_HOSTS`
 - `POWER_MARKETING_HOSTS`
+- `POWER_TRUST_PROXY`
+- `POWER_STAFF_MFA_REQUIRED`
+- `POWER_EMAIL_BACKEND`
+- `POWER_EMAIL_FROM`
+- `POWER_EMAIL_REPLY_TO`
+- `POWER_EMAIL_REGION`
+- `STRIPE_ACCOUNT_ID`
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
+- `STRIPE_API_VERSION`
 - `STRIPE_PRICE_HOME`
 - `STRIPE_PRICE_REVIEW`
-- `STRIPE_PRICE_AGENCY`
 - `POWER_WEB_PORT`
 - `POWER_TIMEZONE`
 - `POWER_WEB_CONCURRENCY`
@@ -86,8 +98,20 @@ When `POWER_DATABASE_URL` is not set, the app uses the local SQLite file path fr
 
 For production, set:
 
+- `POWER_ENV=production`
 - `POWER_PUBLIC_BASE_URL=https://app.homeenergywatch.com`
 - `POWER_MARKETING_BASE_URL=https://homeenergywatch.com`
+- a unique `POWER_APP_SECRET` of at least 32 characters
+- a separate random value of at least 32 characters in `POWER_AUDIT_SIGNING_KEY`
+- a dedicated Fernet key in `POWER_DATA_ENCRYPTION_KEY`
+- `POWER_EMAIL_BACKEND=ses` with a verified address in `POWER_EMAIL_FROM`
+- `POWER_STAFF_MFA_REQUIRED=true` after commission users are ready to enroll an authenticator
+
+Production startup fails closed when the app secret, audit-signing key, HTTPS public URL, or data-encryption key is missing or unsafe. Keep every secret value in the runtime secret store or ignored production env file. The audit-signing key must remain stable across deploys so commissioners can verify the full activity record.
+
+Production also requires a Postgres URL with TLS enabled, such as `?sslmode=require`. The RDS instance should be private, encrypted at rest, protected from deletion, and backed up automatically.
+
+New customer accounts confirm their email address before opening account data or continuing to checkout. Password reset links expire after 30 minutes, work once, and close older customer sessions after the password changes. Commissioners can review account-scoped sign-ins, identity changes, imports, profile edits, inventory changes, and utility connection activity from the Audit page.
 
 The same Flask service can answer both hostnames. When the request host is `homeenergywatch.com`, the app serves the public marketing pages. When the request host is `app.homeenergywatch.com`, it serves the working app.
 
@@ -113,7 +137,7 @@ The page creates two downloads from the same comparison:
 
 ## Billing
 
-Home Energy Watch is wired for Stripe subscriptions through hosted Checkout.
+Home Energy Watch uses direct backend Stripe Checkout with Epistemic Cognition Inc.'s Stripe account. Stripe secret keys and webhook secrets must stay in the backend runtime environment or approved production secret store.
 
 Current plans:
 
@@ -121,7 +145,24 @@ Current plans:
 - Review Desk: $99/mo for up to 20 electric accounts
 - Agency Pilot: custom commission or agency review workspace
 
-Create matching Stripe Products and recurring Prices, then set the Price IDs in `STRIPE_PRICE_HOME`, `STRIPE_PRICE_REVIEW`, and `STRIPE_PRICE_AGENCY`. Set `STRIPE_SECRET_KEY` to enable Checkout and `STRIPE_WEBHOOK_SECRET` after registering `/stripe/webhook` in Stripe. The checkout flow uses Stripe subscriptions and the customer portal manages payment method changes, plan changes, and cancellation.
+Set these values in the ignored local env file or production secret store:
+
+```bash
+STRIPE_ACCOUNT_ID=acct_1TEP6v39IosmExPF
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+STRIPE_API_VERSION=2026-02-25.clover
+STRIPE_PRICE_HOME=
+STRIPE_PRICE_REVIEW=
+```
+
+Configure the Stripe webhook endpoint to:
+
+```text
+https://app.homeenergywatch.com/stripe/webhook
+```
+
+The app adds Home Energy Watch metadata to Stripe Checkout Sessions and subscriptions. Do not run live charges or refunds without Shawn's explicit approval.
 
 ## CLI
 
