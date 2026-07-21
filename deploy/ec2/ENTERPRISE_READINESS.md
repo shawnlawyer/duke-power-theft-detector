@@ -32,6 +32,8 @@ This ledger separates implemented controls from production proof and approval-ga
 - The customer data archive is live and redirects anonymous requests to customer sign-in.
 - The hardened production image `sha256:926ec5877d6cd839bc5baad4b372e309d748b12d55bd7aa0337888c03b57773d` passed all 107 tests on EC2 before promotion. The running container is healthy, required MFA remains active, its audit chain is valid, and runtime packaging tools are absent.
 - The architecture-matched x86 Omen image passed the high and critical Trivy gate with zero Debian or Python findings.
+- GitHub release-security run `29820086282` passed on pull request 1, and run `29820188538` passed after merge to `main`. Both executed the complete test, dependency-audit, and container-scan gate.
+- `main` requires pull requests and a current `verify` check. Enforcement applies to administrators; unresolved review conversations block merging, and force-pushes and branch deletion are disabled.
 - The immediately previous production image is retained as `home-energy-watch:rollback-20260721-mfa-recovery`.
 
 ## Last verified infrastructure state
@@ -65,8 +67,7 @@ CloudWatch alarms, centralized log retention, and S3 versioned storage add AWS r
 2. Move uploaded history and generated reports to encrypted, versioned object storage with lifecycle policy.
 3. Add centralized application logs, availability alarms, database alarms, and an incident-response runbook.
 4. Run and record a database restore exercise with measured recovery time and recovery point.
-5. Activate and enforce the implemented release-security workflow in the hosted repository, then retain evidence from a passing run. The same gate passes locally but is not yet an enforced repository check.
-6. Complete privacy, terms, utility authorization, and commission procurement review.
-7. Obtain an independent security review before handling commission-wide production data.
+5. Complete privacy, terms, utility authorization, and commission procurement review.
+6. Obtain an independent security review before handling commission-wide production data.
 
 The product is not enterprise-ready while the open controls above remain unverified.
