@@ -65,6 +65,15 @@
       {% endwith %}
 
       {% block content %}{% endblock %}
+
+      <footer class="app-footer">
+        <span>Home Energy Watch</span>
+        <nav aria-label="Legal">
+          <a href="{{ url_for('terms_page') }}">Terms</a>
+          <a href="{{ url_for('privacy_page') }}">Privacy</a>
+          <a href="{{ url_for('utility_data_authorization_page') }}">Data permission</a>
+        </nav>
+      </footer>
     </div>
   </body>
 </html>

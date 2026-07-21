@@ -81,6 +81,28 @@ def customer_sign_in(client, email="owner@example.com", password="customer-passw
     )
 
 
+def authorize_account(account_number, email=None):
+    normalized_account = app.normalize_account_number(account_number)
+    safe_account = re.sub(r"[^a-z0-9]+", "-", normalized_account.lower()).strip("-") or "account"
+    customer_email = email or f"{safe_account}@example.com"
+    customer = app.get_customer_user_by_email(customer_email)
+    if customer is None:
+        customer = app.create_customer_user(
+            customer_email,
+            f"Owner {normalized_account}",
+            "customer-password-123",
+        )
+    if app.find_account(normalized_account) is None:
+        app.save_account_profile(normalized_account, display_name=f"Account {normalized_account}")
+    app.add_account_access_email(
+        normalized_account,
+        customer_email,
+        full_name=str(customer["full_name"]),
+        access_level="Manager",
+    )
+    return app.grant_account_data_authorization(normalized_account, int(customer["id"]))
+
+
 def make_summary(rows):
     frame = pd.DataFrame(rows)
     frame["date"] = frame["date"].map(ddate.fromisoformat)
@@ -475,6 +497,55 @@ def test_account_access_emails_are_saved_per_account(tmp_path, monkeypatch):
     assert access[1]["full_name"] == "Home Owner"
 
 
+def test_removing_account_access_revokes_permission_and_erases_saved_utility_access(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.save_account_profile("acct-1", energy_company="Duke Energy Carolinas, LLC")
+    access = app.add_account_access_email(
+        "acct-1",
+        "owner@example.com",
+        full_name="Home Owner",
+        access_level="Manager",
+    )
+    authorize_account("acct-1", "owner@example.com")
+    app.save_utility_connection(
+        "acct-1",
+        {
+            "provider_name": "Duke Energy Carolinas, LLC",
+            "connection_label": "Main account",
+            "access_method": "customer_api_key",
+            "access_identifier": "https://utility.example.test/meter.xml",
+            "access_secret": "customer-approved-key-1234",
+        },
+    )
+    client = app.web_app.test_client()
+    sign_in(client)
+
+    response = client.post(
+        f"/account-access/{access['id']}/delete",
+        data={"account_number": "acct-1"},
+        follow_redirects=False,
+    )
+    authorization = app.get_customer_account_data_authorization("acct-1", int(customer["id"]))
+    connection = app.list_utility_connections("acct-1")[0]
+    with app.get_db_connection() as conn:
+        events = conn.execute(
+            "SELECT action, metadata_json FROM audit_events WHERE account_id = ? ORDER BY id",
+            (app.find_account("acct-1")["id"],),
+        ).fetchall()
+
+    assert response.status_code == 302
+    assert app.get_customer_account_access("owner@example.com", "acct-1") is None
+    assert authorization["status"] == "revoked_access_removed"
+    assert connection["access_identifier"] == ""
+    assert connection["secret_last4"] is None
+    assert connection["status"] == "Authorization withdrawn"
+    assert any(row["action"] == "utility.authorization_revoked" for row in events)
+    access_event = next(row for row in events if row["action"] == "account.access_revoked")
+    assert json.loads(access_event["metadata_json"])["credentials_cleared"] is True
+
+
 def test_customer_data_export_is_tenant_bounded_and_excludes_secrets(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
@@ -486,6 +557,16 @@ def test_customer_data_export_is_tenant_bounded_and_excludes_secrets(tmp_path, m
         {"address": "123 Main Street", "zip_code": "28205", "occupant_count": "3"},
     )
     app.add_account_access_email("acct-a", "owner@example.com", full_name="Home Owner", access_level="Manager")
+    owner = app.get_customer_user_by_email("owner@example.com")
+    with app.get_db_connection() as conn:
+        app.record_customer_policy_acceptance(
+            conn,
+            int(owner["id"]),
+            accepted_at="2026-07-21T12:00:00+00:00",
+            remote_hash="private-remote-hash",
+            user_agent_hash="private-user-agent-hash",
+        )
+    authorize_account("acct-a", "owner@example.com")
     app.add_load_item("acct-a", label="Kitchen refrigerator", quantity=1, watts_each=150, include_when_off=True)
     app.save_utility_connection(
         "acct-a",
@@ -530,10 +611,13 @@ def test_customer_data_export_is_tenant_bounded_and_excludes_secrets(tmp_path, m
     assert "home-energy-watch-data-" in response.headers["Content-Disposition"]
     assert manifest["customer"]["email"] == "owner@example.com"
     assert manifest["account_count"] == 1
+    assert manifest["format_version"] == 2
+    assert manifest["policy_acceptances"][0]["terms_version"] == app.CURRENT_TERMS_VERSION
     assert profile["account"]["account_number"] == "acct-a"
     assert profile["household"]["address"] == "123 Main Street"
     assert profile["inventory"][0]["label"] == "Kitchen refrigerator"
     assert profile["utility_connections"][0]["provider_name"] == "Duke Energy Carolinas, LLC"
+    assert profile["data_authorizations"][0]["status"] == "active"
     assert b"2024-01-01" in extracted[interval_name]
     assert b"2026-01-01,12.3" in extracted[report_name]
     assert b"acct-b" not in combined
@@ -543,6 +627,8 @@ def test_customer_data_export_is_tenant_bounded_and_excludes_secrets(tmp_path, m
     assert b"owner-utility-login@example.com" not in combined
     assert b"password_hash" not in combined
     assert b"stripe_customer_id" not in combined
+    assert b"private-remote-hash" not in combined
+    assert b"private-user-agent-hash" not in combined
     assert b"/data/" not in combined
     assert event["actor_type"] == "customer"
     assert json.loads(event["metadata_json"])["account_count"] == 1
@@ -606,6 +692,7 @@ def test_utility_connection_keeps_retrievable_access_for_sync_without_listing_se
 def test_sync_utility_connection_imports_customer_history(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     monkeypatch.setenv("POWER_APP_SECRET", "sync-test-secret")
+    authorize_account("acct-1")
 
     connection = app.save_utility_connection(
         "acct-1",
@@ -643,6 +730,8 @@ def test_sync_utility_connection_imports_customer_history(tmp_path, monkeypatch)
 def test_run_scheduled_utility_sync_records_success_and_failure(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     monkeypatch.setenv("POWER_APP_SECRET", "sync-test-secret")
+    authorize_account("acct-1")
+    authorize_account("acct-2")
 
     successful = app.save_utility_connection(
         "acct-1",
@@ -700,6 +789,8 @@ def test_run_scheduled_utility_sync_records_success_and_failure(tmp_path, monkey
 def test_run_scheduled_utility_sync_can_limit_to_one_account(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     monkeypatch.setenv("POWER_APP_SECRET", "sync-test-secret")
+    authorize_account("acct-1")
+    authorize_account("acct-2")
 
     app.save_utility_connection(
         "acct-1",
@@ -747,6 +838,7 @@ def test_customer_can_sync_own_utility_connection(tmp_path, monkeypatch):
     customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
     app.save_account_profile("acct-1", display_name="Allowed home")
     app.add_account_access_email("acct-1", "owner@example.com", full_name="Home Owner", access_level="Manager")
+    authorize_account("acct-1", "owner@example.com")
     connection = app.save_utility_connection(
         "acct-1",
         {
@@ -776,6 +868,83 @@ def test_customer_can_sync_own_utility_connection(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert b"Utility history synced." in response.data
     assert app.count_imported_files("acct-1") == 1
+
+
+def test_customer_can_withdraw_and_restore_utility_data_permission(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    monkeypatch.setenv("POWER_APP_SECRET", "authorization-test-secret")
+    customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.save_account_profile(
+        "acct-1",
+        display_name="Allowed home",
+        energy_company="Duke Energy Carolinas, LLC",
+    )
+    app.add_account_access_email(
+        "acct-1",
+        "owner@example.com",
+        full_name="Home Owner",
+        access_level="Manager",
+    )
+    authorize_account("acct-1", "owner@example.com")
+    connection = app.save_utility_connection(
+        "acct-1",
+        {
+            "provider_name": "Duke Energy Carolinas, LLC",
+            "connection_label": "Main account",
+            "access_method": "customer_api_key",
+            "access_identifier": "https://utility.example.test/meter.xml",
+            "access_secret": "customer-approved-key-1234",
+        },
+    )
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+
+    utility_page = client.get("/customer/utility", query_string={"account_number": "acct-1"})
+    revoked = client.post(
+        "/account/data-authorization/revoke",
+        data={"account_number": "acct-1", "return_to": "/customer/utility?account_number=acct-1"},
+        follow_redirects=True,
+    )
+    connection_after_revoke = app.list_utility_connections("acct-1")[0]
+    authorization_after_revoke = app.get_customer_account_data_authorization("acct-1", int(customer["id"]))
+
+    assert utility_page.status_code == 200
+    assert b"Customer permission" in utility_page.data
+    assert b"Withdraw permission" in utility_page.data
+    assert revoked.status_code == 200
+    assert b"Saved utility access details were removed" in revoked.data
+    assert authorization_after_revoke["status"] == "revoked"
+    assert connection_after_revoke["access_identifier"] == ""
+    assert connection_after_revoke["secret_last4"] is None
+    assert connection_after_revoke["status"] == "Authorization withdrawn"
+    with pytest.raises(ValueError, match="Customer authorization is required"):
+        app.sync_utility_connection("acct-1", int(connection["id"]))
+
+    restored = client.post(
+        "/account/data-authorization",
+        data={
+            "account_number": "acct-1",
+            "confirm_data_authorization": "yes",
+            "return_to": "/customer/utility?account_number=acct-1",
+        },
+        follow_redirects=True,
+    )
+    authorization_after_restore = app.get_customer_account_data_authorization("acct-1", int(customer["id"]))
+    with app.get_db_connection() as conn:
+        audit_actions = [
+            row["action"]
+            for row in conn.execute(
+                "SELECT action FROM audit_events WHERE actor_id = ? ORDER BY id",
+                (customer["id"],),
+            ).fetchall()
+        ]
+
+    assert restored.status_code == 200
+    assert b"Permission to use this account&#39;s utility data is active" in restored.data
+    assert authorization_after_restore["status"] == "active"
+    assert "utility.authorization_revoked" in audit_actions
+    assert "utility.authorization_granted" in audit_actions
 
 
 def test_customer_utility_page_does_not_offer_chrome_helper_duke_flow(tmp_path, monkeypatch):
@@ -872,6 +1041,8 @@ def test_customer_signup_creates_login_and_account_access(tmp_path, monkeypatch)
             "account_number": "duke-123",
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
+            "accept_policies": "yes",
+            "confirm_account_authority": "yes",
         },
         follow_redirects=False,
     )
@@ -884,6 +1055,28 @@ def test_customer_signup_creates_login_and_account_access(tmp_path, monkeypatch)
     access = app.list_account_access_emails("duke-123")
     assert access[0]["email"] == "owner@example.com"
     assert access[0]["access_level"] == "Manager"
+    customer = app.get_customer_user_by_email("owner@example.com")
+    authorization = app.get_customer_account_data_authorization("duke-123", int(customer["id"]))
+    with app.get_db_connection() as conn:
+        policy = conn.execute(
+            "SELECT * FROM customer_policy_acceptances WHERE customer_user_id = ?",
+            (customer["id"],),
+        ).fetchone()
+        audit_actions = {
+            row["action"]
+            for row in conn.execute(
+                "SELECT action FROM audit_events WHERE actor_id = ?",
+                (customer["id"],),
+            ).fetchall()
+        }
+
+    assert policy["terms_version"] == app.CURRENT_TERMS_VERSION
+    assert policy["privacy_version"] == app.CURRENT_PRIVACY_VERSION
+    assert len(policy["remote_hash"]) == 64
+    assert len(policy["user_agent_hash"]) == 64
+    assert authorization["active"] is True
+    assert authorization["authorization_scope"] == app.UTILITY_AUTHORIZATION_SCOPE
+    assert {"customer.policy_accepted", "utility.authorization_granted"} <= audit_actions
 
     dashboard = client.get("/customer")
 
@@ -896,6 +1089,41 @@ def test_customer_signup_creates_login_and_account_access(tmp_path, monkeypatch)
     account_page = client.get("/customer/account")
     assert account_page.status_code == 200
     assert b"Duke Energy Progress, LLC" in account_page.data
+
+
+def test_customer_signup_requires_policy_and_account_authority_confirmations(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    stub_utility_lookup(monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+    signup_data = {
+        "full_name": "Home Owner",
+        "email": "owner@example.com",
+        "password": "customer-password-123",
+        "account_number": "duke-consent",
+        "address": "123 Main St Charlotte NC",
+        "zip_code": "28205",
+    }
+
+    missing_policies = client.post(
+        "/signup",
+        data={**signup_data, "confirm_account_authority": "yes"},
+    )
+    missing_authority = client.post(
+        "/signup",
+        data={**signup_data, "accept_policies": "yes"},
+    )
+    with app.get_db_connection() as conn:
+        customer_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM customer_users WHERE email = ?",
+            ("owner@example.com",),
+        ).fetchone()["count"]
+
+    assert missing_policies.status_code == 200
+    assert b"Agree to the Terms and Privacy Notice" in missing_policies.data
+    assert missing_authority.status_code == 200
+    assert b"Confirm that you are allowed to manage this electric account" in missing_authority.data
+    assert int(customer_count) == 0
 
 
 def test_customer_signup_keeps_entered_values_on_validation_error(tmp_path, monkeypatch):
@@ -914,6 +1142,8 @@ def test_customer_signup_keeps_entered_values_on_validation_error(tmp_path, monk
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
             "plan_id": "review",
+            "accept_policies": "yes",
+            "confirm_account_authority": "yes",
         },
         follow_redirects=True,
     )
@@ -947,6 +1177,8 @@ def test_customer_signup_cannot_claim_an_existing_electric_account(tmp_path, mon
             "account_number": "duke-registered",
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
+            "accept_policies": "yes",
+            "confirm_account_authority": "yes",
         },
         follow_redirects=True,
     )
@@ -977,6 +1209,8 @@ def test_customer_signup_rolls_back_every_record_when_account_creation_fails(tmp
             energy_company="Duke Energy Progress, LLC",
             plan_id="home",
             household_form={"address": "123 Main Street", "zip_code": "28205"},
+            accept_policies=True,
+            confirm_account_authority=True,
         )
     with app.get_db_connection() as conn:
         user_count = conn.execute(
@@ -1058,6 +1292,7 @@ def test_utility_connection_uses_account_provider_instead_of_submitted_provider(
     app.web_app.config["TESTING"] = True
     app.save_account_profile("acct-1", energy_company="Duke Energy Progress, LLC")
     app.save_household_profile("acct-1", {"address": "1 Main Street", "zip_code": "27601"})
+    authorize_account("acct-1")
     client = app.web_app.test_client()
     sign_in(client)
 
@@ -1074,6 +1309,29 @@ def test_utility_connection_uses_account_provider_instead_of_submitted_provider(
 
     assert response.status_code == 302
     assert app.list_utility_connections("acct-1")[0]["provider_name"] == "Duke Energy Progress, LLC"
+
+
+def test_staff_cannot_save_utility_connection_without_customer_permission(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    app.save_account_profile("acct-1", energy_company="Duke Energy Progress, LLC")
+    app.save_household_profile("acct-1", {"address": "1 Main Street", "zip_code": "27601"})
+    client = app.web_app.test_client()
+    sign_in(client)
+
+    response = client.post(
+        "/utility-connection",
+        data={
+            "account_number": "acct-1",
+            "connection_label": "Main account",
+            "access_method": "utility_authorization",
+        },
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert b"Customer authorization is required" in response.data
+    assert app.list_utility_connections("acct-1") == []
 
 
 def test_public_utility_lookup_endpoint_returns_matched_company(tmp_path, monkeypatch):
@@ -1272,6 +1530,8 @@ def test_customer_signup_saves_selected_billing_plan(tmp_path, monkeypatch):
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
             "plan_id": "review",
+            "accept_policies": "yes",
+            "confirm_account_authority": "yes",
         },
         follow_redirects=False,
     )
@@ -1389,6 +1649,8 @@ def test_customer_signup_paid_plan_redirects_to_stripe_checkout(tmp_path, monkey
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
             "plan_id": "home",
+            "accept_policies": "yes",
+            "confirm_account_authority": "yes",
         },
         follow_redirects=False,
     )
@@ -1563,7 +1825,28 @@ def test_marketing_host_exposes_indexable_robots_and_sitemap(tmp_path, monkeypat
     assert b"Sitemap: https://homeenergywatch.com/sitemap.xml" in robots.data
     assert sitemap.status_code == 200
     assert b"https://homeenergywatch.com/for-commissions" in sitemap.data
+    assert b"https://homeenergywatch.com/terms" in sitemap.data
+    assert b"https://homeenergywatch.com/privacy" in sitemap.data
+    assert b"https://homeenergywatch.com/utility-data-authorization" in sitemap.data
     assert b"Disallow: /" in app_robots.data
+
+
+def test_public_policy_pages_explain_terms_privacy_and_data_permission(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+
+    terms = client.get("/terms", base_url="https://homeenergywatch.com")
+    privacy = client.get("/privacy", base_url="https://homeenergywatch.com")
+    permission = client.get("/utility-data-authorization", base_url="https://homeenergywatch.com")
+
+    assert terms.status_code == 200
+    assert b"A flag is a reason to look more closely" in terms.data
+    assert privacy.status_code == 200
+    assert b"We do not sell household energy history" in privacy.data
+    assert permission.status_code == 200
+    assert app.UTILITY_AUTHORIZATION_SCOPE.encode() in permission.data
+    assert b"cannot create it for the customer" in permission.data
 
 
 def test_marketing_pricing_page_uses_public_copy(tmp_path, monkeypatch):
@@ -1676,6 +1959,8 @@ def test_customer_email_confirmation_is_required_hashed_and_single_use(tmp_path,
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
             "plan_id": "agency",
+            "accept_policies": "yes",
+            "confirm_account_authority": "yes",
         },
     )
     customer = app.get_customer_user_by_email("owner@example.com")
@@ -1733,6 +2018,8 @@ def test_resending_confirmation_revokes_the_previous_link(tmp_path, monkeypatch)
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
             "plan_id": "agency",
+            "accept_policies": "yes",
+            "confirm_account_authority": "yes",
         },
     )
     original_token = token_from_latest_email()
@@ -2792,11 +3079,48 @@ def test_history_page_offers_two_file_comparison_upload(tmp_path, monkeypatch):
     assert b'name="left_file"' in response.data
     assert b'name="right_file"' in response.data
     assert b"Download a packet with matched months" in response.data
+    assert b"Customer data permission must be active" in response.data
+
+
+def test_staff_cannot_upload_or_compare_history_without_customer_permission(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    app.save_account_profile("acct-1", display_name="Main house")
+    client = app.web_app.test_client()
+    sign_in(client)
+
+    upload = client.post(
+        "/analyze",
+        data={
+            "account_number": "acct-1",
+            "xml_file": (BytesIO(FIXTURE.read_bytes()), "history.xml"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+    comparison = client.post(
+        "/compare",
+        data={
+            "account_number": "acct-1",
+            "left_file": (BytesIO(comparison_csv([])), "earlier.csv"),
+            "right_file": (BytesIO(comparison_csv([])), "later.csv"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=True,
+    )
+
+    assert upload.status_code == 200
+    assert b"Customer data permission is required before new history can be added" in upload.data
+    assert comparison.status_code == 200
+    assert b"Customer data permission is required before exports can be compared" in comparison.data
+    assert app.count_imported_files("acct-1") == 0
+    assert list((tmp_path / "input").iterdir()) == []
 
 
 def test_web_comparison_upload_creates_downloadable_packet(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
+    authorize_account("acct-1")
 
     client = app.web_app.test_client()
     sign_in(client)
@@ -2892,6 +3216,7 @@ def test_web_routes_render_and_analyze(tmp_path, monkeypatch):
     assert home.headers["Location"].endswith("/first-run")
 
     sign_in(client)
+    authorize_account("acct-1")
     home = client.get("/")
     assert home.status_code == 200
     assert b"Review" in home.data

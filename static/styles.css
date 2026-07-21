@@ -524,6 +524,83 @@ button:hover {
   font-weight: 600;
 }
 
+.consent-row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  color: var(--muted);
+}
+
+.consent-row input {
+  width: 18px;
+  min-height: 18px;
+  margin: 2px 0 0;
+}
+
+.consent-row label {
+  display: block;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.permission-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.8fr);
+  gap: 18px;
+  align-items: start;
+  margin-bottom: 22px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--danger);
+  background: #fff;
+}
+
+.permission-panel.permission-active {
+  border-left-color: var(--accent);
+}
+
+.permission-panel h3 {
+  margin: 3px 0 7px;
+}
+
+.permission-detail {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.permission-panel form {
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+}
+
+.permission-panel form button {
+  width: auto;
+}
+
+.app-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 32px;
+  padding: 22px 0 30px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.app-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.app-footer a {
+  color: inherit;
+}
+
 .table-wrap {
   overflow-x: auto;
 }
@@ -1045,6 +1122,10 @@ th {
   .test-summary,
   .mfa-setup-grid,
   .recovery-code-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .permission-panel {
     grid-template-columns: 1fr;
   }
 
