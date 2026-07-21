@@ -31,6 +31,7 @@ def configure_tmp_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("POWER_PUBLIC_BASE_URL", "https://app.homeenergywatch.com")
     monkeypatch.setenv("POWER_MARKETING_BASE_URL", "https://homeenergywatch.com")
     monkeypatch.setenv("POWER_STAFF_MFA_REQUIRED", "false")
+    monkeypatch.delenv("POWER_BILLING_ENABLED", raising=False)
     monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
     monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
     monkeypatch.delenv("STRIPE_PRICE_HOME", raising=False)
@@ -1497,19 +1498,23 @@ def test_viewer_can_read_account_but_cannot_change_it(tmp_path, monkeypatch):
     assert app.list_load_items("acct-view") == []
 
 
-def test_billing_plans_use_payments_amounts():
+def test_billing_plans_do_not_publish_unapproved_prices(monkeypatch):
+    monkeypatch.delenv("POWER_BILLING_ENABLED", raising=False)
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_stale")
+    monkeypatch.setenv("STRIPE_PRICE_HOME", "price_stale_home")
+    monkeypatch.setenv("STRIPE_PRICE_REVIEW", "price_stale_review")
     plans = app.list_billing_plans()
     home = next(plan for plan in plans if plan["id"] == "home")
     review = next(plan for plan in plans if plan["id"] == "review")
     agency = next(plan for plan in plans if plan["id"] == "agency")
 
-    assert home["amount_cents"] == 1900
-    assert home["monthly_price_label"] == "$19/mo"
+    assert home["monthly_price_label"] == "Pricing being finalized"
     assert home["account_limit"] == 1
-    assert home["payment_ready"] is True
-    assert review["amount_cents"] == 9900
+    assert home["payment_ready"] is False
+    assert review["monthly_price_label"] == "Pricing being finalized"
     assert review["account_limit"] == 20
-    assert review["payment_ready"] is True
+    assert review["payment_ready"] is False
+    assert agency["monthly_price_label"] == "Talk with us"
     assert agency["payment_ready"] is False
 
 
@@ -1546,7 +1551,7 @@ def test_customer_signup_saves_selected_billing_plan(tmp_path, monkeypatch):
     dashboard = client.get("/customer")
     assert b"Billing" in dashboard.data
     billing_page = client.get("/customer/billing")
-    assert b"Continue to secure payment" in billing_page.data
+    assert b"Online billing is not open yet" in billing_page.data
 
 
 class FakeStripeCheckoutSession:
@@ -1625,6 +1630,7 @@ def install_fake_stripe(monkeypatch):
     FakeStripe.api_key = None
     FakeStripe.api_version = None
     monkeypatch.setattr(app, "stripe", FakeStripe)
+    monkeypatch.setenv("POWER_BILLING_ENABLED", "true")
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_home_energy_watch")
     monkeypatch.setenv("STRIPE_PRICE_HOME", "price_home_123")
     monkeypatch.setenv("STRIPE_PRICE_REVIEW", "price_review_456")
@@ -1695,6 +1701,17 @@ def test_customer_checkout_redirects_to_stripe_checkout_session(tmp_path, monkey
     assert billing["stripe_customer_id"] == "cus_123"
     assert billing["stripe_subscription_id"] == "sub_123"
     assert billing["status"] == "checkout_started"
+
+
+def test_customer_checkout_stays_closed_without_pricing_approval(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    install_fake_stripe(monkeypatch)
+    monkeypatch.setenv("POWER_BILLING_ENABLED", "false")
+    customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+
+    with pytest.raises(ValueError, match="Online payment is not open yet"):
+        app.create_customer_checkout_session(customer, "home", "https://app.homeenergywatch.com")
+    assert FakeStripeCheckoutSession.calls == []
 
 
 def test_stripe_checkout_requires_secret_key(monkeypatch):
@@ -1860,6 +1877,9 @@ def test_marketing_pricing_page_uses_public_copy(tmp_path, monkeypatch):
     assert b"Plans that match the size of the review." in response.data
     assert b"Home Watch" in response.data
     assert b"Review Desk" in response.data
+    assert b"Pricing being finalized" in response.data
+    assert b"$19" not in response.data
+    assert b"$99" not in response.data
 
 
 def test_health_endpoint_only_returns_public_status(tmp_path, monkeypatch):

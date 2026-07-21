@@ -83,6 +83,7 @@ The straight-to-production shape is:
 - `POWER_EMAIL_FROM`
 - `POWER_EMAIL_REPLY_TO`
 - `POWER_EMAIL_REGION`
+- `POWER_BILLING_ENABLED`
 - `STRIPE_ACCOUNT_ID`
 - `STRIPE_SECRET_KEY`
 - `STRIPE_WEBHOOK_SECRET`
@@ -139,16 +140,19 @@ The page creates two downloads from the same comparison:
 
 Home Energy Watch uses direct backend Stripe Checkout with Epistemic Cognition Inc.'s Stripe account. Stripe secret keys and webhook secrets must stay in the backend runtime environment or approved production secret store.
 
-Current plans:
+Current workspace options:
 
-- Home Watch: $19/mo for one household
-- Review Desk: $99/mo for up to 20 electric accounts
-- Agency Pilot: custom commission or agency review workspace
+- Home Watch for one household
+- Review Desk for up to 20 electric accounts
+- Agency Pilot for a commission or agency review workspace
+
+Pricing has not been approved yet. Keep `POWER_BILLING_ENABLED=false` until the plan prices and matching Stripe Price IDs have been reviewed for Home Energy Watch. The checkout route stays closed even if an old Price ID remains in the environment.
 
 Set these values in the ignored local env file or production secret store:
 
 ```bash
 STRIPE_ACCOUNT_ID=acct_1TEP6v39IosmExPF
+POWER_BILLING_ENABLED=false
 STRIPE_SECRET_KEY=
 STRIPE_WEBHOOK_SECRET=
 STRIPE_API_VERSION=2026-02-25.clover

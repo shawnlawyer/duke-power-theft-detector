@@ -17,6 +17,7 @@ The current control status and remaining enterprise gates are tracked in `ENTERP
    - `POWER_EMAIL_FROM=support@homeenergywatch.com`
    - `POWER_EMAIL_REGION=us-east-1`
    - `POWER_STAFF_MFA_REQUIRED=true` when commission MFA enforcement is ready
+   - `POWER_BILLING_ENABLED=false` until Home Energy Watch pricing is approved
    - `STRIPE_SECRET_KEY`
    - `STRIPE_WEBHOOK_SECRET`
    - `STRIPE_PRICE_HOME`
@@ -38,7 +39,7 @@ docker compose --env-file deploy/ec2/.env.production -f deploy/ec2/docker-compos
    - `POWER_PUBLIC_BASE_URL=https://app.homeenergywatch.com`
    - `POWER_MARKETING_BASE_URL=https://homeenergywatch.com`
 
-Billing uses direct backend Stripe Checkout. Store `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_HOME`, and `STRIPE_PRICE_REVIEW` only in the ignored production env file or approved secret store. Configure the Stripe webhook endpoint as `https://app.homeenergywatch.com/stripe/webhook`.
+Billing uses direct backend Stripe Checkout. Store `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_HOME`, and `STRIPE_PRICE_REVIEW` only in the ignored production env file or approved secret store. Checkout remains closed unless `POWER_BILLING_ENABLED=true`; do not enable it until the plan prices and matching Stripe Price IDs have been approved for Home Energy Watch. Configure the Stripe webhook endpoint as `https://app.homeenergywatch.com/stripe/webhook`.
 
 Set `POWER_ENV=production`, use a unique `POWER_APP_SECRET` of at least 32 characters, and generate a dedicated Fernet key for `POWER_DATA_ENCRYPTION_KEY`:
 
