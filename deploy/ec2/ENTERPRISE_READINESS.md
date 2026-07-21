@@ -10,6 +10,7 @@ This ledger separates implemented controls from production proof and approval-ga
 - Commission sign-in requires TOTP MFA. Secrets are encrypted, codes cannot be replayed, and one-time recovery codes are stored only as hashes.
 - Commissioners can invite, suspend, reactivate, and change access for other staff members. They can reset another staff member's authenticator after confirmation; the reset destroys recovery codes, revokes sessions, and requires fresh enrollment without changing the password, role, or active status. Self-reset and self-lockout are blocked.
 - Customer account reads and writes are checked against account access records.
+- Customer signup and account forms determine the electric company from the service ZIP code and street address instead of offering a provider list. Browser and API history imports preserve that matched provider instead of accepting a submitted replacement.
 - Customer signup records the accepted Terms and Privacy Notice versions, the utility-data authorization version and scope, and hashed request evidence. Authorization grants, withdrawals, superseded grants, and access-removal revocations are retained as an append-only account history.
 - History uploads, comparisons, saved utility connections, and utility sync require an active customer authorization. Withdrawal erases saved utility credentials when no active authorization remains.
 - Customers can download a ZIP archive of every authorized account, profile, inventory item, interval, weather record, generated report, policy acceptance, and utility-data authorization. Credentials, password fields, Stripe internals, technical request hashes, internal paths, and unauthorized accounts are excluded.
@@ -21,8 +22,8 @@ This ledger separates implemented controls from production proof and approval-ga
 - Audit records form a keyed hash chain. Commissioners can verify and export the filtered record; export stops when integrity fails.
 - Direct Stripe operations remain backend-only. `POWER_BILLING_ENABLED=false` keeps checkout closed until Home Energy Watch prices and matching Stripe Price IDs are approved, even if stale Stripe configuration remains. No live charge or refund is part of automated verification.
 - The release image uses a digest-pinned Python base and a fully hashed dependency lock. Runtime packaging tools are removed after installation.
-- The release-security gate runs the complete test suite, `pip-audit`, and a digest-pinned Trivy scan that fails on fixed high or critical findings. The local gate passed all 118 tests with no known dependency vulnerabilities and zero container or secret findings.
-- Local, Omen staging, and EC2 candidate images pass the complete 118-test automated suite. A disposable PostgreSQL exercise also passed idempotent migration, legal-hold enforcement, and approved deletion.
+- The release-security gate runs the complete test suite, `pip-audit`, and a digest-pinned Trivy scan that fails on fixed high or critical findings. The local gate passed all 120 tests with no known dependency vulnerabilities and zero container or secret findings.
+- Local, Omen staging, and EC2 candidate images pass the complete 120-test automated suite. A disposable PostgreSQL exercise also passed idempotent migration, legal-hold enforcement, and approved deletion.
 
 ## Production proof verified on 2026-07-21
 
@@ -37,7 +38,8 @@ This ledger separates implemented controls from production proof and approval-ga
 - Public Terms, Privacy Notice, and utility-data permission pages are live. Signup requires policy acceptance and confirmation that the customer controls the utility account.
 - RDS contains `customer_policy_acceptances`, `account_data_authorizations`, the account/status lookup index, and the partial unique active-authorization index.
 - RDS contains `account_data_requests`, `account_legal_holds`, and the partial unique indexes that prevent duplicate open requests and duplicate active holds. Both lifecycle pages redirect anonymous requests to the correct sign-in flow.
-- The hardened production image `sha256:134933c17c6e59c8692fd02247da6aac77db5bd6ad1a7fbd871b4925c14f2bd5` passed all 118 tests on EC2 before promotion. The running container is healthy, required MFA remains active, its audit chain is valid, and all three existing staff accounts are present.
+- The hardened production image `sha256:e0f23c3e4f10590f6fc2b0d822b826d2485e446fda94c9bfd7a1c1b2c72dddae` passed all 120 tests on EC2 before promotion. The running container is healthy, required MFA remains active, its audit chain is valid, and all three existing staff accounts are present.
+- The live signup contains no utility dropdown or submitted energy-company field. Its ZIP/address endpoint resolved a Raleigh service address to Duke Energy Progress using the matching service territory.
 - `POWER_DATA_DELETION_ENABLED=false` is active on Omen and production, and `POWER_DATA_DELETION_POLICY_VERSION` is blank. No account-data deletion can execute until an approved policy version is deliberately configured.
 - `POWER_BILLING_ENABLED=false` is active on Omen and production. The live pricing and signup pages contain no dollar amount, and the public pricing page exposes no checkout action while pricing is unapproved.
 - The architecture-matched x86 Omen image passed the high and critical Trivy gate with zero Debian or Python findings.
@@ -45,8 +47,9 @@ This ledger separates implemented controls from production proof and approval-ga
 - Customer-consent run `29822323048` passed on pull request 3, and run `29822409301` passed after merge to `main`.
 - Pricing-approval run `29823055500` passed on pull request 4. Main run `29823156913` passed on rerun after Docker Hub recovered from a transient 502 while pulling the separate audit helper image; application tests had passed on the initial attempt.
 - Data-lifecycle run `29825054146` passed on pull request 6, and run `29825142636` passed after merge to `main`.
+- ZIP-utility run `29826057416` passed on pull request 8, and run `29826166342` passed after merge to `main`.
 - `main` requires pull requests and a current `verify` check. Enforcement applies to administrators; unresolved review conversations block merging, and force-pushes and branch deletion are disabled.
-- The immediately previous production image is retained as `home-energy-watch:rollback-20260721-data-lifecycle-predeploy`.
+- The immediately previous production image is retained as `home-energy-watch:rollback-20260721-zip-utility-predeploy`.
 
 ## Last verified infrastructure state
 
