@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout">
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Commission record</p>
+          <h2>Account activity.</h2>
+          <p class="plain-note">Review sign-ins, identity changes, imports, account updates, and utility connection activity.</p>
+        </div>
+        <div>
+          {% if audit_integrity.valid %}
+            <span class="pill">Integrity verified</span>
+            <p class="table-note">{{ audit_integrity.checked_events }} event{% if audit_integrity.checked_events != 1 %}s{% endif %} checked</p>
+          {% else %}
+            <span class="pill danger">Integrity check failed</span>
+            <p class="table-note">Event {{ audit_integrity.failure_event_id }} needs review.</p>
+          {% endif %}
+        </div>
+      </div>
+
+      <form class="account-search-form" action="{{ url_for('audit_page') }}" method="get">
+        <label>
+          <span>Electric account number</span>
+          <input type="search" name="account_number" value="{{ audit_page.account_number }}">
+        </label>
+        <label>
+          <span>Action</span>
+          <input type="search" name="action" value="{{ audit_page.action }}" placeholder="customer.login_succeeded">
+        </label>
+        <button type="submit">Filter activity</button>
+      </form>
+
+      {% if audit_integrity.valid %}
+        <p class="inline-link-row">
+          <a class="button-link" href="{{ url_for('audit_export', account_number=audit_page.account_number, action=audit_page.action) }}">Download this record</a>
+        </p>
+      {% else %}
+        <p class="empty-note">Downloads are paused until the audit record passes its integrity check.</p>
+      {% endif %}
+
+      {% if audit_page.events %}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Action</th>
+                <th>Person</th>
+                <th>Account</th>
+                <th>Target</th>
+                <th>Request</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for event in audit_page.events %}
+                <tr>
+                  <td>{{ event.occurred_at }}</td>
+                  <td>{{ event.action }}</td>
+                  <td>{{ event.actor_name }}</td>
+                  <td>{{ event.account_number or "-" }}</td>
+                  <td>{{ event.target_type or "-" }}{% if event.target_id %} {{ event.target_id }}{% endif %}</td>
+                  <td><span class="table-note">{{ event.request_id }}</span></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pagination-row">
+          <span>{{ audit_page.total }} recorded event{% if audit_page.total != 1 %}s{% endif %}</span>
+          <div>
+            {% if audit_page.has_previous %}
+              <a class="inline-link" href="{{ url_for('audit_page', account_number=audit_page.account_number, action=audit_page.action, page=audit_page.page - 1) }}">Previous</a>
+            {% endif %}
+            <span>Page {{ audit_page.page }} of {{ audit_page.total_pages }}</span>
+            {% if audit_page.has_next %}
+              <a class="inline-link" href="{{ url_for('audit_page', account_number=audit_page.account_number, action=audit_page.action, page=audit_page.page + 1) }}">Next</a>
+            {% endif %}
+          </div>
+        </div>
+      {% else %}
+        <p class="empty-note">No activity matches these filters.</p>
+      {% endif %}
+    </section>
+  </main>
+{% endblock %}

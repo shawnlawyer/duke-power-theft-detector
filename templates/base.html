@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ page_title or "Current Watch" }}</title>
+    <title>{{ page_title or "Home Energy Watch" }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
     <script defer src="{{ url_for('static', filename='app.js') }}"></script>
   </head>
@@ -13,7 +13,7 @@
       <header class="site-header">
         <div class="header-row">
           <div>
-            <p class="eyebrow">Current Watch</p>
+            <p class="eyebrow">Home Energy Watch</p>
             <h1>{{ page_title or ("Usage findings" if analysis else "Customer history") }}</h1>
           </div>
           {% if active_user %}
@@ -21,6 +21,7 @@
               <span>{{ active_user.full_name }}</span>
               <span>{{ staff_user.role if staff_user else "Customer" }}</span>
               <form action="{{ url_for('logout') }}" method="post">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="button-secondary button-small">Sign out</button>
               </form>
             </div>
@@ -37,6 +38,10 @@
               <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}">Inventory</a>
               <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}">History</a>
               <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}">Staff</a>
+              <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}">Security</a>
+              {% if staff_user.role == "Commissioner" %}
+                <a class="{% if request.endpoint == 'audit_page' %}active{% endif %}" href="{{ url_for('audit_page') }}">Audit</a>
+              {% endif %}
             {% else %}
               <a class="{% if request.endpoint == 'customer_dashboard' %}active{% endif %}" href="{{ url_for('customer_dashboard', account_number=nav_account) }}">Review</a>
               <a class="{% if request.endpoint == 'customer_account_page' %}active{% endif %}" href="{{ url_for('customer_account_page', account_number=nav_account) }}">Account</a>

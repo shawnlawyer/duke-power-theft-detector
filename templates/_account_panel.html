@@ -8,9 +8,10 @@
 {% set current_account_access = account_access if account_access is defined else [] %}
 {% set current_utility_connections = utility_connections if utility_connections is defined else [] %}
 {% set is_customer = customer_mode|default(false) %}
+{% set can_manage_account = not is_customer or (customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager") %}
 {% set account_list_endpoint = "customer_dashboard" if is_customer else "index" %}
 {% set selected_energy_company = current_account.energy_company or '' %}
-{% set selected_connection_provider = (current_utility_connections[0].provider_name if current_utility_connections else selected_energy_company) %}
+{% set selected_connection_provider = selected_energy_company %}
 {% set current_section = setup_section if setup_section is defined else "all" %}
 {% set return_path = request.full_path if request.query_string else request.path %}
 
@@ -22,6 +23,9 @@
       <h2>{{ selected_energy_company or "Electric account" }}</h2>
       <p class="plain-note">Account {{ current_account.account_number }}</p>
     </div>
+    {% if is_customer %}
+      <a class="button-link" href="{{ url_for('customer_data_export') }}">Download my data</a>
+    {% endif %}
   </div>
 
   <form class="account-search-form" action="{{ url_for('customer_dashboard') if is_customer else url_for('index') }}" method="get">
@@ -69,29 +73,38 @@
     {% endif %}
   {% endif %}
 
-  <form class="account-form" action="{{ url_for('save_account') }}" method="post">
+  <form
+    class="account-form"
+    action="{{ url_for('save_account') }}"
+    method="post"
+    data-utility-lookup
+    data-utility-url="{{ url_for('utility_lookup_api') }}"
+  >
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="return_to" value="{{ return_path }}">
+    {% if not can_manage_account %}
+      <p class="plain-note">You have view-only access to this account.</p>
+    {% endif %}
+    <fieldset class="form-fieldset" {% if not can_manage_account %}disabled{% endif %}>
     <div class="field-grid">
-      <label class="wide-field">
-        <span>Address</span>
-        <input type="text" name="address" value="{{ current_profile.address }}">
-      </label>
       <label>
         <span>Account number</span>
         <input type="text" name="account_number" value="{{ current_account.account_number }}" {% if is_customer %}readonly{% endif %} required>
       </label>
       <label>
-        <span>Energy company</span>
-        <select name="energy_company" required>
-          <option value="">Choose provider</option>
-          {% for group in energy_company_groups %}
-            <optgroup label="{{ group.label }}">
-              {% for company in group.companies %}
-                <option value="{{ company }}" {% if company == selected_energy_company %}selected{% endif %}>{{ company }}</option>
-              {% endfor %}
-            </optgroup>
-          {% endfor %}
-        </select>
+        <span>Service ZIP code</span>
+        <input type="text" name="zip_code" value="{{ current_profile.zip_code }}" inputmode="numeric" autocomplete="postal-code" pattern="[0-9]{5}(-[0-9]{4})?" maxlength="10" data-utility-zip required>
+      </label>
+      <label class="wide-field">
+        <span>Service address</span>
+        <input type="text" name="address" value="{{ current_profile.address }}" autocomplete="street-address" data-utility-address required>
+      </label>
+      <label>
+        <span>Your electric company</span>
+        <output class="utility-match" data-utility-match aria-live="polite">
+          {{ selected_energy_company or "Enter the service address and ZIP code." }}
+        </output>
+        <small>We match it to the service area for this address.</small>
       </label>
       <label>
         <span>Reference day</span>
@@ -133,6 +146,7 @@
       <p class="plain-note">Weather unlocks after the address resolves to a location.</p>
     {% endif %}
     <button type="submit">Save account</button>
+    </fieldset>
   </form>
 </section>
 {% endif %}
@@ -148,6 +162,7 @@
   </div>
 
   <form class="account-form" action="{{ url_for('create_account_access') }}" method="post">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
     <input type="hidden" name="return_to" value="{{ return_path }}">
     <div class="field-grid">
@@ -190,6 +205,7 @@
               <td>{{ person.access_level }}</td>
               <td class="action-cell">
                 <form action="{{ url_for('remove_account_access', access_id=person.id) }}" method="post">
+                  <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                   <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
                   <input type="hidden" name="return_to" value="{{ return_path }}">
                   <button type="submit" class="button-secondary button-small">Remove</button>
@@ -212,50 +228,63 @@
     <div>
       <p class="section-kicker">Utility connection</p>
       <h2>Utility data connection</h2>
-      <p class="plain-note">Store the customer-approved access this system will use to collect future usage history.</p>
+      <p class="plain-note">Use the file download today. Save a customer-approved utility connection when the utility provides one.</p>
     </div>
   </div>
 
-  <form class="account-form" action="{{ url_for('save_connection') }}" method="post">
+  <div class="access-guide-grid" aria-label="Ways to bring in utility history">
+    {% for guide in utility_access_guides %}
+      <article class="access-guide-card">
+        <p class="section-kicker">{{ guide.status }}</p>
+        <h3>{{ guide.name }}</h3>
+        <p class="plain-note">{{ guide.summary }}</p>
+        <div class="guide-actions">
+          <a class="button-link" href="{{ guide.action_url }}" target="_blank" rel="noopener">{{ guide.action_label }}</a>
+          {% if guide.secondary_url %}
+            <a class="inline-link" href="{{ guide.secondary_url }}" target="_blank" rel="noopener">{{ guide.secondary_label }}</a>
+          {% endif %}
+        </div>
+      </article>
+    {% endfor %}
+  </div>
+
+  {% if can_manage_account %}
+    <form class="account-form" action="{{ url_for('save_connection') }}" method="post">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
     <input type="hidden" name="return_to" value="{{ return_path }}">
     <div class="field-grid">
       <label>
         <span>Energy company</span>
-        <select name="provider_name" required>
-          <option value="">Choose provider</option>
-          {% for group in energy_company_groups %}
-            <optgroup label="{{ group.label }}">
-              {% for company in group.companies %}
-                <option value="{{ company }}" {% if company == selected_connection_provider %}selected{% endif %}>{{ company }}</option>
-              {% endfor %}
-            </optgroup>
-          {% endfor %}
-        </select>
+        <output class="utility-match">{{ selected_connection_provider or "Add the service ZIP code on the Account page first." }}</output>
+        <input type="hidden" name="provider_name" value="{{ selected_connection_provider }}">
       </label>
       <label>
         <span>Connection name</span>
-        <input type="text" name="connection_label" placeholder="Main electric login" required>
+        <input type="text" name="connection_label" placeholder="Main electric account" required>
       </label>
       <label>
         <span>Access type</span>
         <select name="access_method">
-          <option value="customer_api_key">Customer API key</option>
-          <option value="customer_login">Customer login</option>
-          <option value="utility_authorization">Utility authorization</option>
+          <option value="utility_authorization">Customer-approved utility feed</option>
+          <option value="customer_api_key">Customer-approved key</option>
+          <option value="customer_login">Customer-provided export link</option>
         </select>
       </label>
       <label>
-        <span>Login or key name</span>
-        <input type="text" name="access_identifier" placeholder="name@example.com">
+        <span>Export link</span>
+        <input type="text" name="access_identifier" placeholder="https://utility.example.com/export.xml">
       </label>
       <label class="wide-field">
         <span>Access key</span>
-        <input type="password" name="access_secret" autocomplete="new-password" placeholder="Paste the customer-approved key">
+        <input type="password" name="access_secret" autocomplete="new-password" placeholder="Paste the customer-approved key, if one was issued">
       </label>
     </div>
-    <button type="submit">Save connection</button>
-  </form>
+    <button type="submit" {% if not selected_connection_provider %}disabled{% endif %}>Save connection</button>
+    </form>
+  {% else %}
+    <p class="plain-note">You have view-only access. An account manager can add or change utility connections.</p>
+  {% endif %}
 
   {% if current_utility_connections %}
     <div class="table-wrap compact-table">
@@ -265,6 +294,7 @@
             <th>Power company</th>
             <th>Connection</th>
             <th>Status</th>
+            <th>Recent sync</th>
             <th>Key</th>
             <th></th>
           </tr>
@@ -279,19 +309,40 @@
                   <div class="table-note">{{ connection.access_identifier }}</div>
                 {% endif %}
               </td>
-              <td>{{ connection.status }}</td>
+              <td>
+                {{ connection.status }}
+                {% if connection.last_sync_error %}
+                  <div class="table-note">{{ connection.last_sync_error }}</div>
+                {% endif %}
+              </td>
+              <td>
+                {% if connection.last_sync_attempt_at %}
+                  {{ connection.last_sync_attempt_at }}
+                  {% if connection.last_sync_at and connection.last_sync_status != "success" %}
+                    <div class="table-note">Last successful sync {{ connection.last_sync_at }}</div>
+                  {% endif %}
+                {% elif connection.last_sync_at %}
+                  {{ connection.last_sync_at }}
+                {% else %}
+                  Not synced yet
+                {% endif %}
+              </td>
               <td>{% if connection.secret_last4 %}Ending {{ connection.secret_last4 }}{% else %}Not saved{% endif %}</td>
               <td class="action-cell">
+                {% if can_manage_account %}
                 <form action="{{ url_for('sync_connection', connection_id=connection.id) }}" method="post">
+                  <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                   <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
                   <input type="hidden" name="return_to" value="{{ return_path }}">
                   <button type="submit" class="button-secondary button-small">Sync now</button>
                 </form>
                 <form action="{{ url_for('remove_connection', connection_id=connection.id) }}" method="post">
+                  <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                   <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
                   <input type="hidden" name="return_to" value="{{ return_path }}">
                   <button type="submit" class="button-secondary button-small">Remove</button>
                 </form>
+                {% endif %}
               </td>
             </tr>
           {% endfor %}
@@ -339,7 +390,9 @@
     </div>
   </div>
 
-  <form class="inventory-form" action="{{ url_for('create_load_item') }}" method="post">
+  {% if can_manage_account %}
+    <form class="inventory-form" action="{{ url_for('create_load_item') }}" method="post">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
     <input type="hidden" name="return_to" value="{{ return_path }}">
     <div class="inventory-grid">
@@ -365,7 +418,10 @@
       </label>
     </div>
     <button type="submit">Add load</button>
-  </form>
+    </form>
+  {% else %}
+    <p class="plain-note">You have view-only access. An account manager can change the house load list.</p>
+  {% endif %}
 
   {% if current_load_items %}
     <div class="table-wrap">
@@ -394,11 +450,14 @@
               <td>{{ item.total_watts }}</td>
               <td>{{ "Yes" if item.include_when_off else "No" }}</td>
               <td class="action-cell">
+                {% if can_manage_account %}
                 <form action="{{ url_for('remove_load_item', item_id=item.id) }}" method="post">
+                  <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                   <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
                   <input type="hidden" name="return_to" value="{{ return_path }}">
                   <button type="submit" class="button-secondary button-small">Remove</button>
                 </form>
+                {% endif %}
               </td>
             </tr>
           {% endfor %}

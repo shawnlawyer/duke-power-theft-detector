@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout">
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <h2>Comparison packet</h2>
+          <p class="plain-note">{{ comparison_packet.left_label }} compared with {{ comparison_packet.right_label }} using {{ comparison_packet.alignment_label }} matching.</p>
+        </div>
+        <div class="inline-link-row">
+          {% for report in comparison_packet.report_files %}
+            <a class="button-link" href="{{ url_for('download_report', filename=report.filename) }}">Download {{ report.label }}</a>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="summary-strip comparison-summary">
+        {% for metric in comparison_packet.metrics %}
+          <div>
+            <span class="label">{{ metric.label }}</span>
+            <strong>{{ metric.value }}</strong>
+            <p class="plain-note">{{ metric.detail }}</p>
+          </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <h2>Biggest follow-up points</h2>
+          <p class="plain-note">Start with the months where total use, overnight baseline, or flagged nights changed the most.</p>
+        </div>
+      </div>
+      <div class="finding-list comparison-followups">
+        {% for item in comparison_packet.follow_up_points %}
+          <article class="finding-item">
+            <h3>{{ item.label }}</h3>
+            <p>{{ item.detail }}</p>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    {% if comparison_packet.left_only_periods or comparison_packet.right_only_periods %}
+      <section class="section-block">
+        <div class="section-header">
+          <div>
+            <h2>Months left out</h2>
+            <p class="plain-note">These months were not included in the side-by-side totals because they did not have a matching month in the other file.</p>
+          </div>
+        </div>
+        <div class="two-column">
+          <div>
+            <h3>Earlier export only</h3>
+            <p class="plain-note">{{ comparison_packet.left_only_periods|join(", ") if comparison_packet.left_only_periods else "None" }}</p>
+          </div>
+          <div>
+            <h3>Later export only</h3>
+            <p class="plain-note">{{ comparison_packet.right_only_periods|join(", ") if comparison_packet.right_only_periods else "None" }}</p>
+          </div>
+        </div>
+      </section>
+    {% endif %}
+
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <h2>Matched months</h2>
+          <p class="plain-note">Each row shows the earlier file, the later file, and the change between them.</p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Month</th>
+              <th>Total kWh</th>
+              <th>kWh change</th>
+              <th>Overnight baseline</th>
+              <th>Baseline change</th>
+              <th>Flagged nights</th>
+              <th>Change</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in comparison_packet.matched_rows %}
+              <tr>
+                <td>{{ row.label }}</td>
+                <td>{{ row.total_kwh }}</td>
+                <td>{{ row.total_delta }}</td>
+                <td>{{ row.overnight_baseline }}</td>
+                <td>{{ row.baseline_delta }}</td>
+                <td>{{ row.flagged_nights }}</td>
+                <td>{{ row.flagged_delta }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+{% endblock %}

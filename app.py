@@ -16,23 +16,32 @@ import base64
 import csv
 from dataclasses import dataclass
 import hashlib
+import hmac
+import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
-from datetime import date as ddate, datetime, time as dtime, timedelta
+import time
+import zipfile
+from datetime import date as ddate, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlencode, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from dateutil import tz
-from flask import Flask, flash, has_request_context, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from cryptography.fernet import Fernet, InvalidToken
+from flask import Flask, flash, g, has_request_context, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 import pandas as pd
 from lxml import etree
+import pyotp
+import qrcode
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
 try:
@@ -47,6 +56,10 @@ try:
 except ImportError:  # pragma: no cover - local tests can use a fake Stripe module.
     stripe = None
 
+try:
+    import boto3
+except ImportError:  # pragma: no cover - local runs can keep email delivery disabled.
+    boto3 = None
 
 DEFAULT_TZ = os.getenv("POWER_TIMEZONE", "America/New_York")
 DEFAULT_NIGHT_START = os.getenv("POWER_NIGHT_START", "02:00")
@@ -59,14 +72,29 @@ DEFAULT_ALERT_MIN_KW = float(os.getenv("POWER_ALERT_MIN_KW", "1.2"))
 DEFAULT_ALERT_MULTIPLIER = float(os.getenv("POWER_ALERT_MULTIPLIER", "1.5"))
 DEFAULT_ALERT_JUMP_KW = float(os.getenv("POWER_ALERT_JUMP_KW", "0.75"))
 DEFAULT_CLI_OUTPUT = "usage_report.csv"
+DEFAULT_APP_SECRET = "local-power-data-only"
 DEFAULT_INPUT_DIR = Path(os.getenv("POWER_INPUT_DIR", "/data/input"))
 DEFAULT_OUTPUT_DIR = Path(os.getenv("POWER_OUTPUT_DIR", "/data/output"))
 DEFAULT_DB_PATH = Path(os.getenv("POWER_DB_PATH", str(DEFAULT_OUTPUT_DIR / "power-history.db")))
 DEFAULT_DATABASE_URL = (os.getenv("POWER_DATABASE_URL") or os.getenv("DATABASE_URL") or "").strip()
 MAX_UPLOAD_BYTES = int(os.getenv("POWER_MAX_UPLOAD_MB", "25")) * 1024 * 1024
+MAX_EXPORT_REPORT_BYTES = int(os.getenv("POWER_MAX_EXPORT_REPORT_MB", "25")) * 1024 * 1024
 ALLOWED_SUFFIXES = {".xml", ".csv"}
 STAFF_ROLES = ("Commissioner", "Analyst", "Investigator")
 INVITE_EXPIRY_DAYS = 7
+AUTH_RATE_LIMIT_WINDOW_SECONDS = 15 * 60
+AUTH_RATE_LIMIT_MAX_ATTEMPTS = 5
+AUTH_RATE_LIMIT_BLOCK_SECONDS = 15 * 60
+EMAIL_VERIFICATION_EXPIRY_HOURS = 24
+PASSWORD_RESET_EXPIRY_MINUTES = 30
+MFA_ENROLLMENT_EXPIRY_MINUTES = 15
+MFA_CHALLENGE_EXPIRY_MINUTES = 5
+MFA_RECOVERY_CODE_COUNT = 10
+MFA_RECOVERY_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+MFA_ISSUER = "Home Energy Watch"
+CUSTOMER_AUTH_TOKEN_PURPOSES = ("verify_email", "password_reset")
+STAFF_AUTH_TOKEN_PURPOSES = ("password_reset",)
+EMAIL_OUTBOX: list[dict[str, str]] = []
 CUSTOMER_ACCESS_LEVELS = ("Viewer", "Manager")
 ENERGY_COMPANY_GROUPS = (
     {
@@ -201,6 +229,69 @@ ENERGY_COMPANY_GROUPS = (
         ),
     },
 )
+ARCGIS_GEOCODER_URL = "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
+NC_ELECTRIC_SERVICE_LAYERS = (
+    {
+        "url": "https://services1.arcgis.com/5xTVQvyyE1FPIlHH/arcgis/rest/services/Electric_Utilities/FeatureServer/0/query",
+        "owner_field": "OWNER",
+        "utility_id_field": "EIA_UTILIT",
+    },
+    {
+        "url": "https://services1.arcgis.com/5xTVQvyyE1FPIlHH/arcgis/rest/services/Electric_Utilities/FeatureServer/1/query",
+        "owner_field": "OWNER",
+        "utility_id_field": "EIA_UTILIT",
+    },
+    {
+        "url": "https://services1.arcgis.com/5xTVQvyyE1FPIlHH/arcgis/rest/services/Electric_Utilities/FeatureServer/2/query",
+        "owner_field": "OWNER_1",
+        "utility_id_field": "EIA_UTIL_1",
+    },
+)
+ENERGY_COMPANY_BY_EIA_ID = {
+    "19876": "Dominion Energy North Carolina",
+    "5416": "Duke Energy Carolinas, LLC",
+    "3046": "Duke Energy Progress, LLC",
+    "13482": "New River Light and Power Company",
+    "6235": "Fayetteville Public Works Commission",
+    "7639": "Greenville Utilities Commission",
+    "20785": "Wilson Energy",
+}
+DUKE_MY_ACCOUNT_URL = "https://www.duke-energy.com/my-account/sign-in"
+GREEN_BUTTON_CONNECT_URL = "https://www.greenbuttonalliance.org/green-button-connect-my-data-cmd"
+GREEN_BUTTON_DOWNLOAD_URL = "https://www.greenbuttonalliance.org/green-button-download-my-data-dmd"
+NCUC_DATA_ACCESS_ORDER_URL = "https://starw1.ncuc.gov/NCUC/ViewFile.aspx?Id=b18eb0c3-6968-47d0-adbf-9f1b6ea8f680"
+UTILITY_ACCESS_GUIDES = (
+    {
+        "id": "duke_download",
+        "name": "Download your Duke history",
+        "status": "Works now",
+        "summary": "Sign in to Duke My Account, open your usage history, download the detailed interval file, then upload it here.",
+        "action_label": "Go to Duke My Account",
+        "action_url": DUKE_MY_ACCOUNT_URL,
+        "secondary_label": "About Green Button files",
+        "secondary_url": GREEN_BUTTON_DOWNLOAD_URL,
+    },
+    {
+        "id": "green_button_connect",
+        "name": "Green Button customer connection",
+        "status": "Ready when Duke opens access",
+        "summary": "This is the clean long-term path: the customer approves Home Energy Watch, the utility sends usage history, and the customer can revoke access.",
+        "action_label": "See the Green Button connection standard",
+        "action_url": GREEN_BUTTON_CONNECT_URL,
+        "secondary_label": "",
+        "secondary_url": "",
+    },
+    {
+        "id": "ncuc_data_access",
+        "name": "North Carolina data-access track",
+        "status": "Watching the rule",
+        "summary": "North Carolina has ordered a machine-readable customer data path. Home Energy Watch is built to use that path when the utility registration process is available.",
+        "action_label": "Read the NCUC order",
+        "action_url": NCUC_DATA_ACCESS_ORDER_URL,
+        "secondary_label": "",
+        "secondary_url": "",
+    },
+)
 
 INPUT_DIR = DEFAULT_INPUT_DIR
 OUTPUT_DIR = DEFAULT_OUTPUT_DIR
@@ -211,14 +302,24 @@ OPEN_METEO_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 SCHEMA_READY_TARGETS: set[str] = set()
 POSTGRES_SCHEMA_LOCK_KEY = 104251906
+POSTGRES_AUDIT_LOCK_KEY = 104251907
+POSTGRES_STAFF_LOCK_KEY = 104251908
 COMPARE_MAJOR_DELTA_KWH_PCT = 15.0
 COMPARE_MAJOR_DELTA_BASELINE_KW = 0.25
 COMPARE_MAJOR_DELTA_FLAGGED_NIGHTS = 2
+WEATHER_HEAT_HIGH_F = float(os.getenv("POWER_WEATHER_HEAT_HIGH_F", "90"))
+WEATHER_HEAT_APPARENT_F = float(os.getenv("POWER_WEATHER_HEAT_APPARENT_F", "95"))
+WEATHER_HEAT_LOW_F = float(os.getenv("POWER_WEATHER_HEAT_LOW_F", "75"))
+WEATHER_COLD_LOW_F = float(os.getenv("POWER_WEATHER_COLD_LOW_F", "32"))
+WEATHER_COLD_HIGH_F = float(os.getenv("POWER_WEATHER_COLD_HIGH_F", "45"))
+WEATHER_STORM_PRECIP_IN = float(os.getenv("POWER_WEATHER_STORM_PRECIP_IN", "0.5"))
+WEATHER_STORM_WIND_MPH = float(os.getenv("POWER_WEATHER_STORM_WIND_MPH", "25"))
 BILLING_PLAN_DEFINITIONS = (
     {
         "id": "home",
         "name": "Home Watch",
         "monthly_price_label": "$19/mo",
+        "amount_cents": 1900,
         "account_limit": 1,
         "stripe_price_env": "STRIPE_PRICE_HOME",
         "summary": "For one household watching its own electric account.",
@@ -227,6 +328,7 @@ BILLING_PLAN_DEFINITIONS = (
         "id": "review",
         "name": "Review Desk",
         "monthly_price_label": "$99/mo",
+        "amount_cents": 9900,
         "account_limit": 20,
         "stripe_price_env": "STRIPE_PRICE_REVIEW",
         "summary": "For advocates and reviewers working across a small set of accounts.",
@@ -235,11 +337,13 @@ BILLING_PLAN_DEFINITIONS = (
         "id": "agency",
         "name": "Agency Pilot",
         "monthly_price_label": "Custom",
+        "amount_cents": None,
         "account_limit": None,
         "stripe_price_env": "STRIPE_PRICE_AGENCY",
         "summary": "For a commission or agency review workspace.",
     },
 )
+DEFAULT_STRIPE_API_VERSION = "2026-02-25.clover"
 DEFAULT_MARKETING_HOSTS = ("homeenergywatch.com", "www.homeenergywatch.com")
 DEFAULT_APP_HOSTS = ("app.homeenergywatch.com",)
 
@@ -363,6 +467,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Path to save the single-file CSV report or compare artifact",
     )
     parser.add_argument("--tz", default=DEFAULT_TZ, help="Timezone for interpreting timestamps")
+    parser.add_argument(
+        "--account-number",
+        help="Saved account number to use when adding cached weather context to single-file exports",
+    )
     parser.add_argument("--night-start", type=str, default=DEFAULT_NIGHT_START, help="Night window start (HH:MM)")
     parser.add_argument("--night-end", type=str, default=DEFAULT_NIGHT_END, help="Night window end (HH:MM)")
     parser.add_argument(
@@ -378,6 +486,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Flag a day when night average kW exceeds baseline times this multiplier",
     )
     parser.add_argument("--serve", action="store_true", help="Run the local web app instead of a one-shot report")
+    parser.add_argument(
+        "--sync-utilities",
+        action="store_true",
+        help="Sync saved utility connections once and exit",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Web host to bind when using --serve")
     parser.add_argument("--port", type=int, default=8000, help="Web port to bind when using --serve")
     return parser
@@ -587,6 +700,7 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         CREATE TABLE IF NOT EXISTS household_profiles (
             account_id BIGINT PRIMARY KEY,
             address TEXT,
+            zip_code TEXT,
             occupant_count INTEGER,
             year_built INTEGER,
             square_footage INTEGER,
@@ -602,6 +716,7 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         )
         """
     )
+    conn.execute("ALTER TABLE household_profiles ADD COLUMN IF NOT EXISTS zip_code TEXT")
     conn.execute("ALTER TABLE household_profiles ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION")
     conn.execute("ALTER TABLE household_profiles ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION")
     conn.execute("ALTER TABLE household_profiles ADD COLUMN IF NOT EXISTS weather_location TEXT")
@@ -656,6 +771,9 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
             secret_last4 TEXT,
             status TEXT NOT NULL,
             last_sync_at TEXT,
+            last_sync_status TEXT,
+            last_sync_error TEXT,
+            last_sync_attempt_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(account_id) REFERENCES accounts(id)
@@ -663,6 +781,9 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         """
     )
     conn.execute("ALTER TABLE utility_connections ADD COLUMN IF NOT EXISTS secret_token TEXT")
+    conn.execute("ALTER TABLE utility_connections ADD COLUMN IF NOT EXISTS last_sync_status TEXT")
+    conn.execute("ALTER TABLE utility_connections ADD COLUMN IF NOT EXISTS last_sync_error TEXT")
+    conn.execute("ALTER TABLE utility_connections ADD COLUMN IF NOT EXISTS last_sync_attempt_at TEXT")
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_utility_connections_account_id
@@ -679,11 +800,72 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
             password_hash TEXT,
             is_active INTEGER NOT NULL DEFAULT 1,
             invite_token TEXT,
+            invite_token_hash TEXT,
             invite_expires_at TEXT,
+            auth_version INTEGER NOT NULL DEFAULT 1,
+            mfa_secret_token TEXT,
+            mfa_pending_secret_token TEXT,
+            mfa_pending_created_at TEXT,
+            mfa_enabled_at TEXT,
+            mfa_last_counter BIGINT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_login_at TEXT
         )
+        """
+    )
+    conn.execute("ALTER TABLE staff_users ADD COLUMN IF NOT EXISTS invite_token_hash TEXT")
+    conn.execute("ALTER TABLE staff_users ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 1")
+    conn.execute("ALTER TABLE staff_users ADD COLUMN IF NOT EXISTS mfa_secret_token TEXT")
+    conn.execute("ALTER TABLE staff_users ADD COLUMN IF NOT EXISTS mfa_pending_secret_token TEXT")
+    conn.execute("ALTER TABLE staff_users ADD COLUMN IF NOT EXISTS mfa_pending_created_at TEXT")
+    conn.execute("ALTER TABLE staff_users ADD COLUMN IF NOT EXISTS mfa_enabled_at TEXT")
+    conn.execute("ALTER TABLE staff_users ADD COLUMN IF NOT EXISTS mfa_last_counter BIGINT")
+    legacy_invites = conn.execute(
+        "SELECT id, invite_token FROM staff_users WHERE invite_token IS NOT NULL AND invite_token_hash IS NULL"
+    ).fetchall()
+    for legacy_invite in legacy_invites:
+        conn.execute(
+            "UPDATE staff_users SET invite_token = NULL, invite_token_hash = ? WHERE id = ?",
+            (staff_invite_token_hash(str(legacy_invite["invite_token"])), int(legacy_invite["id"])),
+        )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS staff_auth_tokens (
+            id BIGSERIAL PRIMARY KEY,
+            staff_user_id BIGINT NOT NULL,
+            purpose TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT,
+            requested_ip_hash TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(staff_user_id) REFERENCES staff_users(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_staff_auth_tokens_user_purpose
+        ON staff_auth_tokens (staff_user_id, purpose, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS staff_mfa_recovery_codes (
+            id BIGSERIAL PRIMARY KEY,
+            staff_user_id BIGINT NOT NULL,
+            code_hash TEXT NOT NULL UNIQUE,
+            consumed_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(staff_user_id) REFERENCES staff_users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_staff_mfa_recovery_user
+        ON staff_mfa_recovery_codes (staff_user_id, consumed_at)
         """
     )
     conn.execute(
@@ -694,21 +876,120 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
             full_name TEXT NOT NULL,
             password_hash TEXT NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1,
+            email_verified_at TEXT,
+            auth_version INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_login_at TEXT
         )
         """
     )
+    customer_columns = table_columns(conn, "customer_users")
+    if "email_verified_at" not in customer_columns:
+        conn.execute("ALTER TABLE customer_users ADD COLUMN email_verified_at TEXT")
+        conn.execute("UPDATE customer_users SET email_verified_at = created_at WHERE email_verified_at IS NULL")
+    if "auth_version" not in customer_columns:
+        conn.execute("ALTER TABLE customer_users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 1")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS customer_auth_tokens (
+            id BIGSERIAL PRIMARY KEY,
+            customer_user_id BIGINT NOT NULL,
+            purpose TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT,
+            requested_ip_hash TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_customer_auth_tokens_user_purpose
+        ON customer_auth_tokens (customer_user_id, purpose, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS auth_rate_limits (
+            scope TEXT NOT NULL,
+            identity_hash TEXT NOT NULL,
+            window_start_epoch BIGINT NOT NULL,
+            attempt_count INTEGER NOT NULL,
+            blocked_until_epoch BIGINT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (scope, identity_hash)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS report_artifacts (
+            filename TEXT PRIMARY KEY,
+            account_id BIGINT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_report_artifacts_account_id
+        ON report_artifacts (account_id, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id BIGSERIAL PRIMARY KEY,
+            occurred_at TEXT NOT NULL,
+            actor_type TEXT NOT NULL,
+            actor_id BIGINT,
+            action TEXT NOT NULL,
+            account_id BIGINT,
+            target_type TEXT,
+            target_id TEXT,
+            request_id TEXT NOT NULL,
+            remote_hash TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            previous_hash TEXT,
+            event_hash TEXT,
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+    conn.execute("ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS previous_hash TEXT")
+    conn.execute("ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS event_hash TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_events_account_time
+        ON audit_events (account_id, occurred_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_events_action_time
+        ON audit_events (action, occurred_at)
+        """
+    )
+    backfill_audit_event_hashes(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS customer_billing (
             customer_user_id BIGINT PRIMARY KEY,
             plan_id TEXT NOT NULL,
             subscription_status TEXT NOT NULL,
+            checkout_session_id TEXT,
             stripe_customer_id TEXT,
             stripe_subscription_id TEXT,
-            checkout_session_id TEXT,
+            stripe_payment_intent_id TEXT,
+            stripe_receipt_url TEXT,
+            payments_customer_id TEXT,
+            payments_order_id TEXT,
+            payments_checkout_session_id TEXT,
+            payments_receipt_id TEXT,
             current_period_end TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -716,6 +997,14 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         )
         """
     )
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS payments_customer_id TEXT")
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS payments_order_id TEXT")
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS payments_checkout_session_id TEXT")
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS payments_receipt_id TEXT")
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT")
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT")
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_payment_intent_id TEXT")
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_receipt_url TEXT")
 
 
 def migrate_database(conn: DatabaseConnection) -> None:
@@ -853,6 +1142,7 @@ def migrate_database(conn: DatabaseConnection) -> None:
         CREATE TABLE IF NOT EXISTS household_profiles (
             account_id INTEGER PRIMARY KEY,
             address TEXT,
+            zip_code TEXT,
             occupant_count INTEGER,
             year_built INTEGER,
             square_footage INTEGER,
@@ -866,6 +1156,8 @@ def migrate_database(conn: DatabaseConnection) -> None:
         """
     )
     household_columns = table_columns(conn, "household_profiles")
+    if "zip_code" not in household_columns:
+        conn.execute("ALTER TABLE household_profiles ADD COLUMN zip_code TEXT")
     if "latitude" not in household_columns:
         conn.execute("ALTER TABLE household_profiles ADD COLUMN latitude REAL")
     if "longitude" not in household_columns:
@@ -923,6 +1215,9 @@ def migrate_database(conn: DatabaseConnection) -> None:
             secret_last4 TEXT,
             status TEXT NOT NULL,
             last_sync_at TEXT,
+            last_sync_status TEXT,
+            last_sync_error TEXT,
+            last_sync_attempt_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(account_id) REFERENCES accounts(id)
@@ -932,6 +1227,12 @@ def migrate_database(conn: DatabaseConnection) -> None:
     utility_columns = table_columns(conn, "utility_connections")
     if "secret_token" not in utility_columns:
         conn.execute("ALTER TABLE utility_connections ADD COLUMN secret_token TEXT")
+    if "last_sync_status" not in utility_columns:
+        conn.execute("ALTER TABLE utility_connections ADD COLUMN last_sync_status TEXT")
+    if "last_sync_error" not in utility_columns:
+        conn.execute("ALTER TABLE utility_connections ADD COLUMN last_sync_error TEXT")
+    if "last_sync_attempt_at" not in utility_columns:
+        conn.execute("ALTER TABLE utility_connections ADD COLUMN last_sync_attempt_at TEXT")
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_utility_connections_account_id
@@ -948,11 +1249,80 @@ def migrate_database(conn: DatabaseConnection) -> None:
             password_hash TEXT,
             is_active INTEGER NOT NULL DEFAULT 1,
             invite_token TEXT,
+            invite_token_hash TEXT,
             invite_expires_at TEXT,
+            auth_version INTEGER NOT NULL DEFAULT 1,
+            mfa_secret_token TEXT,
+            mfa_pending_secret_token TEXT,
+            mfa_pending_created_at TEXT,
+            mfa_enabled_at TEXT,
+            mfa_last_counter INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_login_at TEXT
         )
+        """
+    )
+    staff_columns = table_columns(conn, "staff_users")
+    if "invite_token_hash" not in staff_columns:
+        conn.execute("ALTER TABLE staff_users ADD COLUMN invite_token_hash TEXT")
+    if "auth_version" not in staff_columns:
+        conn.execute("ALTER TABLE staff_users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 1")
+    if "mfa_secret_token" not in staff_columns:
+        conn.execute("ALTER TABLE staff_users ADD COLUMN mfa_secret_token TEXT")
+    if "mfa_pending_secret_token" not in staff_columns:
+        conn.execute("ALTER TABLE staff_users ADD COLUMN mfa_pending_secret_token TEXT")
+    if "mfa_pending_created_at" not in staff_columns:
+        conn.execute("ALTER TABLE staff_users ADD COLUMN mfa_pending_created_at TEXT")
+    if "mfa_enabled_at" not in staff_columns:
+        conn.execute("ALTER TABLE staff_users ADD COLUMN mfa_enabled_at TEXT")
+    if "mfa_last_counter" not in staff_columns:
+        conn.execute("ALTER TABLE staff_users ADD COLUMN mfa_last_counter INTEGER")
+    legacy_invites = conn.execute(
+        "SELECT id, invite_token FROM staff_users WHERE invite_token IS NOT NULL AND invite_token_hash IS NULL"
+    ).fetchall()
+    for legacy_invite in legacy_invites:
+        conn.execute(
+            "UPDATE staff_users SET invite_token = NULL, invite_token_hash = ? WHERE id = ?",
+            (staff_invite_token_hash(str(legacy_invite["invite_token"])), int(legacy_invite["id"])),
+        )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS staff_auth_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            staff_user_id INTEGER NOT NULL,
+            purpose TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT,
+            requested_ip_hash TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(staff_user_id) REFERENCES staff_users(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_staff_auth_tokens_user_purpose
+        ON staff_auth_tokens (staff_user_id, purpose, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS staff_mfa_recovery_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            staff_user_id INTEGER NOT NULL,
+            code_hash TEXT NOT NULL UNIQUE,
+            consumed_at TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(staff_user_id) REFERENCES staff_users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_staff_mfa_recovery_user
+        ON staff_mfa_recovery_codes (staff_user_id, consumed_at)
         """
     )
     conn.execute(
@@ -963,21 +1333,123 @@ def migrate_database(conn: DatabaseConnection) -> None:
             full_name TEXT NOT NULL,
             password_hash TEXT NOT NULL,
             is_active INTEGER NOT NULL DEFAULT 1,
+            email_verified_at TEXT,
+            auth_version INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             last_login_at TEXT
         )
         """
     )
+    customer_columns = table_columns(conn, "customer_users")
+    if "email_verified_at" not in customer_columns:
+        conn.execute("ALTER TABLE customer_users ADD COLUMN email_verified_at TEXT")
+        conn.execute("UPDATE customer_users SET email_verified_at = created_at WHERE email_verified_at IS NULL")
+    if "auth_version" not in customer_columns:
+        conn.execute("ALTER TABLE customer_users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 1")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS customer_auth_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_user_id INTEGER NOT NULL,
+            purpose TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT,
+            requested_ip_hash TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_customer_auth_tokens_user_purpose
+        ON customer_auth_tokens (customer_user_id, purpose, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS auth_rate_limits (
+            scope TEXT NOT NULL,
+            identity_hash TEXT NOT NULL,
+            window_start_epoch INTEGER NOT NULL,
+            attempt_count INTEGER NOT NULL,
+            blocked_until_epoch INTEGER,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (scope, identity_hash)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS report_artifacts (
+            filename TEXT PRIMARY KEY,
+            account_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_report_artifacts_account_id
+        ON report_artifacts (account_id, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            occurred_at TEXT NOT NULL,
+            actor_type TEXT NOT NULL,
+            actor_id INTEGER,
+            action TEXT NOT NULL,
+            account_id INTEGER,
+            target_type TEXT,
+            target_id TEXT,
+            request_id TEXT NOT NULL,
+            remote_hash TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            previous_hash TEXT,
+            event_hash TEXT,
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+    audit_columns = table_columns(conn, "audit_events")
+    if "previous_hash" not in audit_columns:
+        conn.execute("ALTER TABLE audit_events ADD COLUMN previous_hash TEXT")
+    if "event_hash" not in audit_columns:
+        conn.execute("ALTER TABLE audit_events ADD COLUMN event_hash TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_events_account_time
+        ON audit_events (account_id, occurred_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_audit_events_action_time
+        ON audit_events (action, occurred_at)
+        """
+    )
+    backfill_audit_event_hashes(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS customer_billing (
             customer_user_id INTEGER PRIMARY KEY,
             plan_id TEXT NOT NULL,
             subscription_status TEXT NOT NULL,
+            checkout_session_id TEXT,
             stripe_customer_id TEXT,
             stripe_subscription_id TEXT,
-            checkout_session_id TEXT,
+            stripe_payment_intent_id TEXT,
+            stripe_receipt_url TEXT,
+            payments_customer_id TEXT,
+            payments_order_id TEXT,
+            payments_checkout_session_id TEXT,
+            payments_receipt_id TEXT,
             current_period_end TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -985,6 +1457,23 @@ def migrate_database(conn: DatabaseConnection) -> None:
         )
         """
     )
+    billing_columns = table_columns(conn, "customer_billing")
+    if "payments_customer_id" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN payments_customer_id TEXT")
+    if "payments_order_id" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN payments_order_id TEXT")
+    if "payments_checkout_session_id" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN payments_checkout_session_id TEXT")
+    if "payments_receipt_id" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN payments_receipt_id TEXT")
+    if "stripe_customer_id" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_customer_id TEXT")
+    if "stripe_subscription_id" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_subscription_id TEXT")
+    if "stripe_payment_intent_id" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_payment_intent_id TEXT")
+    if "stripe_receipt_url" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_receipt_url TEXT")
 
 
 def clean_email(value: str | None) -> str:
@@ -1001,6 +1490,209 @@ def clean_password(value: str | None) -> str:
     return password
 
 
+class EmailVerificationRequired(ValueError):
+    def __init__(self, customer_user: dict[str, object]):
+        super().__init__("Confirm your email address before signing in.")
+        self.customer_user = customer_user
+
+
+def runtime_environment() -> str:
+    return (os.getenv("POWER_ENV") or "development").strip().lower()
+
+
+def is_production_environment() -> bool:
+    return runtime_environment() == "production"
+
+
+def get_app_secret() -> str:
+    return (os.getenv("POWER_APP_SECRET") or DEFAULT_APP_SECRET).strip()
+
+
+def get_audit_signing_key() -> str:
+    configured = (os.getenv("POWER_AUDIT_SIGNING_KEY") or "").strip()
+    if configured:
+        return configured
+    if is_production_environment():
+        raise RuntimeError("POWER_AUDIT_SIGNING_KEY is required in production.")
+    return f"local-audit:{get_app_secret()}"
+
+
+def email_delivery_backend() -> str:
+    return (os.getenv("POWER_EMAIL_BACKEND") or "disabled").strip().lower()
+
+
+def email_verification_required() -> bool:
+    return email_delivery_backend() != "disabled"
+
+
+def get_email_sender() -> str:
+    return (os.getenv("POWER_EMAIL_FROM") or "").strip()
+
+
+def get_email_reply_to() -> str:
+    return (os.getenv("POWER_EMAIL_REPLY_TO") or "").strip()
+
+
+def get_email_region() -> str:
+    return (os.getenv("POWER_EMAIL_REGION") or "us-east-1").strip()
+
+
+def send_transactional_email(recipient: str, subject: str, text_body: str) -> None:
+    normalized_recipient = clean_email(recipient)
+    backend = email_delivery_backend()
+    if backend == "memory":
+        if is_production_environment():
+            raise RuntimeError("The in-memory email backend cannot run in production.")
+        EMAIL_OUTBOX.append(
+            {
+                "recipient": normalized_recipient,
+                "subject": subject,
+                "text_body": text_body,
+            }
+        )
+        return
+    if backend != "ses":
+        raise RuntimeError("Email delivery is not configured.")
+    if boto3 is None:
+        raise RuntimeError("Install boto3 to send account email through Amazon SES.")
+    sender = get_email_sender()
+    if not sender:
+        raise RuntimeError("POWER_EMAIL_FROM is required for email delivery.")
+    message: dict[str, object] = {
+        "FromEmailAddress": sender,
+        "Destination": {"ToAddresses": [normalized_recipient]},
+        "Content": {
+            "Simple": {
+                "Subject": {"Data": subject, "Charset": "UTF-8"},
+                "Body": {"Text": {"Data": text_body, "Charset": "UTF-8"}},
+            }
+        },
+    }
+    reply_to = get_email_reply_to()
+    if reply_to:
+        message["ReplyToAddresses"] = [reply_to]
+    boto3.client("sesv2", region_name=get_email_region()).send_email(**message)
+
+
+def get_data_encryption_cipher() -> Fernet:
+    key = (os.getenv("POWER_DATA_ENCRYPTION_KEY") or "").strip()
+    if not key:
+        if is_production_environment():
+            raise RuntimeError("POWER_DATA_ENCRYPTION_KEY is required in production.")
+        digest = hashlib.sha256(f"home-energy-watch:{get_app_secret()}".encode("utf-8")).digest()
+        key = base64.urlsafe_b64encode(digest).decode("ascii")
+    try:
+        return Fernet(key.encode("ascii"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("POWER_DATA_ENCRYPTION_KEY must be a valid Fernet key.") from exc
+
+
+def validate_runtime_security() -> None:
+    if not is_production_environment():
+        return
+    app_secret = get_app_secret()
+    disallowed = {DEFAULT_APP_SECRET, "replace-with-a-long-random-secret", "change-me"}
+    if app_secret in disallowed or len(app_secret) < 32:
+        raise RuntimeError("POWER_APP_SECRET must be a unique value of at least 32 characters in production.")
+    audit_signing_key = get_audit_signing_key()
+    if len(audit_signing_key) < 32:
+        raise RuntimeError("POWER_AUDIT_SIGNING_KEY must contain at least 32 characters in production.")
+    public_base_url = (os.getenv("POWER_PUBLIC_BASE_URL") or "").strip()
+    if not public_base_url.startswith("https://"):
+        raise RuntimeError("POWER_PUBLIC_BASE_URL must use HTTPS in production.")
+    database_url = (os.getenv("POWER_DATABASE_URL") or os.getenv("DATABASE_URL") or "").strip()
+    parsed_database_url = urlsplit(database_url)
+    if parsed_database_url.scheme not in {"postgres", "postgresql"} or not parsed_database_url.hostname:
+        raise RuntimeError("POWER_DATABASE_URL must point to Postgres in production.")
+    sslmode = parse_qs(parsed_database_url.query).get("sslmode", [""])[0].lower()
+    if sslmode not in {"require", "verify-ca", "verify-full"}:
+        raise RuntimeError("POWER_DATABASE_URL must require TLS in production.")
+    get_data_encryption_cipher()
+    if email_delivery_backend() != "ses":
+        raise RuntimeError("POWER_EMAIL_BACKEND must be ses in production.")
+    sender = get_email_sender()
+    if "@" not in sender:
+        raise RuntimeError("POWER_EMAIL_FROM must be a valid sender in production.")
+    if boto3 is None:
+        raise RuntimeError("boto3 is required for production email delivery.")
+
+
+def auth_rate_limit_identity(scope: str, email: str | None, remote_address: str | None) -> str:
+    normalized_email = (email or "").strip().lower()
+    identity = f"{scope}:{normalized_email}:{remote_address or 'unknown'}"
+    return hmac.new(get_app_secret().encode("utf-8"), identity.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def auth_rate_limit_status(scope: str, identity_hash: str, now_epoch: int | None = None) -> dict[str, int | bool]:
+    now = int(time.time()) if now_epoch is None else int(now_epoch)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT window_start_epoch, attempt_count, blocked_until_epoch
+            FROM auth_rate_limits
+            WHERE scope = ? AND identity_hash = ?
+            """,
+            (scope, identity_hash),
+        ).fetchone()
+    if row is None:
+        return {"blocked": False, "retry_after": 0, "attempt_count": 0}
+    blocked_until = int(row["blocked_until_epoch"] or 0)
+    return {
+        "blocked": blocked_until > now,
+        "retry_after": max(0, blocked_until - now),
+        "attempt_count": int(row["attempt_count"]),
+    }
+
+
+def record_auth_failure(scope: str, identity_hash: str, now_epoch: int | None = None) -> dict[str, int | bool]:
+    now = int(time.time()) if now_epoch is None else int(now_epoch)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT window_start_epoch, attempt_count, blocked_until_epoch
+            FROM auth_rate_limits
+            WHERE scope = ? AND identity_hash = ?
+            """,
+            (scope, identity_hash),
+        ).fetchone()
+        if row is None or now - int(row["window_start_epoch"]) >= AUTH_RATE_LIMIT_WINDOW_SECONDS:
+            window_start = now
+            attempt_count = 1
+        else:
+            window_start = int(row["window_start_epoch"])
+            attempt_count = int(row["attempt_count"]) + 1
+        blocked_until = now + AUTH_RATE_LIMIT_BLOCK_SECONDS if attempt_count >= AUTH_RATE_LIMIT_MAX_ATTEMPTS else None
+        conn.execute(
+            """
+            INSERT INTO auth_rate_limits (
+                scope, identity_hash, window_start_epoch, attempt_count, blocked_until_epoch, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope, identity_hash) DO UPDATE SET
+                window_start_epoch = excluded.window_start_epoch,
+                attempt_count = excluded.attempt_count,
+                blocked_until_epoch = excluded.blocked_until_epoch,
+                updated_at = excluded.updated_at
+            """,
+            (scope, identity_hash, window_start, attempt_count, blocked_until, timestamp_now()),
+        )
+        conn.commit()
+    return {
+        "blocked": blocked_until is not None,
+        "retry_after": AUTH_RATE_LIMIT_BLOCK_SECONDS if blocked_until is not None else 0,
+        "attempt_count": attempt_count,
+    }
+
+
+def clear_auth_failures(scope: str, identity_hash: str) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM auth_rate_limits WHERE scope = ? AND identity_hash = ?",
+            (scope, identity_hash),
+        )
+        conn.commit()
+
+
 def clean_role(value: str | None) -> str:
     normalized = (value or "").strip()
     if normalized not in STAFF_ROLES:
@@ -1008,11 +1700,29 @@ def clean_role(value: str | None) -> str:
     return normalized
 
 
+def staff_invite_token_hash(token: str | None) -> str:
+    value = (token or "").strip()
+    if not value:
+        return ""
+    key = f"{get_app_secret()}:staff-invite".encode("utf-8")
+    return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def staff_auth_token_hash(token: str | None) -> str:
+    value = (token or "").strip()
+    if not value:
+        return ""
+    key = f"{get_app_secret()}:staff-auth".encode("utf-8")
+    return hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def serialize_staff_user_row(row: sqlite3.Row | None) -> dict[str, object] | None:
     if row is None:
         return None
     mapping = dict(row)
-    invite_pending = bool(mapping.get("invite_token")) and not bool(mapping.get("password_hash"))
+    invite_pending = bool(mapping.get("invite_token_hash") or mapping.get("invite_token")) and not bool(
+        mapping.get("password_hash")
+    )
     return {
         "id": int(mapping["id"]),
         "email": mapping["email"],
@@ -1021,6 +1731,9 @@ def serialize_staff_user_row(row: sqlite3.Row | None) -> dict[str, object] | Non
         "is_active": bool(mapping["is_active"]),
         "invite_pending": invite_pending,
         "invite_expires_at": mapping.get("invite_expires_at"),
+        "auth_version": int(mapping.get("auth_version") or 1),
+        "mfa_enabled": bool(mapping.get("mfa_enabled_at")),
+        "mfa_enabled_at": mapping.get("mfa_enabled_at"),
         "last_login_at": mapping.get("last_login_at"),
     }
 
@@ -1035,7 +1748,8 @@ def list_staff_users() -> list[dict[str, object]]:
     with get_db_connection() as conn:
         rows = conn.execute(
             """
-            SELECT id, email, full_name, role, is_active, invite_token, invite_expires_at, password_hash, last_login_at
+            SELECT id, email, full_name, role, is_active, invite_token, invite_token_hash,
+                   invite_expires_at, password_hash, auth_version, mfa_enabled_at, last_login_at
             FROM staff_users
             ORDER BY CASE WHEN role = 'Commissioner' THEN 0 ELSE 1 END, full_name, email
             """
@@ -1054,7 +1768,8 @@ def get_staff_user_by_id(staff_user_id: int | None) -> dict[str, object] | None:
     with get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT id, email, full_name, role, is_active, invite_token, invite_expires_at, password_hash, last_login_at
+            SELECT id, email, full_name, role, is_active, invite_token, invite_token_hash,
+                   invite_expires_at, password_hash, auth_version, mfa_enabled_at, last_login_at
             FROM staff_users
             WHERE id = ?
             """,
@@ -1093,7 +1808,8 @@ def create_first_staff_user(email: str, full_name: str, password: str, role: str
         conn.commit()
         row = conn.execute(
             """
-            SELECT id, email, full_name, role, is_active, invite_token, invite_expires_at, password_hash, last_login_at
+            SELECT id, email, full_name, role, is_active, invite_token, invite_token_hash,
+                   invite_expires_at, password_hash, auth_version, mfa_enabled_at, last_login_at
             FROM staff_users
             WHERE email = ?
             """,
@@ -1107,7 +1823,8 @@ def authenticate_staff_user(email: str, password: str) -> dict[str, object]:
     with get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT id, email, full_name, role, is_active, invite_token, invite_expires_at, password_hash, last_login_at
+            SELECT id, email, full_name, role, is_active, invite_token, invite_token_hash,
+                   invite_expires_at, password_hash, auth_version, mfa_enabled_at, last_login_at
             FROM staff_users
             WHERE email = ?
             """,
@@ -1117,19 +1834,25 @@ def authenticate_staff_user(email: str, password: str) -> dict[str, object]:
             raise ValueError("That sign-in did not work.")
         if not check_password_hash(row["password_hash"], password or ""):
             raise ValueError("That sign-in did not work.")
+    return get_staff_user_by_id(int(row["id"])) or {}
+
+
+def mark_staff_login_succeeded(staff_user_id: int) -> None:
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
         conn.execute(
             "UPDATE staff_users SET last_login_at = ?, updated_at = ? WHERE id = ?",
-            (timestamp_now(), timestamp_now(), int(row["id"])),
+            (timestamp, timestamp, int(staff_user_id)),
         )
         conn.commit()
-    return get_staff_user_by_id(int(row["id"])) or {}
 
 
 def invite_staff_user(email: str, full_name: str, role: str, invited_by_id: int) -> dict[str, object]:
     normalized_email = clean_email(email)
     normalized_name = (full_name or "").strip() or normalized_email
     normalized_role = clean_role(role)
-    token = secrets.token_urlsafe(24)
+    token = secrets.token_urlsafe(32)
+    token_hash = staff_invite_token_hash(token)
     expires_at = (datetime.now() + timedelta(days=INVITE_EXPIRY_DAYS)).isoformat(timespec="seconds")
     timestamp = timestamp_now()
     with get_db_connection() as conn:
@@ -1141,16 +1864,16 @@ def invite_staff_user(email: str, full_name: str, role: str, invited_by_id: int)
             conn.execute(
                 """
                 INSERT INTO staff_users (
-                    email, full_name, role, password_hash, is_active, invite_token, invite_expires_at,
-                    created_at, updated_at, last_login_at
+                    email, full_name, role, password_hash, is_active, invite_token, invite_token_hash,
+                    invite_expires_at, auth_version, created_at, updated_at, last_login_at
                 )
-                VALUES (?, ?, ?, NULL, 1, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, NULL, 1, NULL, ?, ?, 1, ?, ?, NULL)
                 """,
                 (
                     normalized_email,
                     normalized_name,
                     normalized_role,
-                    token,
+                    token_hash,
                     expires_at,
                     timestamp,
                     timestamp,
@@ -1160,13 +1883,15 @@ def invite_staff_user(email: str, full_name: str, role: str, invited_by_id: int)
             conn.execute(
                 """
                 UPDATE staff_users
-                SET full_name = ?, role = ?, invite_token = ?, invite_expires_at = ?, updated_at = ?, is_active = 1
+                SET full_name = ?, role = ?, invite_token = NULL, invite_token_hash = ?,
+                    invite_expires_at = ?, updated_at = ?, is_active = 1,
+                    auth_version = auth_version + 1
                 WHERE id = ?
                 """,
                 (
                     normalized_name,
                     normalized_role,
-                    token,
+                    token_hash,
                     expires_at,
                     timestamp,
                     int(existing["id"]),
@@ -1182,17 +1907,96 @@ def invite_staff_user(email: str, full_name: str, role: str, invited_by_id: int)
     }
 
 
+def update_staff_user_access(
+    staff_user_id: int,
+    *,
+    role: str,
+    is_active: bool,
+    acting_staff_user_id: int,
+) -> dict[str, object]:
+    target_id = int(staff_user_id)
+    actor_id = int(acting_staff_user_id)
+    normalized_role = clean_role(role)
+    if target_id == actor_id:
+        raise ValueError("Ask another commissioner to change your access.")
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        if conn.kind == "postgres":
+            conn.execute("SELECT pg_advisory_xact_lock(?)", (POSTGRES_STAFF_LOCK_KEY,))
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+        target = conn.execute(
+            """
+            SELECT id, email, full_name, role, is_active, invite_token, invite_token_hash,
+                   invite_expires_at, password_hash, auth_version, mfa_enabled_at, last_login_at
+            FROM staff_users
+            WHERE id = ?
+            """,
+            (target_id,),
+        ).fetchone()
+        if target is None:
+            conn.rollback()
+            raise ValueError("That staff member is no longer available.")
+        before = serialize_staff_user_row(target) or {}
+        removing_active_commissioner = (
+            bool(before["is_active"])
+            and before["role"] == "Commissioner"
+            and (not is_active or normalized_role != "Commissioner")
+        )
+        if removing_active_commissioner:
+            commissioner_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM staff_users WHERE role = 'Commissioner' AND is_active = 1"
+            ).fetchone()
+            if commissioner_count is None or int(commissioner_count["count"]) <= 1:
+                conn.rollback()
+                raise ValueError("At least one active commissioner must remain.")
+        conn.execute(
+            """
+            UPDATE staff_users
+            SET role = ?, is_active = ?, auth_version = auth_version + 1,
+                invite_token = CASE WHEN ? = 1 THEN invite_token ELSE NULL END,
+                invite_token_hash = CASE WHEN ? = 1 THEN invite_token_hash ELSE NULL END,
+                invite_expires_at = CASE WHEN ? = 1 THEN invite_expires_at ELSE NULL END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                normalized_role,
+                1 if is_active else 0,
+                1 if is_active else 0,
+                1 if is_active else 0,
+                1 if is_active else 0,
+                timestamp,
+                target_id,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE staff_auth_tokens
+            SET consumed_at = ?
+            WHERE staff_user_id = ? AND consumed_at IS NULL
+            """,
+            (timestamp, target_id),
+        )
+        conn.commit()
+    after = get_staff_user_by_id(target_id)
+    if after is None:
+        raise RuntimeError("The staff access change could not be confirmed.")
+    return {"before": before, "after": after}
+
+
 def load_invited_staff_user(token: str | None) -> dict[str, object] | None:
     if not token:
         return None
     with get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT id, email, full_name, role, is_active, invite_token, invite_expires_at, password_hash, last_login_at
+            SELECT id, email, full_name, role, is_active, invite_token, invite_token_hash,
+                   invite_expires_at, password_hash, auth_version, mfa_enabled_at, last_login_at
             FROM staff_users
-            WHERE invite_token = ?
+            WHERE invite_token_hash = ? OR invite_token = ?
             """,
-            (token,),
+            (staff_invite_token_hash(token), token),
         ).fetchone()
     return serialize_staff_user_row(row)
 
@@ -1210,7 +2014,8 @@ def accept_staff_invite(token: str, password: str, full_name: str | None = None)
         conn.execute(
             """
             UPDATE staff_users
-            SET full_name = ?, password_hash = ?, invite_token = NULL, invite_expires_at = NULL, updated_at = ?
+            SET full_name = ?, password_hash = ?, invite_token = NULL, invite_token_hash = NULL,
+                invite_expires_at = NULL, auth_version = auth_version + 1, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -1224,6 +2029,178 @@ def accept_staff_invite(token: str, password: str, full_name: str | None = None)
     return get_staff_user_by_id(int(invited_user["id"])) or {}
 
 
+def get_staff_user_by_email(email: str | None) -> dict[str, object] | None:
+    try:
+        normalized_email = clean_email(email)
+    except ValueError:
+        return None
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id, email, full_name, role, is_active, invite_token, invite_token_hash,
+                   invite_expires_at, password_hash, auth_version, mfa_enabled_at, last_login_at
+            FROM staff_users
+            WHERE email = ?
+            """,
+            (normalized_email,),
+        ).fetchone()
+    return serialize_staff_user_row(row)
+
+
+def create_staff_auth_token(staff_user_id: int, purpose: str, lifetime: timedelta) -> str:
+    if purpose not in STAFF_AUTH_TOKEN_PURPOSES:
+        raise ValueError("Choose a valid staff account token purpose.")
+    token = secrets.token_urlsafe(32)
+    token_hash = staff_auth_token_hash(token)
+    created_at = timestamp_now()
+    expires_at = (datetime.now() + lifetime).isoformat(timespec="seconds")
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE staff_auth_tokens
+            SET consumed_at = ?
+            WHERE staff_user_id = ? AND purpose = ? AND consumed_at IS NULL
+            """,
+            (created_at, int(staff_user_id), purpose),
+        )
+        conn.execute(
+            """
+            INSERT INTO staff_auth_tokens (
+                staff_user_id, purpose, token_hash, expires_at, consumed_at,
+                requested_ip_hash, created_at
+            )
+            VALUES (?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                int(staff_user_id),
+                purpose,
+                token_hash,
+                expires_at,
+                request_remote_hash(),
+                created_at,
+            ),
+        )
+        conn.commit()
+    return token
+
+
+def load_valid_staff_auth_token(token: str | None, purpose: str) -> dict[str, object] | None:
+    token_hash = staff_auth_token_hash(token)
+    if not token_hash or purpose not in STAFF_AUTH_TOKEN_PURPOSES:
+        return None
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT staff_auth_tokens.id AS token_id,
+                   staff_auth_tokens.expires_at,
+                   staff_users.id,
+                   staff_users.email,
+                   staff_users.full_name,
+                   staff_users.role,
+                   staff_users.is_active,
+                   staff_users.invite_token,
+                   staff_users.invite_token_hash,
+                   staff_users.invite_expires_at,
+                   staff_users.password_hash,
+                   staff_users.auth_version,
+                   staff_users.last_login_at
+            FROM staff_auth_tokens
+            JOIN staff_users ON staff_users.id = staff_auth_tokens.staff_user_id
+            WHERE staff_auth_tokens.token_hash = ?
+              AND staff_auth_tokens.purpose = ?
+              AND staff_auth_tokens.consumed_at IS NULL
+            """,
+            (token_hash, purpose),
+        ).fetchone()
+    if row is None or not bool(row["is_active"]) or not row["password_hash"]:
+        return None
+    if datetime.fromisoformat(str(row["expires_at"])) <= datetime.now():
+        return None
+    return {
+        "token_id": int(row["token_id"]),
+        "staff_user": serialize_staff_user_row(row) or {},
+        "expires_at": str(row["expires_at"]),
+    }
+
+
+def reset_staff_password(token: str | None, password: str | None) -> dict[str, object]:
+    normalized_password = clean_password(password)
+    token_record = load_valid_staff_auth_token(token, "password_reset")
+    if token_record is None:
+        raise ValueError("That password link is no longer available.")
+    staff_user = token_record["staff_user"]
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE staff_auth_tokens
+            SET consumed_at = ?
+            WHERE id = ? AND consumed_at IS NULL
+            """,
+            (timestamp, int(token_record["token_id"])),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError("That password link is no longer available.")
+        conn.execute(
+            """
+            UPDATE staff_auth_tokens
+            SET consumed_at = ?
+            WHERE staff_user_id = ? AND purpose = 'password_reset' AND consumed_at IS NULL
+            """,
+            (timestamp, int(staff_user["id"])),
+        )
+        conn.execute(
+            """
+            UPDATE staff_users
+            SET password_hash = ?, auth_version = auth_version + 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (generate_password_hash(normalized_password), timestamp, int(staff_user["id"])),
+        )
+        conn.commit()
+    return get_staff_user_by_id(int(staff_user["id"])) or {}
+
+
+def send_staff_invitation_email(invite: dict[str, object], base_url: str) -> None:
+    setup_url = build_absolute_url(base_url, f"/staff/setup/{invite['token']}")
+    send_transactional_email(
+        str(invite["email"]),
+        "Your Home Energy Watch commission access",
+        (
+            f"Hello {invite['full_name']},\n\n"
+            "You have been invited to the Home Energy Watch commission workspace. "
+            "Use this one-time link to choose your password.\n\n"
+            f"{setup_url}\n\n"
+            f"This link expires in {INVITE_EXPIRY_DAYS} days. "
+            "If you were not expecting this invitation, you can ignore this message.\n"
+        ),
+    )
+
+
+def send_staff_password_reset_email(staff_user: dict[str, object], base_url: str) -> None:
+    token = create_staff_auth_token(
+        int(staff_user["id"]),
+        "password_reset",
+        timedelta(minutes=PASSWORD_RESET_EXPIRY_MINUTES),
+    )
+    reset_url = build_absolute_url(
+        base_url,
+        f"/staff/reset-password?{urlencode({'token': token})}",
+    )
+    send_transactional_email(
+        str(staff_user["email"]),
+        "Reset your Home Energy Watch commission password",
+        (
+            f"Hello {staff_user['full_name']},\n\n"
+            "Use this link to choose a new password for the Home Energy Watch commission workspace.\n\n"
+            f"{reset_url}\n\n"
+            f"This link expires in {PASSWORD_RESET_EXPIRY_MINUTES} minutes and works once. "
+            "If you did not request it, you can ignore this message.\n"
+        ),
+    )
+
+
 def serialize_customer_user_row(row: sqlite3.Row | None) -> dict[str, object] | None:
     if row is None:
         return None
@@ -1233,6 +2210,9 @@ def serialize_customer_user_row(row: sqlite3.Row | None) -> dict[str, object] | 
         "email": mapping["email"],
         "full_name": mapping["full_name"],
         "is_active": bool(mapping["is_active"]),
+        "email_verified_at": mapping.get("email_verified_at"),
+        "email_verified": bool(mapping.get("email_verified_at")),
+        "auth_version": int(mapping.get("auth_version") or 1),
         "last_login_at": mapping.get("last_login_at"),
     }
 
@@ -1243,7 +2223,7 @@ def get_customer_user_by_id(customer_user_id: int | None) -> dict[str, object] |
     with get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT id, email, full_name, is_active, last_login_at
+            SELECT id, email, full_name, is_active, email_verified_at, auth_version, last_login_at
             FROM customer_users
             WHERE id = ?
             """,
@@ -1257,6 +2237,7 @@ def create_customer_user(email: str, full_name: str, password: str) -> dict[str,
     normalized_name = (full_name or "").strip() or normalized_email
     normalized_password = clean_password(password)
     timestamp = timestamp_now()
+    email_verified_at = None if email_verification_required() else timestamp
     with get_db_connection() as conn:
         existing = conn.execute(
             "SELECT id FROM customer_users WHERE email = ?",
@@ -1267,14 +2248,16 @@ def create_customer_user(email: str, full_name: str, password: str) -> dict[str,
         conn.execute(
             """
             INSERT INTO customer_users (
-                email, full_name, password_hash, is_active, created_at, updated_at, last_login_at
+                email, full_name, password_hash, is_active, email_verified_at, auth_version,
+                created_at, updated_at, last_login_at
             )
-            VALUES (?, ?, ?, 1, ?, ?, NULL)
+            VALUES (?, ?, ?, 1, ?, 1, ?, ?, NULL)
             """,
             (
                 normalized_email,
                 normalized_name,
                 generate_password_hash(normalized_password),
+                email_verified_at,
                 timestamp,
                 timestamp,
             ),
@@ -1282,7 +2265,7 @@ def create_customer_user(email: str, full_name: str, password: str) -> dict[str,
         conn.commit()
         row = conn.execute(
             """
-            SELECT id, email, full_name, is_active, last_login_at
+            SELECT id, email, full_name, is_active, email_verified_at, auth_version, last_login_at
             FROM customer_users
             WHERE email = ?
             """,
@@ -1296,7 +2279,7 @@ def authenticate_customer_user(email: str, password: str) -> dict[str, object]:
     with get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT id, email, full_name, password_hash, is_active, last_login_at
+            SELECT id, email, full_name, password_hash, is_active, email_verified_at, auth_version, last_login_at
             FROM customer_users
             WHERE email = ?
             """,
@@ -1306,6 +2289,9 @@ def authenticate_customer_user(email: str, password: str) -> dict[str, object]:
             raise ValueError("That sign-in did not work.")
         if not check_password_hash(row["password_hash"], password or ""):
             raise ValueError("That sign-in did not work.")
+        customer_user = serialize_customer_user_row(row) or {}
+        if email_verification_required() and not customer_user.get("email_verified"):
+            raise EmailVerificationRequired(customer_user)
         conn.execute(
             "UPDATE customer_users SET last_login_at = ?, updated_at = ? WHERE id = ?",
             (timestamp_now(), timestamp_now(), int(row["id"])),
@@ -1314,11 +2300,795 @@ def authenticate_customer_user(email: str, password: str) -> dict[str, object]:
     return get_customer_user_by_id(int(row["id"])) or {}
 
 
+def get_customer_user_by_email(email: str | None) -> dict[str, object] | None:
+    try:
+        normalized_email = clean_email(email)
+    except ValueError:
+        return None
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id, email, full_name, is_active, email_verified_at, auth_version, last_login_at
+            FROM customer_users
+            WHERE email = ?
+            """,
+            (normalized_email,),
+        ).fetchone()
+    return serialize_customer_user_row(row)
+
+
+def customer_auth_token_hash(token: str | None) -> str:
+    value = (token or "").strip()
+    if not value:
+        return ""
+    return hmac.new(get_app_secret().encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def request_remote_hash() -> str | None:
+    if not has_request_context():
+        return None
+    remote_address = (request.remote_addr or "").strip()
+    if not remote_address:
+        return None
+    return hmac.new(
+        get_app_secret().encode("utf-8"),
+        remote_address.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def create_customer_auth_token(
+    customer_user_id: int,
+    purpose: str,
+    lifetime: timedelta,
+) -> str:
+    if purpose not in CUSTOMER_AUTH_TOKEN_PURPOSES:
+        raise ValueError("Choose a valid account token purpose.")
+    token = secrets.token_urlsafe(32)
+    token_hash = customer_auth_token_hash(token)
+    created_at = timestamp_now()
+    expires_at = (datetime.now() + lifetime).isoformat(timespec="seconds")
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE customer_auth_tokens
+            SET consumed_at = ?
+            WHERE customer_user_id = ? AND purpose = ? AND consumed_at IS NULL
+            """,
+            (created_at, int(customer_user_id), purpose),
+        )
+        conn.execute(
+            """
+            INSERT INTO customer_auth_tokens (
+                customer_user_id, purpose, token_hash, expires_at, consumed_at,
+                requested_ip_hash, created_at
+            )
+            VALUES (?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                int(customer_user_id),
+                purpose,
+                token_hash,
+                expires_at,
+                request_remote_hash(),
+                created_at,
+            ),
+        )
+        conn.commit()
+    return token
+
+
+def load_valid_customer_auth_token(token: str | None, purpose: str) -> dict[str, object] | None:
+    token_hash = customer_auth_token_hash(token)
+    if not token_hash or purpose not in CUSTOMER_AUTH_TOKEN_PURPOSES:
+        return None
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT customer_auth_tokens.id AS token_id,
+                   customer_users.id AS id,
+                   customer_auth_tokens.expires_at,
+                   customer_users.email,
+                   customer_users.full_name,
+                   customer_users.is_active,
+                   customer_users.email_verified_at,
+                   customer_users.auth_version,
+                   customer_users.last_login_at
+            FROM customer_auth_tokens
+            JOIN customer_users ON customer_users.id = customer_auth_tokens.customer_user_id
+            WHERE customer_auth_tokens.token_hash = ?
+              AND customer_auth_tokens.purpose = ?
+              AND customer_auth_tokens.consumed_at IS NULL
+            """,
+            (token_hash, purpose),
+        ).fetchone()
+    if row is None or not bool(row["is_active"]):
+        return None
+    if datetime.fromisoformat(str(row["expires_at"])) <= datetime.now():
+        return None
+    return {
+        "token_id": int(row["token_id"]),
+        "customer_user": serialize_customer_user_row(row) or {},
+        "expires_at": str(row["expires_at"]),
+    }
+
+
+def verify_customer_email(token: str | None) -> dict[str, object]:
+    token_record = load_valid_customer_auth_token(token, "verify_email")
+    if token_record is None:
+        raise ValueError("That confirmation link is no longer available.")
+    customer_user = token_record["customer_user"]
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE customer_auth_tokens
+            SET consumed_at = ?
+            WHERE id = ? AND consumed_at IS NULL
+            """,
+            (timestamp, int(token_record["token_id"])),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError("That confirmation link is no longer available.")
+        conn.execute(
+            """
+            UPDATE customer_users
+            SET email_verified_at = COALESCE(email_verified_at, ?), updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, timestamp, int(customer_user["id"])),
+        )
+        conn.commit()
+    return get_customer_user_by_id(int(customer_user["id"])) or {}
+
+
+def reset_customer_password(token: str | None, password: str | None) -> dict[str, object]:
+    normalized_password = clean_password(password)
+    token_record = load_valid_customer_auth_token(token, "password_reset")
+    if token_record is None:
+        raise ValueError("That password link is no longer available.")
+    customer_user = token_record["customer_user"]
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE customer_auth_tokens
+            SET consumed_at = ?
+            WHERE id = ? AND consumed_at IS NULL
+            """,
+            (timestamp, int(token_record["token_id"])),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError("That password link is no longer available.")
+        conn.execute(
+            """
+            UPDATE customer_auth_tokens
+            SET consumed_at = ?
+            WHERE customer_user_id = ? AND purpose = 'password_reset' AND consumed_at IS NULL
+            """,
+            (timestamp, int(customer_user["id"])),
+        )
+        conn.execute(
+            """
+            UPDATE customer_users
+            SET password_hash = ?, auth_version = auth_version + 1, updated_at = ?
+            WHERE id = ?
+            """,
+            (generate_password_hash(normalized_password), timestamp, int(customer_user["id"])),
+        )
+        conn.commit()
+    return get_customer_user_by_id(int(customer_user["id"])) or {}
+
+
+def mask_email_address(email: str | None) -> str:
+    normalized = (email or "").strip()
+    if "@" not in normalized:
+        return "your email address"
+    local, domain = normalized.rsplit("@", 1)
+    visible = local[:1] if local else ""
+    return f"{visible}{'*' * max(3, len(local) - 1)}@{domain}"
+
+
+def send_customer_verification_email(customer_user: dict[str, object], base_url: str) -> None:
+    token = create_customer_auth_token(
+        int(customer_user["id"]),
+        "verify_email",
+        timedelta(hours=EMAIL_VERIFICATION_EXPIRY_HOURS),
+    )
+    confirmation_url = build_absolute_url(
+        base_url,
+        f"/customer/verify-email?{urlencode({'token': token})}",
+    )
+    send_transactional_email(
+        str(customer_user["email"]),
+        "Confirm your Home Energy Watch account",
+        (
+            f"Hello {customer_user['full_name']},\n\n"
+            "Confirm your email address before opening your energy history or continuing to payment.\n\n"
+            f"{confirmation_url}\n\n"
+            f"This link expires in {EMAIL_VERIFICATION_EXPIRY_HOURS} hours. "
+            "If you did not create this account, you can ignore this message.\n"
+        ),
+    )
+
+
+def send_customer_password_reset_email(customer_user: dict[str, object], base_url: str) -> None:
+    token = create_customer_auth_token(
+        int(customer_user["id"]),
+        "password_reset",
+        timedelta(minutes=PASSWORD_RESET_EXPIRY_MINUTES),
+    )
+    reset_url = build_absolute_url(
+        base_url,
+        f"/customer/reset-password?{urlencode({'token': token})}",
+    )
+    send_transactional_email(
+        str(customer_user["email"]),
+        "Reset your Home Energy Watch password",
+        (
+            f"Hello {customer_user['full_name']},\n\n"
+            "Use this link to choose a new password for Home Energy Watch.\n\n"
+            f"{reset_url}\n\n"
+            f"This link expires in {PASSWORD_RESET_EXPIRY_MINUTES} minutes and works once. "
+            "If you did not request it, you can ignore this message.\n"
+        ),
+    )
+
+
+def audit_event_hash(
+    event: dict[str, object],
+    previous_hash: str | None,
+) -> str:
+    payload = {
+        "previous_hash": previous_hash or "",
+        "occurred_at": str(event.get("occurred_at") or ""),
+        "actor_type": str(event.get("actor_type") or ""),
+        "actor_id": event.get("actor_id"),
+        "action": str(event.get("action") or ""),
+        "account_id": event.get("account_id"),
+        "target_type": event.get("target_type"),
+        "target_id": event.get("target_id"),
+        "request_id": str(event.get("request_id") or ""),
+        "remote_hash": event.get("remote_hash"),
+        "metadata_json": str(event.get("metadata_json") or "{}"),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hmac.new(
+        get_audit_signing_key().encode("utf-8"),
+        canonical.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def audit_chain_status(conn: DatabaseConnection) -> dict[str, object]:
+    rows = conn.execute(
+        """
+        SELECT id, occurred_at, actor_type, actor_id, action, account_id, target_type,
+               target_id, request_id, remote_hash, metadata_json, previous_hash, event_hash
+        FROM audit_events
+        ORDER BY id ASC
+        """
+    ).fetchall()
+    previous_hash = ""
+    for row in rows:
+        mapping = dict(row)
+        saved_previous = str(mapping.get("previous_hash") or "")
+        saved_hash = str(mapping.get("event_hash") or "")
+        if not saved_hash or not hmac.compare_digest(saved_previous, previous_hash):
+            return {
+                "valid": False,
+                "checked_events": len(rows),
+                "failure_event_id": int(mapping["id"]),
+            }
+        expected_hash = audit_event_hash(mapping, previous_hash)
+        if not hmac.compare_digest(saved_hash, expected_hash):
+            return {
+                "valid": False,
+                "checked_events": len(rows),
+                "failure_event_id": int(mapping["id"]),
+            }
+        previous_hash = saved_hash
+    return {
+        "valid": True,
+        "checked_events": len(rows),
+        "failure_event_id": None,
+        "latest_hash": previous_hash,
+    }
+
+
+def backfill_audit_event_hashes(conn: DatabaseConnection) -> None:
+    rows = conn.execute(
+        """
+        SELECT id, occurred_at, actor_type, actor_id, action, account_id, target_type,
+               target_id, request_id, remote_hash, metadata_json, previous_hash, event_hash
+        FROM audit_events
+        ORDER BY id ASC
+        """
+    ).fetchall()
+    if not rows:
+        return
+    saved_hashes = [str(dict(row).get("event_hash") or "") for row in rows]
+    if all(not saved_hash for saved_hash in saved_hashes):
+        previous_hash = ""
+        for row in rows:
+            mapping = dict(row)
+            event_hash_value = audit_event_hash(mapping, previous_hash)
+            conn.execute(
+                "UPDATE audit_events SET previous_hash = ?, event_hash = ? WHERE id = ?",
+                (previous_hash or None, event_hash_value, int(mapping["id"])),
+            )
+            previous_hash = event_hash_value
+        return
+    if any(not saved_hash for saved_hash in saved_hashes):
+        raise RuntimeError("The audit record has an incomplete integrity chain.")
+    status = audit_chain_status(conn)
+    if not status["valid"]:
+        raise RuntimeError("The audit record did not pass its integrity check.")
+
+
+def verify_audit_chain() -> dict[str, object]:
+    with get_db_connection() as conn:
+        return audit_chain_status(conn)
+
+
+def record_audit_event(
+    action: str,
+    *,
+    actor_type: str = "system",
+    actor_id: int | None = None,
+    account_number: str | None = None,
+    target_type: str | None = None,
+    target_id: object | None = None,
+    metadata: dict[str, object] | None = None,
+) -> int:
+    normalized_action = (action or "").strip()
+    if not normalized_action:
+        raise ValueError("Audit actions require a name.")
+    request_id = str(getattr(g, "request_id", "") or uuid4().hex) if has_request_context() else uuid4().hex
+    metadata_json = json.dumps(metadata or {}, sort_keys=True, separators=(",", ":"))
+    if len(metadata_json) > 4000:
+        metadata_json = json.dumps({"detail": "Audit metadata exceeded the storage limit."})
+    with get_db_connection() as conn:
+        if conn.kind == "postgres":
+            conn.execute("SELECT pg_advisory_xact_lock(?)", (POSTGRES_AUDIT_LOCK_KEY,))
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+        account_id = None
+        if account_number:
+            account_row = conn.execute(
+                "SELECT id FROM accounts WHERE account_number = ?",
+                (normalize_account_number(account_number),),
+            ).fetchone()
+            account_id = None if account_row is None else int(account_row["id"])
+        previous_row = conn.execute(
+            "SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        previous_hash = "" if previous_row is None else str(previous_row["event_hash"] or "")
+        if previous_row is not None and not previous_hash:
+            conn.rollback()
+            raise RuntimeError("The audit record has an incomplete integrity chain.")
+        event = {
+            "occurred_at": timestamp_now(),
+            "actor_type": actor_type,
+            "actor_id": actor_id,
+            "action": normalized_action,
+            "account_id": account_id,
+            "target_type": clean_optional_text(target_type),
+            "target_id": None if target_id is None else str(target_id),
+            "request_id": request_id,
+            "remote_hash": request_remote_hash(),
+            "metadata_json": metadata_json,
+        }
+        event_hash_value = audit_event_hash(event, previous_hash)
+        values = (
+            event["occurred_at"],
+            event["actor_type"],
+            event["actor_id"],
+            event["action"],
+            event["account_id"],
+            event["target_type"],
+            event["target_id"],
+            event["request_id"],
+            event["remote_hash"],
+            event["metadata_json"],
+            previous_hash or None,
+            event_hash_value,
+        )
+        insert_sql = """
+            INSERT INTO audit_events (
+                occurred_at, actor_type, actor_id, action, account_id, target_type,
+                target_id, request_id, remote_hash, metadata_json, previous_hash, event_hash
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        if conn.kind == "postgres":
+            row = conn.execute(f"{insert_sql} RETURNING id", values).fetchone()
+            event_id = int(row["id"])
+        else:
+            cursor = conn.execute(insert_sql, values)
+            event_id = int(cursor.lastrowid)
+        conn.commit()
+    return event_id
+
+
+def list_audit_events(
+    *,
+    account_number: str | None = None,
+    action: str | None = None,
+    page: int = 1,
+    per_page: int = 50,
+) -> dict[str, object]:
+    safe_page = max(1, int(page or 1))
+    safe_per_page = min(100, max(25, int(per_page or 50)))
+    clauses: list[str] = []
+    params: list[object] = []
+    if account_number:
+        clauses.append("accounts.account_number = ?")
+        params.append(normalize_account_number(account_number))
+    normalized_action = (action or "").strip()
+    if normalized_action:
+        clauses.append("audit_events.action = ?")
+        params.append(normalized_action)
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with get_db_connection() as conn:
+        total_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM audit_events
+            LEFT JOIN accounts ON accounts.id = audit_events.account_id
+            {where_clause}
+            """,
+            tuple(params),
+        ).fetchone()
+        total = 0 if total_row is None else int(total_row["count"])
+        total_pages = max(1, (total + safe_per_page - 1) // safe_per_page)
+        safe_page = min(safe_page, total_pages)
+        rows = conn.execute(
+            f"""
+            SELECT audit_events.*, accounts.account_number,
+                   staff_users.full_name AS staff_name,
+                   customer_users.full_name AS customer_name
+            FROM audit_events
+            LEFT JOIN accounts ON accounts.id = audit_events.account_id
+            LEFT JOIN staff_users
+              ON audit_events.actor_type = 'staff' AND staff_users.id = audit_events.actor_id
+            LEFT JOIN customer_users
+              ON audit_events.actor_type = 'customer' AND customer_users.id = audit_events.actor_id
+            {where_clause}
+            ORDER BY audit_events.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple([*params, safe_per_page, (safe_page - 1) * safe_per_page]),
+        ).fetchall()
+    events: list[dict[str, object]] = []
+    for row in rows:
+        mapping = dict(row)
+        actor_name = mapping.get("staff_name") or mapping.get("customer_name") or mapping["actor_type"].title()
+        try:
+            event_metadata = json.loads(mapping.get("metadata_json") or "{}")
+        except json.JSONDecodeError:
+            event_metadata = {}
+        events.append(
+            {
+                "id": int(mapping["id"]),
+                "occurred_at": mapping["occurred_at"],
+                "actor_type": mapping["actor_type"],
+                "actor_name": actor_name,
+                "action": mapping["action"],
+                "account_number": mapping.get("account_number"),
+                "target_type": mapping.get("target_type"),
+                "target_id": mapping.get("target_id"),
+                "request_id": mapping["request_id"],
+                "previous_hash": mapping.get("previous_hash") or "",
+                "event_hash": mapping.get("event_hash") or "",
+                "metadata": event_metadata,
+            }
+        )
+    return {
+        "events": events,
+        "account_number": account_number or "",
+        "action": normalized_action,
+        "page": safe_page,
+        "per_page": safe_per_page,
+        "total": total,
+        "total_pages": total_pages,
+        "has_previous": safe_page > 1,
+        "has_next": safe_page < total_pages,
+    }
+
+
+def audit_csv_value(value: object | None) -> object:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return value
+    if value.startswith(("=", "+", "-", "@")):
+        return f"'{value}"
+    return value
+
+
+def build_audit_export_csv(account_number: str | None = None, action: str | None = None) -> str:
+    clauses: list[str] = []
+    params: list[object] = []
+    if account_number:
+        clauses.append("accounts.account_number = ?")
+        params.append(normalize_account_number(account_number))
+    normalized_action = (action or "").strip()
+    if normalized_action:
+        clauses.append("audit_events.action = ?")
+        params.append(normalized_action)
+    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT audit_events.*, accounts.account_number,
+                   staff_users.full_name AS staff_name,
+                   customer_users.full_name AS customer_name
+            FROM audit_events
+            LEFT JOIN accounts ON accounts.id = audit_events.account_id
+            LEFT JOIN staff_users
+              ON audit_events.actor_type = 'staff' AND staff_users.id = audit_events.actor_id
+            LEFT JOIN customer_users
+              ON audit_events.actor_type = 'customer' AND customer_users.id = audit_events.actor_id
+            {where_clause}
+            ORDER BY audit_events.id ASC
+            """,
+            tuple(params),
+        ).fetchall()
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        (
+            "event_id",
+            "occurred_at",
+            "action",
+            "actor_type",
+            "actor_name",
+            "account_number",
+            "target_type",
+            "target_id",
+            "request_id",
+            "previous_hash",
+            "event_hash",
+            "metadata_json",
+        )
+    )
+    for row in rows:
+        mapping = dict(row)
+        actor_name = mapping.get("staff_name") or mapping.get("customer_name") or mapping["actor_type"].title()
+        writer.writerow(
+            tuple(
+                audit_csv_value(value)
+                for value in (
+                    int(mapping["id"]),
+                    mapping["occurred_at"],
+                    mapping["action"],
+                    mapping["actor_type"],
+                    actor_name,
+                    mapping.get("account_number"),
+                    mapping.get("target_type"),
+                    mapping.get("target_id"),
+                    mapping["request_id"],
+                    mapping.get("previous_hash"),
+                    mapping.get("event_hash"),
+                    mapping.get("metadata_json") or "{}",
+                )
+            )
+        )
+    return output.getvalue()
+
+
+def customer_export_accounts(email: str) -> list[dict[str, object]]:
+    normalized_email = clean_email(email)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT accounts.id, accounts.account_number, accounts.display_name,
+                   accounts.energy_company, accounts.baseline_date,
+                   accounts.created_at, accounts.updated_at,
+                   account_access_emails.access_level
+            FROM account_access_emails
+            JOIN accounts ON accounts.id = account_access_emails.account_id
+            WHERE account_access_emails.email = ?
+            ORDER BY accounts.account_number
+            """,
+            (normalized_email,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def customer_export_json(value: object) -> str:
+    return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+
+
+def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes, int]:
+    customer_id = int(customer_user["id"])
+    email = clean_email(str(customer_user["email"]))
+    accounts = customer_export_accounts(email)
+    archive_buffer = io.BytesIO()
+    with get_db_connection() as conn, zipfile.ZipFile(
+        archive_buffer,
+        mode="w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=6,
+    ) as archive:
+        user_row = conn.execute(
+            """
+            SELECT email, full_name, email_verified_at, created_at, updated_at, last_login_at
+            FROM customer_users
+            WHERE id = ?
+            """,
+            (customer_id,),
+        ).fetchone()
+        billing_row = conn.execute(
+            """
+            SELECT plan_id, subscription_status, stripe_receipt_url, current_period_end,
+                   created_at, updated_at
+            FROM customer_billing
+            WHERE customer_user_id = ?
+            """,
+            (customer_id,),
+        ).fetchone()
+        manifest = {
+            "format_version": 1,
+            "generated_at": timestamp_now(),
+            "customer": {} if user_row is None else dict(user_row),
+            "billing": {} if billing_row is None else dict(billing_row),
+            "account_count": len(accounts),
+        }
+        archive.writestr("manifest.json", customer_export_json(manifest))
+
+        for account in accounts:
+            account_id = int(account["id"])
+            account_number = str(account["account_number"])
+            path_name = secure_filename(account_number) or f"account-{account_id}"
+            prefix = f"accounts/{path_name}-{account_id}"
+            household_row = conn.execute(
+                """
+                SELECT address, zip_code, occupant_count, year_built, square_footage,
+                       heating_system, cooling_system, water_heater, notes,
+                       latitude, longitude, weather_location, updated_at
+                FROM household_profiles
+                WHERE account_id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+            inventory_rows = conn.execute(
+                """
+                SELECT label, quantity, watts_each, include_when_off, notes, created_at, updated_at
+                FROM account_load_items
+                WHERE account_id = ?
+                ORDER BY id
+                """,
+                (account_id,),
+            ).fetchall()
+            connection_rows = conn.execute(
+                """
+                SELECT provider_name, connection_label, access_method, status,
+                       last_sync_at, last_sync_status, last_sync_attempt_at,
+                       created_at, updated_at
+                FROM utility_connections
+                WHERE account_id = ?
+                ORDER BY provider_name, connection_label
+                """,
+                (account_id,),
+            ).fetchall()
+            import_rows = conn.execute(
+                """
+                SELECT path, interval_count, imported_at, service_point_id
+                FROM imported_files
+                WHERE account_id = ?
+                ORDER BY imported_at, path
+                """,
+                (account_id,),
+            ).fetchall()
+            imports = [
+                {
+                    "source_file": Path(str(row["path"])).name,
+                    "interval_count": int(row["interval_count"]),
+                    "imported_at": row["imported_at"],
+                    "service_point_id": row["service_point_id"],
+                }
+                for row in import_rows
+            ]
+            profile = {
+                "account": {
+                    "account_number": account_number,
+                    "display_name": account["display_name"],
+                    "energy_company": account["energy_company"],
+                    "baseline_date": account["baseline_date"],
+                    "created_at": account["created_at"],
+                    "updated_at": account["updated_at"],
+                },
+                "access_level": account["access_level"],
+                "household": {} if household_row is None else dict(household_row),
+                "inventory": [dict(row) for row in inventory_rows],
+                "utility_connections": [dict(row) for row in connection_rows],
+                "imports": imports,
+            }
+            archive.writestr(f"{prefix}/profile.json", customer_export_json(profile))
+
+            interval_rows = conn.execute(
+                """
+                SELECT start_epoch, duration_s, wh, source_path, imported_at
+                FROM interval_readings
+                WHERE account_id = ?
+                ORDER BY start_epoch, duration_s
+                """,
+                (account_id,),
+            ).fetchall()
+            interval_output = io.StringIO(newline="")
+            interval_writer = csv.writer(interval_output)
+            interval_writer.writerow(
+                ("start_epoch", "start_utc", "duration_seconds", "usage_wh", "usage_kwh", "source_file", "imported_at")
+            )
+            for row in interval_rows:
+                start_epoch = int(row["start_epoch"])
+                wh = float(row["wh"])
+                interval_writer.writerow(
+                    (
+                        start_epoch,
+                        datetime.fromtimestamp(start_epoch, tz=timezone.utc).isoformat(),
+                        int(row["duration_s"]),
+                        wh,
+                        wh / 1000.0,
+                        Path(str(row["source_path"])).name,
+                        row["imported_at"],
+                    )
+                )
+            archive.writestr(f"{prefix}/interval-readings.csv", interval_output.getvalue())
+
+            weather_rows = conn.execute(
+                """
+                SELECT weather_date, timezone, location_name, data_json, fetched_at
+                FROM weather_daily_cache
+                WHERE account_id = ?
+                ORDER BY weather_date
+                """,
+                (account_id,),
+            ).fetchall()
+            weather: list[dict[str, object]] = []
+            for row in weather_rows:
+                try:
+                    weather_data = json.loads(row["data_json"] or "{}")
+                except json.JSONDecodeError:
+                    weather_data = {}
+                weather.append(
+                    {
+                        "date": row["weather_date"],
+                        "timezone": row["timezone"],
+                        "location": row["location_name"],
+                        "fetched_at": row["fetched_at"],
+                        "weather": weather_data,
+                    }
+                )
+            archive.writestr(f"{prefix}/weather.json", customer_export_json(weather))
+
+            report_rows = conn.execute(
+                """
+                SELECT filename
+                FROM report_artifacts
+                WHERE account_id = ?
+                ORDER BY created_at, filename
+                """,
+                (account_id,),
+            ).fetchall()
+            for report_row in report_rows:
+                filename = normalize_report_filename(str(report_row["filename"]))
+                report_path = OUTPUT_DIR / filename
+                if report_path.is_file() and report_path.stat().st_size <= MAX_EXPORT_REPORT_BYTES:
+                    archive.write(report_path, arcname=f"{prefix}/reports/{filename}")
+    return archive_buffer.getvalue(), len(accounts)
+
+
 def list_billing_plans() -> list[dict[str, object]]:
     plans: list[dict[str, object]] = []
     for plan in BILLING_PLAN_DEFINITIONS:
         plan_copy = dict(plan)
-        plan_copy["price_id"] = (os.getenv(str(plan["stripe_price_env"])) or "").strip()
+        amount_cents = plan_copy.get("amount_cents")
+        plan_copy["payment_ready"] = amount_cents is not None
         plans.append(plan_copy)
     return plans
 
@@ -1337,12 +3107,47 @@ def list_energy_companies() -> list[str]:
     return companies
 
 
+def list_utility_access_guides() -> list[dict[str, str]]:
+    return [dict(guide) for guide in UTILITY_ACCESS_GUIDES]
+
+
 def clean_energy_company(value: str | None) -> str:
     normalized = (value or "").strip()
     if not normalized:
         return ""
     companies_by_lower = {company.lower(): company for company in list_energy_companies()}
     return companies_by_lower.get(normalized.lower(), normalized)
+
+
+def clean_zip_code(value: str | None, *, required: bool = False) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        if required:
+            raise ValueError("Enter the ZIP code for the service address.")
+        return ""
+    if not re.fullmatch(r"\d{5}(?:-\d{4})?", normalized):
+        raise ValueError("Enter a five-digit ZIP code.")
+    return normalized[:5]
+
+
+def canonical_energy_company_name(raw_name: str, utility_id: object = None) -> str:
+    normalized_id = ""
+    if utility_id is not None:
+        try:
+            normalized_id = str(int(float(str(utility_id))))
+        except (TypeError, ValueError):
+            normalized_id = str(utility_id).strip()
+    if normalized_id in ENERGY_COMPANY_BY_EIA_ID:
+        return ENERGY_COMPANY_BY_EIA_ID[normalized_id]
+
+    cleaned = re.sub(r"\s+-\s+\(NC\)$", "", (raw_name or "").strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    known = clean_energy_company(cleaned)
+    if known != cleaned or known in list_energy_companies():
+        return known
+    if cleaned.isupper():
+        return cleaned.title().replace(" E M C", " EMC").replace(" Llc", " LLC")
+    return cleaned
 
 
 def get_billing_plan(plan_id: str | None) -> dict[str, object]:
@@ -1363,9 +3168,15 @@ def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: in
             "monthly_price_label": plan["monthly_price_label"],
             "status": "not_started",
             "status_label": "Not started",
+            "checkout_session_id": "",
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
-            "checkout_session_id": "",
+            "stripe_payment_intent_id": "",
+            "stripe_receipt_url": "",
+            "payments_customer_id": "",
+            "payments_order_id": "",
+            "payments_checkout_session_id": "",
+            "payments_receipt_id": "",
             "current_period_end": "",
         }
     mapping = dict(row)
@@ -1387,9 +3198,15 @@ def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: in
         "monthly_price_label": plan["monthly_price_label"],
         "status": status,
         "status_label": status_labels.get(str(status), str(status).replace("_", " ").title()),
+        "checkout_session_id": mapping.get("checkout_session_id") or "",
         "stripe_customer_id": mapping.get("stripe_customer_id") or "",
         "stripe_subscription_id": mapping.get("stripe_subscription_id") or "",
-        "checkout_session_id": mapping.get("checkout_session_id") or "",
+        "stripe_payment_intent_id": mapping.get("stripe_payment_intent_id") or "",
+        "stripe_receipt_url": mapping.get("stripe_receipt_url") or "",
+        "payments_customer_id": mapping.get("payments_customer_id") or "",
+        "payments_order_id": mapping.get("payments_order_id") or "",
+        "payments_checkout_session_id": mapping.get("payments_checkout_session_id") or "",
+        "payments_receipt_id": mapping.get("payments_receipt_id") or "",
         "current_period_end": mapping.get("current_period_end") or "",
     }
 
@@ -1398,8 +3215,11 @@ def load_customer_billing(customer_user_id: int) -> dict[str, object]:
     with get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT customer_user_id, plan_id, subscription_status, stripe_customer_id,
-                   stripe_subscription_id, checkout_session_id, current_period_end
+            SELECT customer_user_id, plan_id, subscription_status, checkout_session_id,
+                   stripe_customer_id, stripe_subscription_id, stripe_payment_intent_id,
+                   stripe_receipt_url,
+                   payments_customer_id, payments_order_id, payments_checkout_session_id,
+                   payments_receipt_id, current_period_end
             FROM customer_billing
             WHERE customer_user_id = ?
             """,
@@ -1412,9 +3232,15 @@ def upsert_customer_billing(
     customer_user_id: int,
     plan_id: str,
     status: str,
+    checkout_session_id: str | None = None,
     stripe_customer_id: str | None = None,
     stripe_subscription_id: str | None = None,
-    checkout_session_id: str | None = None,
+    stripe_payment_intent_id: str | None = None,
+    stripe_receipt_url: str | None = None,
+    payments_customer_id: str | None = None,
+    payments_order_id: str | None = None,
+    payments_checkout_session_id: str | None = None,
+    payments_receipt_id: str | None = None,
     current_period_end: str | None = None,
 ) -> dict[str, object]:
     plan = get_billing_plan(plan_id)
@@ -1424,16 +3250,25 @@ def upsert_customer_billing(
         conn.execute(
             """
             INSERT INTO customer_billing (
-                customer_user_id, plan_id, subscription_status, stripe_customer_id,
-                stripe_subscription_id, checkout_session_id, current_period_end, created_at, updated_at
+                customer_user_id, plan_id, subscription_status, checkout_session_id,
+                stripe_customer_id, stripe_subscription_id, stripe_payment_intent_id,
+                stripe_receipt_url,
+                payments_customer_id, payments_order_id,
+                payments_checkout_session_id, payments_receipt_id, current_period_end, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(customer_user_id) DO UPDATE SET
                 plan_id = excluded.plan_id,
                 subscription_status = excluded.subscription_status,
+                checkout_session_id = excluded.checkout_session_id,
                 stripe_customer_id = excluded.stripe_customer_id,
                 stripe_subscription_id = excluded.stripe_subscription_id,
-                checkout_session_id = excluded.checkout_session_id,
+                stripe_payment_intent_id = excluded.stripe_payment_intent_id,
+                stripe_receipt_url = excluded.stripe_receipt_url,
+                payments_customer_id = excluded.payments_customer_id,
+                payments_order_id = excluded.payments_order_id,
+                payments_checkout_session_id = excluded.payments_checkout_session_id,
+                payments_receipt_id = excluded.payments_receipt_id,
                 current_period_end = excluded.current_period_end,
                 updated_at = excluded.updated_at
             """,
@@ -1441,9 +3276,19 @@ def upsert_customer_billing(
                 int(customer_user_id),
                 plan["id"],
                 status,
+                checkout_session_id if checkout_session_id is not None else existing["checkout_session_id"],
                 stripe_customer_id if stripe_customer_id is not None else existing["stripe_customer_id"],
                 stripe_subscription_id if stripe_subscription_id is not None else existing["stripe_subscription_id"],
-                checkout_session_id if checkout_session_id is not None else existing["checkout_session_id"],
+                stripe_payment_intent_id
+                if stripe_payment_intent_id is not None
+                else existing["stripe_payment_intent_id"],
+                stripe_receipt_url if stripe_receipt_url is not None else existing["stripe_receipt_url"],
+                payments_customer_id if payments_customer_id is not None else existing["payments_customer_id"],
+                payments_order_id if payments_order_id is not None else existing["payments_order_id"],
+                payments_checkout_session_id
+                if payments_checkout_session_id is not None
+                else existing["payments_checkout_session_id"],
+                payments_receipt_id if payments_receipt_id is not None else existing["payments_receipt_id"],
                 current_period_end if current_period_end is not None else existing["current_period_end"],
                 timestamp,
                 timestamp,
@@ -1568,10 +3413,67 @@ def get_stripe_secret_key() -> str:
     return (os.getenv("STRIPE_SECRET_KEY") or "").strip()
 
 
-def extract_stripe_value(obj: object, key: str) -> object:
+def get_stripe_webhook_secret() -> str:
+    return (os.getenv("STRIPE_WEBHOOK_SECRET") or "").strip()
+
+
+def get_stripe_api_version() -> str:
+    return (os.getenv("STRIPE_API_VERSION") or DEFAULT_STRIPE_API_VERSION).strip()
+
+
+def get_stripe_account_id() -> str:
+    return (os.getenv("STRIPE_ACCOUNT_ID") or "").strip()
+
+
+def get_stripe_price_id(plan: dict[str, object]) -> str:
+    env_name = str(plan.get("stripe_price_env") or "")
+    return (os.getenv(env_name) or "").strip()
+
+
+def extract_mapping_value(obj: object, key: str) -> object:
     if isinstance(obj, dict):
         return obj.get(key)
     return getattr(obj, key, None)
+
+
+def normalize_stripe_id(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    candidate = extract_mapping_value(value, "id")
+    return str(candidate or "")
+
+
+def normalize_stripe_timestamp(value: object) -> str:
+    if value in {None, ""}:
+        return ""
+    try:
+        return datetime.fromtimestamp(int(value), tz=tz.UTC).isoformat()
+    except Exception:
+        return str(value)
+
+
+def configure_stripe() -> None:
+    if stripe is None:
+        raise ValueError("Payment is not available in this build.")
+    secret_key = get_stripe_secret_key()
+    if not secret_key:
+        raise ValueError("Payment is not connected yet.")
+    stripe.api_key = secret_key
+    stripe.api_version = get_stripe_api_version()
+
+
+def build_stripe_metadata(customer_user: dict[str, object], plan: dict[str, object]) -> dict[str, str]:
+    customer_user_id = str(customer_user["id"])
+    return {
+        "project": "home-energy-watch",
+        "project_name": "Home Energy Watch",
+        "project_domain": "app.homeenergywatch.com",
+        "customer_user_id": customer_user_id,
+        "plan_id": str(plan["id"]),
+        "reference": f"customer_billing:{customer_user_id}:{plan['id']}",
+    }
 
 
 def create_customer_checkout_session(
@@ -1579,102 +3481,166 @@ def create_customer_checkout_session(
     plan_id: str | None,
     base_url: str,
 ) -> dict[str, object]:
+    configure_stripe()
     plan = get_billing_plan(plan_id)
-    price_id = str(plan.get("price_id") or "")
+    price_id = get_stripe_price_id(plan)
     if not price_id:
         raise ValueError("Payment is not connected for that plan yet.")
-    secret_key = get_stripe_secret_key()
-    if not secret_key:
-        raise ValueError("Payment is not connected yet.")
-    if stripe is None:
-        raise ValueError("Payment is not available in this build.")
-
-    stripe.api_key = secret_key
-    customer_user_id = str(customer_user["id"])
-    success_url = f"{base_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}"
-    cancel_url = f"{base_url}/pricing"
+    metadata = build_stripe_metadata(customer_user, plan)
     session_obj = stripe.checkout.Session.create(
         mode="subscription",
         customer_email=str(customer_user["email"]),
         line_items=[{"price": price_id, "quantity": 1}],
-        success_url=success_url,
-        cancel_url=cancel_url,
-        client_reference_id=customer_user_id,
-        metadata={"customer_user_id": customer_user_id, "plan_id": str(plan["id"])},
-        subscription_data={"metadata": {"customer_user_id": customer_user_id, "plan_id": str(plan["id"])}},
+        success_url=f"{base_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{base_url}/billing/cancel",
+        client_reference_id=str(customer_user["id"]),
+        metadata=metadata,
+        subscription_data={"metadata": metadata},
         allow_promotion_codes=True,
     )
-    session_id = str(extract_stripe_value(session_obj, "id") or "")
-    session_url = str(extract_stripe_value(session_obj, "url") or "")
-    if not session_url:
+    session_id = normalize_stripe_id(session_obj)
+    session_url = str(extract_mapping_value(session_obj, "url") or "")
+    if not session_id or not session_url:
         raise ValueError("Payment could not start. Please try again.")
     upsert_customer_billing(
         int(customer_user["id"]),
         str(plan["id"]),
         "checkout_started",
         checkout_session_id=session_id,
+        stripe_customer_id=normalize_stripe_id(extract_mapping_value(session_obj, "customer")),
+        stripe_subscription_id=normalize_stripe_id(extract_mapping_value(session_obj, "subscription")),
+        stripe_payment_intent_id=normalize_stripe_id(extract_mapping_value(session_obj, "payment_intent")),
     )
     return {"id": session_id, "url": session_url}
 
 
 def create_customer_portal_session(customer_user: dict[str, object], base_url: str) -> dict[str, object]:
+    configure_stripe()
     billing = load_customer_billing(int(customer_user["id"]))
     stripe_customer_id = str(billing["stripe_customer_id"] or "")
     if not stripe_customer_id:
-        raise ValueError("Start billing before opening billing settings.")
-    secret_key = get_stripe_secret_key()
-    if not secret_key:
-        raise ValueError("Payment is not connected yet.")
-    if stripe is None:
-        raise ValueError("Payment is not available in this build.")
-
-    stripe.api_key = secret_key
+        raise ValueError("Billing is not active yet.")
     session_obj = stripe.billing_portal.Session.create(
         customer=stripe_customer_id,
-        return_url=f"{base_url}/customer",
+        return_url=f"{base_url}/customer/billing",
     )
-    session_url = str(extract_stripe_value(session_obj, "url") or "")
+    session_url = str(extract_mapping_value(session_obj, "url") or "")
     if not session_url:
-        raise ValueError("Billing settings could not open. Please try again.")
+        raise ValueError("Billing portal could not start. Please try again.")
     return {"url": session_url}
 
 
-def handle_billing_event(event: dict[str, object]) -> None:
-    event_type = str(event.get("type") or "")
-    data = event.get("data") or {}
-    event_object = data.get("object") if isinstance(data, dict) else {}
-    if not isinstance(event_object, dict):
-        return
+def stripe_subscription_status_to_billing_status(status: str) -> str:
+    normalized = (status or "").strip().lower()
+    if normalized in {"active", "trialing"}:
+        return normalized
+    if normalized in {"past_due", "unpaid", "incomplete", "incomplete_expired"}:
+        return "past_due" if normalized in {"past_due", "unpaid"} else "incomplete"
+    if normalized in {"canceled", "cancelled"}:
+        return "canceled"
+    return normalized or "checkout_started"
 
-    metadata = event_object.get("metadata") or {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    customer_user_id = metadata.get("customer_user_id") or event_object.get("client_reference_id")
-    plan_id = str(metadata.get("plan_id") or "home")
-    if not customer_user_id:
+
+def read_checkout_metadata(session_obj: object) -> dict[str, object]:
+    metadata = extract_mapping_value(session_obj, "metadata") or {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def read_subscription_metadata(subscription_obj: object) -> dict[str, object]:
+    metadata = extract_mapping_value(subscription_obj, "metadata") or {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def extract_stripe_receipt_url(session_obj: object) -> str:
+    invoice_obj = extract_mapping_value(session_obj, "invoice")
+    hosted_invoice_url = extract_mapping_value(invoice_obj, "hosted_invoice_url")
+    if hosted_invoice_url:
+        return str(hosted_invoice_url)
+    payment_intent = extract_mapping_value(session_obj, "payment_intent")
+    charges = extract_mapping_value(payment_intent, "charges")
+    data = extract_mapping_value(charges, "data")
+    if isinstance(data, list) and data:
+        receipt_url = extract_mapping_value(data[0], "receipt_url")
+        if receipt_url:
+            return str(receipt_url)
+    return ""
+
+
+def refresh_customer_billing_from_stripe(customer_user: dict[str, object], session_id: str | None = None) -> dict[str, object]:
+    configure_stripe()
+    billing = load_customer_billing(int(customer_user["id"]))
+    target_session_id = (session_id or str(billing.get("checkout_session_id") or "")).strip()
+    if not target_session_id:
+        return billing
+    session_obj = stripe.checkout.Session.retrieve(
+        target_session_id,
+        expand=["subscription", "payment_intent.charges", "invoice"],
+    )
+    metadata = read_checkout_metadata(session_obj)
+    plan_id = str(metadata.get("plan_id") or billing["plan_id"])
+    subscription_obj = extract_mapping_value(session_obj, "subscription")
+    subscription_id = normalize_stripe_id(subscription_obj)
+    subscription_status = str(extract_mapping_value(subscription_obj, "status") or "")
+    payment_status = str(extract_mapping_value(session_obj, "payment_status") or "")
+    billing_status = stripe_subscription_status_to_billing_status(subscription_status)
+    if not subscription_status and payment_status == "paid":
+        billing_status = "active"
+    current_period_end = normalize_stripe_timestamp(extract_mapping_value(subscription_obj, "current_period_end"))
+    return upsert_customer_billing(
+        int(customer_user["id"]),
+        plan_id,
+        billing_status,
+        checkout_session_id=target_session_id,
+        stripe_customer_id=normalize_stripe_id(extract_mapping_value(session_obj, "customer")),
+        stripe_subscription_id=subscription_id,
+        stripe_payment_intent_id=normalize_stripe_id(extract_mapping_value(session_obj, "payment_intent")),
+        stripe_receipt_url=extract_stripe_receipt_url(session_obj),
+        current_period_end=current_period_end,
+    )
+
+
+def handle_stripe_event(event: object) -> None:
+    event_type = str(extract_mapping_value(event, "type") or "")
+    data = extract_mapping_value(event, "data") or {}
+    event_object = extract_mapping_value(data, "object") if not isinstance(data, dict) else data.get("object")
+    if event_object is None:
         return
 
     if event_type == "checkout.session.completed":
-        upsert_customer_billing(
-            int(customer_user_id),
-            plan_id,
-            "active",
-            stripe_customer_id=str(event_object.get("customer") or ""),
-            stripe_subscription_id=str(event_object.get("subscription") or ""),
-            checkout_session_id=str(event_object.get("id") or ""),
-        )
-        return
-
-    if event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
-        status = str(event_object.get("status") or "active")
-        if event_type == "customer.subscription.deleted":
-            status = "canceled"
+        metadata = read_checkout_metadata(event_object)
+        customer_user_id = metadata.get("customer_user_id")
+        if not customer_user_id:
+            return
+        plan_id = str(metadata.get("plan_id") or "home")
+        payment_status = str(extract_mapping_value(event_object, "payment_status") or "")
+        status = "active" if payment_status in {"paid", "no_payment_required"} else "checkout_started"
         upsert_customer_billing(
             int(customer_user_id),
             plan_id,
             status,
-            stripe_customer_id=str(event_object.get("customer") or ""),
-            stripe_subscription_id=str(event_object.get("id") or ""),
+            checkout_session_id=normalize_stripe_id(event_object),
+            stripe_customer_id=normalize_stripe_id(extract_mapping_value(event_object, "customer")),
+            stripe_subscription_id=normalize_stripe_id(extract_mapping_value(event_object, "subscription")),
+            stripe_payment_intent_id=normalize_stripe_id(extract_mapping_value(event_object, "payment_intent")),
+        )
+        return
+
+    if event_type in {"customer.subscription.updated", "customer.subscription.deleted"}:
+        metadata = read_subscription_metadata(event_object)
+        customer_user_id = metadata.get("customer_user_id")
+        if not customer_user_id:
+            return
+        plan_id = str(metadata.get("plan_id") or "home")
+        status = "canceled" if event_type == "customer.subscription.deleted" else stripe_subscription_status_to_billing_status(
+            str(extract_mapping_value(event_object, "status") or "")
+        )
+        upsert_customer_billing(
+            int(customer_user_id),
+            plan_id,
+            status,
+            stripe_customer_id=normalize_stripe_id(extract_mapping_value(event_object, "customer")),
+            stripe_subscription_id=normalize_stripe_id(event_object),
+            current_period_end=normalize_stripe_timestamp(extract_mapping_value(event_object, "current_period_end")),
         )
 
 
@@ -1947,19 +3913,25 @@ def list_customer_account_page(
 
 
 def customer_has_account_access(email: str, account_number: str | None) -> bool:
+    return get_customer_account_access(email, account_number) is not None
+
+
+def get_customer_account_access(email: str, account_number: str | None) -> dict[str, object] | None:
     normalized_email = clean_email(email)
     normalized_account = normalize_account_number(account_number)
     with get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT account_access_emails.id
+            SELECT account_access_emails.id, account_access_emails.access_level
             FROM account_access_emails
             JOIN accounts ON accounts.id = account_access_emails.account_id
             WHERE account_access_emails.email = ? AND accounts.account_number = ?
             """,
             (normalized_email, normalized_account),
         ).fetchone()
-    return row is not None
+    if row is None:
+        return None
+    return {"id": int(row["id"]), "access_level": str(row["access_level"])}
 
 
 def choose_customer_account_number(email: str, requested_account_number: str | None = None) -> str | None:
@@ -2081,12 +4053,15 @@ def build_secret_hash(value: str | None) -> str | None:
     secret_value = (value or "").strip()
     if not secret_value:
         return None
-    salt = os.getenv("POWER_APP_SECRET", "local-power-data-only")
-    return hashlib.sha256(f"{salt}:{secret_value}".encode("utf-8")).hexdigest()
+    return hmac.new(
+        get_app_secret().encode("utf-8"),
+        secret_value.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
-def build_secret_key_stream(length: int) -> bytes:
-    salt = os.getenv("POWER_APP_SECRET", "local-power-data-only")
+def build_legacy_secret_key_stream(length: int) -> bytes:
+    salt = get_app_secret()
     digest = hashlib.sha256(salt.encode("utf-8")).digest()
     repeats = (length // len(digest)) + 1
     return (digest * repeats)[:length]
@@ -2096,10 +4071,8 @@ def seal_secret_value(value: str | None) -> str | None:
     secret_value = (value or "").strip()
     if not secret_value:
         return None
-    payload = secret_value.encode("utf-8")
-    key_stream = build_secret_key_stream(len(payload))
-    sealed = bytes(byte ^ key_stream[index] for index, byte in enumerate(payload))
-    return base64.urlsafe_b64encode(sealed).decode("ascii")
+    sealed = get_data_encryption_cipher().encrypt(secret_value.encode("utf-8")).decode("ascii")
+    return f"fernet:v1:{sealed}"
 
 
 def unseal_secret_value(value: str | None) -> str | None:
@@ -2107,12 +4080,390 @@ def unseal_secret_value(value: str | None) -> str | None:
     if not token:
         return None
     try:
+        if token.startswith("fernet:v1:"):
+            sealed_token = token.removeprefix("fernet:v1:")
+            return get_data_encryption_cipher().decrypt(sealed_token.encode("ascii")).decode("utf-8")
         sealed = base64.urlsafe_b64decode(token.encode("ascii"))
-        key_stream = build_secret_key_stream(len(sealed))
+        key_stream = build_legacy_secret_key_stream(len(sealed))
         payload = bytes(byte ^ key_stream[index] for index, byte in enumerate(sealed))
         return payload.decode("utf-8")
-    except Exception as exc:
+    except (InvalidToken, UnicodeDecodeError, ValueError, TypeError) as exc:
         raise ValueError("The saved access key could not be read. Save the connection again.") from exc
+
+
+def staff_mfa_required() -> bool:
+    return (os.getenv("POWER_STAFF_MFA_REQUIRED") or "false").strip().lower() in {"1", "true", "yes"}
+
+
+def normalize_mfa_code(value: str | None) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", value or "").upper()
+
+
+def staff_mfa_recovery_code_hash(code: str | None) -> str:
+    normalized = normalize_mfa_code(code)
+    if not normalized:
+        return ""
+    key = f"{get_app_secret()}:staff-mfa-recovery".encode("utf-8")
+    return hmac.new(key, normalized.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def generate_staff_mfa_recovery_codes() -> list[str]:
+    codes: list[str] = []
+    while len(codes) < MFA_RECOVERY_CODE_COUNT:
+        raw = "".join(secrets.choice(MFA_RECOVERY_CODE_ALPHABET) for _ in range(12))
+        formatted = f"{raw[:4]}-{raw[4:8]}-{raw[8:]}"
+        if formatted not in codes:
+            codes.append(formatted)
+    return codes
+
+
+def save_staff_mfa_recovery_codes(
+    conn: DatabaseConnection,
+    staff_user_id: int,
+    codes: list[str],
+) -> None:
+    conn.execute("DELETE FROM staff_mfa_recovery_codes WHERE staff_user_id = ?", (int(staff_user_id),))
+    created_at = timestamp_now()
+    for code in codes:
+        conn.execute(
+            """
+            INSERT INTO staff_mfa_recovery_codes (
+                staff_user_id, code_hash, consumed_at, created_at
+            )
+            VALUES (?, ?, NULL, ?)
+            """,
+            (int(staff_user_id), staff_mfa_recovery_code_hash(code), created_at),
+        )
+
+
+def count_staff_mfa_recovery_codes(staff_user_id: int) -> int:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM staff_mfa_recovery_codes
+            WHERE staff_user_id = ? AND consumed_at IS NULL
+            """,
+            (int(staff_user_id),),
+        ).fetchone()
+    return 0 if row is None else int(row["count"])
+
+
+def build_staff_mfa_qr_data_uri(provisioning_uri: str) -> str:
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=6,
+        border=2,
+    )
+    qr.add_data(provisioning_uri)
+    qr.make(fit=True)
+    image = qr.make_image(fill_color="#111111", back_color="#ffffff")
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return f"data:image/png;base64,{base64.b64encode(output.getvalue()).decode('ascii')}"
+
+
+def begin_staff_mfa_enrollment(staff_user_id: int) -> dict[str, object]:
+    staff_user = get_staff_user_by_id(int(staff_user_id))
+    if staff_user is None or not staff_user.get("is_active"):
+        raise ValueError("That staff account is no longer available.")
+    if staff_user.get("mfa_enabled"):
+        raise ValueError("Authenticator protection is already on.")
+    secret = pyotp.random_base32()
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE staff_users
+            SET mfa_pending_secret_token = ?, mfa_pending_created_at = ?, updated_at = ?
+            WHERE id = ? AND is_active = 1 AND mfa_enabled_at IS NULL
+            """,
+            (seal_secret_value(secret), timestamp, timestamp, int(staff_user_id)),
+        )
+        conn.commit()
+    return load_staff_mfa_enrollment(int(staff_user_id)) or {}
+
+
+def load_staff_mfa_enrollment(staff_user_id: int) -> dict[str, object] | None:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT email, mfa_pending_secret_token, mfa_pending_created_at, mfa_enabled_at
+            FROM staff_users
+            WHERE id = ? AND is_active = 1
+            """,
+            (int(staff_user_id),),
+        ).fetchone()
+    if row is None or row["mfa_enabled_at"] or not row["mfa_pending_secret_token"]:
+        return None
+    created_at = datetime.fromisoformat(str(row["mfa_pending_created_at"]))
+    if created_at + timedelta(minutes=MFA_ENROLLMENT_EXPIRY_MINUTES) <= datetime.now():
+        cancel_staff_mfa_enrollment(int(staff_user_id))
+        return None
+    try:
+        secret = unseal_secret_value(str(row["mfa_pending_secret_token"])) or ""
+    except ValueError as exc:
+        raise ValueError("The authenticator setup could not be read. Start again.") from exc
+    provisioning_uri = pyotp.TOTP(secret).provisioning_uri(
+        name=str(row["email"]),
+        issuer_name=MFA_ISSUER,
+    )
+    return {
+        "secret": secret,
+        "display_secret": " ".join(secret[index : index + 4] for index in range(0, len(secret), 4)),
+        "qr_data_uri": build_staff_mfa_qr_data_uri(provisioning_uri),
+        "expires_at": (created_at + timedelta(minutes=MFA_ENROLLMENT_EXPIRY_MINUTES)).isoformat(timespec="seconds"),
+    }
+
+
+def cancel_staff_mfa_enrollment(staff_user_id: int) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE staff_users
+            SET mfa_pending_secret_token = NULL, mfa_pending_created_at = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp_now(), int(staff_user_id)),
+        )
+        conn.commit()
+
+
+def matching_totp_counter(secret: str, code: str | None, last_counter: int | None = None) -> int | None:
+    normalized = normalize_mfa_code(code)
+    if len(normalized) != 6 or not normalized.isdigit():
+        return None
+    totp = pyotp.TOTP(secret)
+    current_counter = int(time.time()) // int(totp.interval)
+    for counter in range(current_counter - 1, current_counter + 2):
+        if last_counter is not None and counter <= int(last_counter):
+            continue
+        if hmac.compare_digest(totp.generate_otp(counter), normalized):
+            return counter
+    return None
+
+
+def confirm_staff_mfa_enrollment(staff_user_id: int, code: str | None) -> dict[str, object]:
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        if conn.kind == "postgres":
+            conn.execute("SELECT pg_advisory_xact_lock(?)", (POSTGRES_STAFF_LOCK_KEY,))
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT mfa_pending_secret_token, mfa_pending_created_at, mfa_enabled_at
+            FROM staff_users
+            WHERE id = ? AND is_active = 1
+            """,
+            (int(staff_user_id),),
+        ).fetchone()
+        if row is None or row["mfa_enabled_at"] or not row["mfa_pending_secret_token"]:
+            conn.rollback()
+            raise ValueError("Start authenticator setup again.")
+        created_at = datetime.fromisoformat(str(row["mfa_pending_created_at"]))
+        if created_at + timedelta(minutes=MFA_ENROLLMENT_EXPIRY_MINUTES) <= datetime.now():
+            conn.rollback()
+            cancel_staff_mfa_enrollment(int(staff_user_id))
+            raise ValueError("Authenticator setup expired. Start again.")
+        try:
+            secret = unseal_secret_value(str(row["mfa_pending_secret_token"])) or ""
+        except ValueError as exc:
+            conn.rollback()
+            raise ValueError("The authenticator setup could not be read. Start again.") from exc
+        counter = matching_totp_counter(secret, code)
+        if counter is None:
+            conn.rollback()
+            raise ValueError("That authenticator code did not work.")
+        recovery_codes = generate_staff_mfa_recovery_codes()
+        conn.execute(
+            """
+            UPDATE staff_users
+            SET mfa_secret_token = mfa_pending_secret_token,
+                mfa_pending_secret_token = NULL,
+                mfa_pending_created_at = NULL,
+                mfa_enabled_at = ?,
+                mfa_last_counter = ?,
+                auth_version = auth_version + 1,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, counter, timestamp, int(staff_user_id)),
+        )
+        save_staff_mfa_recovery_codes(conn, int(staff_user_id), recovery_codes)
+        conn.commit()
+    return {
+        "staff_user": get_staff_user_by_id(int(staff_user_id)) or {},
+        "recovery_codes": recovery_codes,
+    }
+
+
+def verify_staff_mfa_code(staff_user_id: int, code: str | None) -> str | None:
+    normalized = normalize_mfa_code(code)
+    if not normalized:
+        return None
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        if conn.kind == "postgres":
+            conn.execute("SELECT pg_advisory_xact_lock(?)", (POSTGRES_STAFF_LOCK_KEY,))
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT mfa_secret_token, mfa_enabled_at, mfa_last_counter
+            FROM staff_users
+            WHERE id = ? AND is_active = 1
+            """,
+            (int(staff_user_id),),
+        ).fetchone()
+        if row is None or not row["mfa_enabled_at"] or not row["mfa_secret_token"]:
+            conn.rollback()
+            return None
+        try:
+            secret = unseal_secret_value(str(row["mfa_secret_token"])) or ""
+        except ValueError:
+            conn.rollback()
+            return None
+        counter = matching_totp_counter(secret, normalized, row["mfa_last_counter"])
+        if counter is not None:
+            conn.execute(
+                "UPDATE staff_users SET mfa_last_counter = ?, updated_at = ? WHERE id = ?",
+                (counter, timestamp, int(staff_user_id)),
+            )
+            conn.commit()
+            return "authenticator"
+        recovery_hash = staff_mfa_recovery_code_hash(normalized)
+        recovery_row = conn.execute(
+            """
+            SELECT id
+            FROM staff_mfa_recovery_codes
+            WHERE staff_user_id = ? AND code_hash = ? AND consumed_at IS NULL
+            """,
+            (int(staff_user_id), recovery_hash),
+        ).fetchone()
+        if recovery_row is None:
+            conn.rollback()
+            return None
+        cursor = conn.execute(
+            """
+            UPDATE staff_mfa_recovery_codes
+            SET consumed_at = ?
+            WHERE id = ? AND consumed_at IS NULL
+            """,
+            (timestamp, int(recovery_row["id"])),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        return "recovery_code"
+
+
+def verify_staff_password(staff_user_id: int, password: str | None) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT password_hash FROM staff_users WHERE id = ? AND is_active = 1",
+            (int(staff_user_id),),
+        ).fetchone()
+    return bool(row is not None and row["password_hash"] and check_password_hash(row["password_hash"], password or ""))
+
+
+def disable_staff_mfa(staff_user_id: int, password: str | None, code: str | None) -> dict[str, object]:
+    if not verify_staff_password(int(staff_user_id), password):
+        raise ValueError("That password did not work.")
+    if verify_staff_mfa_code(int(staff_user_id), code) is None:
+        raise ValueError("That authenticator or recovery code did not work.")
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE staff_users
+            SET mfa_secret_token = NULL, mfa_pending_secret_token = NULL,
+                mfa_pending_created_at = NULL, mfa_enabled_at = NULL,
+                mfa_last_counter = NULL, auth_version = auth_version + 1,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, int(staff_user_id)),
+        )
+        conn.execute("DELETE FROM staff_mfa_recovery_codes WHERE staff_user_id = ?", (int(staff_user_id),))
+        conn.commit()
+    return get_staff_user_by_id(int(staff_user_id)) or {}
+
+
+def regenerate_staff_mfa_recovery_codes(staff_user_id: int, code: str | None) -> dict[str, object]:
+    if verify_staff_mfa_code(int(staff_user_id), code) is None:
+        raise ValueError("That authenticator or recovery code did not work.")
+    recovery_codes = generate_staff_mfa_recovery_codes()
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        save_staff_mfa_recovery_codes(conn, int(staff_user_id), recovery_codes)
+        conn.execute(
+            "UPDATE staff_users SET auth_version = auth_version + 1, updated_at = ? WHERE id = ?",
+            (timestamp, int(staff_user_id)),
+        )
+        conn.commit()
+    return {
+        "staff_user": get_staff_user_by_id(int(staff_user_id)) or {},
+        "recovery_codes": recovery_codes,
+    }
+
+
+def reset_staff_mfa_by_commissioner(
+    staff_user_id: int,
+    *,
+    acting_staff_user_id: int,
+) -> dict[str, object]:
+    target_id = int(staff_user_id)
+    actor_id = int(acting_staff_user_id)
+    if target_id == actor_id:
+        raise ValueError("Another commissioner must reset your authenticator.")
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        if conn.kind == "postgres":
+            conn.execute("SELECT pg_advisory_xact_lock(?)", (POSTGRES_STAFF_LOCK_KEY,))
+        else:
+            conn.execute("BEGIN IMMEDIATE")
+        actor = conn.execute(
+            "SELECT role, is_active FROM staff_users WHERE id = ?",
+            (actor_id,),
+        ).fetchone()
+        target = conn.execute(
+            """
+            SELECT id, email, full_name, role, is_active, invite_token, invite_token_hash,
+                   invite_expires_at, password_hash, auth_version, mfa_enabled_at, last_login_at
+            FROM staff_users
+            WHERE id = ?
+            """,
+            (target_id,),
+        ).fetchone()
+        if actor is None or not bool(actor["is_active"]) or actor["role"] != "Commissioner":
+            conn.rollback()
+            raise ValueError("Commissioner access is required for that action.")
+        if target is None:
+            conn.rollback()
+            raise ValueError("That staff member is no longer available.")
+        before = serialize_staff_user_row(target) or {}
+        if not before.get("mfa_enabled"):
+            conn.rollback()
+            raise ValueError("Authenticator protection is already off for that staff member.")
+        conn.execute(
+            """
+            UPDATE staff_users
+            SET mfa_secret_token = NULL, mfa_pending_secret_token = NULL,
+                mfa_pending_created_at = NULL, mfa_enabled_at = NULL,
+                mfa_last_counter = NULL, auth_version = auth_version + 1,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, target_id),
+        )
+        conn.execute("DELETE FROM staff_mfa_recovery_codes WHERE staff_user_id = ?", (target_id,))
+        conn.commit()
+    after = get_staff_user_by_id(target_id)
+    if after is None:
+        raise RuntimeError("The authenticator reset could not be confirmed.")
+    return {"before": before, "after": after}
 
 
 def build_secret_last4(value: str | None) -> str | None:
@@ -2135,6 +4486,9 @@ def serialize_utility_connection_row(row: sqlite3.Row | None) -> dict[str, objec
         "secret_last4": mapping.get("secret_last4"),
         "status": mapping.get("status") or "Not connected",
         "last_sync_at": mapping.get("last_sync_at"),
+        "last_sync_status": mapping.get("last_sync_status"),
+        "last_sync_error": mapping.get("last_sync_error"),
+        "last_sync_attempt_at": mapping.get("last_sync_attempt_at"),
     }
 
 
@@ -2144,7 +4498,8 @@ def list_utility_connections(account_number: str | None) -> list[dict[str, objec
         rows = conn.execute(
             """
             SELECT id, provider_name, connection_label, access_method, access_identifier,
-                   secret_last4, status, last_sync_at
+                   secret_last4, status, last_sync_at, last_sync_status,
+                   last_sync_error, last_sync_attempt_at
             FROM utility_connections
             WHERE account_id = ?
             ORDER BY provider_name, connection_label
@@ -2156,6 +4511,38 @@ def list_utility_connections(account_number: str | None) -> list[dict[str, objec
         serialized = serialize_utility_connection_row(row)
         if serialized is not None:
             connections.append(serialized)
+    return connections
+
+
+def list_saved_utility_connections_for_sync(account_number: str | None = None) -> list[dict[str, object]]:
+    with get_db_connection() as conn:
+        params: list[object] = []
+        where_clause = ""
+        if account_number:
+            where_clause = "WHERE accounts.account_number = ?"
+            params.append(normalize_account_number(account_number))
+        rows = conn.execute(
+            f"""
+            SELECT utility_connections.id, accounts.account_number,
+                   utility_connections.provider_name, utility_connections.connection_label,
+                   utility_connections.access_method, utility_connections.access_identifier,
+                   utility_connections.secret_last4, utility_connections.status,
+                   utility_connections.last_sync_at, utility_connections.last_sync_status,
+                   utility_connections.last_sync_error, utility_connections.last_sync_attempt_at
+            FROM utility_connections
+            JOIN accounts ON accounts.id = utility_connections.account_id
+            {where_clause}
+            ORDER BY accounts.account_number, utility_connections.provider_name, utility_connections.connection_label
+            """,
+            params,
+        ).fetchall()
+    connections: list[dict[str, object]] = []
+    for row in rows:
+        serialized = serialize_utility_connection_row(row)
+        if serialized is None:
+            continue
+        serialized["account_number"] = dict(row)["account_number"]
+        connections.append(serialized)
     return connections
 
 
@@ -2280,6 +4667,49 @@ def fetch_utility_connection_export(connection: dict[str, object]) -> dict[str, 
     return {"filename": filename, "content": content}
 
 
+def clean_sync_error(error: Exception | str, max_length: int = 240) -> str:
+    message = str(error).strip()
+    if not message and isinstance(error, Exception):
+        message = error.__class__.__name__
+    if len(message) <= max_length:
+        return message
+    return f"{message[: max_length - 1].rstrip()}..."
+
+
+def record_utility_connection_sync_success(account_number: str | None, connection_id: int) -> str:
+    sync_time = timestamp_now()
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        conn.execute(
+            """
+            UPDATE utility_connections
+            SET status = ?, last_sync_at = ?, last_sync_status = ?, last_sync_error = ?,
+                last_sync_attempt_at = ?, updated_at = ?
+            WHERE account_id = ? AND id = ?
+            """,
+            ("Synced", sync_time, "success", None, sync_time, sync_time, account["id"], int(connection_id)),
+        )
+        conn.commit()
+    return sync_time
+
+
+def record_utility_connection_sync_failure(account_number: str | None, connection_id: int, error: Exception | str) -> str:
+    sync_time = timestamp_now()
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        conn.execute(
+            """
+            UPDATE utility_connections
+            SET status = ?, last_sync_status = ?, last_sync_error = ?,
+                last_sync_attempt_at = ?, updated_at = ?
+            WHERE account_id = ? AND id = ?
+            """,
+            ("Sync failed", "failed", clean_sync_error(error), sync_time, sync_time, account["id"], int(connection_id)),
+        )
+        conn.commit()
+    return sync_time
+
+
 def sync_utility_connection(account_number: str | None, connection_id: int) -> dict[str, object]:
     ensure_data_dirs()
     connection = load_utility_connection_for_sync(account_number, connection_id)
@@ -2297,19 +4727,54 @@ def sync_utility_connection(account_number: str | None, connection_id: int) -> d
         destination,
         account_number=connection["account_number"],
     )
-    sync_time = timestamp_now()
-    with get_db_connection() as conn:
-        account = get_or_create_account(conn, connection["account_number"])
-        conn.execute(
-            """
-            UPDATE utility_connections
-            SET status = ?, last_sync_at = ?, updated_at = ?
-            WHERE account_id = ? AND id = ?
-            """,
-            ("Synced", sync_time, sync_time, account["id"], int(connection_id)),
-        )
-        conn.commit()
+    sync_time = record_utility_connection_sync_success(connection["account_number"], connection_id)
     return {**imported, "status": "Synced", "last_sync_at": sync_time}
+
+
+def run_scheduled_utility_sync(account_number: str | None = None) -> dict[str, object]:
+    ensure_database()
+    connections = list_saved_utility_connections_for_sync(account_number=account_number)
+    results: list[dict[str, object]] = []
+    for connection in connections:
+        connection_id = int(connection["id"])
+        connection_account = str(connection["account_number"])
+        result: dict[str, object] = {
+            "id": connection_id,
+            "account_number": connection_account,
+            "provider_name": connection["provider_name"],
+            "connection_label": connection["connection_label"],
+        }
+        try:
+            synced = sync_utility_connection(connection_account, connection_id)
+        except Exception as exc:
+            attempt_at = record_utility_connection_sync_failure(connection_account, connection_id, exc)
+            results.append(
+                {
+                    **result,
+                    "success": False,
+                    "error": clean_sync_error(exc),
+                    "last_sync_attempt_at": attempt_at,
+                }
+            )
+            continue
+        results.append(
+            {
+                **result,
+                "success": True,
+                "interval_count": synced.get("interval_count", 0),
+                "last_sync_at": synced.get("last_sync_at"),
+                "last_sync_attempt_at": synced.get("last_sync_at"),
+            }
+        )
+    succeeded = sum(1 for result in results if result["success"])
+    failed = len(results) - succeeded
+    return {
+        "account_number": normalize_account_number(account_number) if account_number else None,
+        "total": len(results),
+        "succeeded": succeeded,
+        "failed": failed,
+        "connections": results,
+    }
 
 
 def delete_utility_connection(account_number: str | None, connection_id: int) -> None:
@@ -2339,10 +4804,47 @@ def clean_optional_int(value: str | int | None, field_label: str) -> int | None:
         raise ValueError(f"Choose a valid {field_label}.") from exc
 
 
+def clean_household_profile_values(
+    form_like,
+    *,
+    require_address: bool = False,
+    require_zip: bool = False,
+) -> dict[str, object]:
+    address = clean_optional_text(form_like.get("address"))
+    if require_address and not address:
+        raise ValueError("Enter the electric service address.")
+    zip_was_provided = "zip_code" in form_like
+    zip_code = clean_zip_code(form_like.get("zip_code"), required=require_zip) if zip_was_provided else ""
+    if require_zip and not zip_was_provided:
+        raise ValueError("Enter the ZIP code for the service address.")
+    occupant_count = clean_optional_int(form_like.get("occupant_count"), "occupancy")
+    year_built = clean_optional_int(form_like.get("year_built"), "year built")
+    square_footage = clean_optional_int(form_like.get("square_footage"), "square footage")
+    if occupant_count is not None and occupant_count < 0:
+        raise ValueError("Occupancy cannot be negative.")
+    if year_built is not None and not 1700 <= year_built <= datetime.now().year + 1:
+        raise ValueError("Choose a valid year built.")
+    if square_footage is not None and square_footage < 0:
+        raise ValueError("Square footage cannot be negative.")
+    return {
+        "address": address,
+        "zip_was_provided": zip_was_provided,
+        "zip_code": zip_code,
+        "occupant_count": occupant_count,
+        "year_built": year_built,
+        "square_footage": square_footage,
+        "heating_system": clean_optional_text(form_like.get("heating_system")),
+        "cooling_system": clean_optional_text(form_like.get("cooling_system")),
+        "water_heater": clean_optional_text(form_like.get("water_heater")),
+        "notes": clean_optional_text(form_like.get("notes")),
+    }
+
+
 def serialize_household_profile_row(row: sqlite3.Row | None) -> dict[str, object]:
     if row is None:
         return {
             "address": "",
+            "zip_code": "",
             "occupant_count": None,
             "year_built": None,
             "square_footage": None,
@@ -2358,6 +4860,7 @@ def serialize_household_profile_row(row: sqlite3.Row | None) -> dict[str, object
     mapping = dict(row)
     return {
         "address": mapping.get("address") or "",
+        "zip_code": mapping.get("zip_code") or "",
         "occupant_count": mapping.get("occupant_count"),
         "year_built": mapping.get("year_built"),
         "square_footage": mapping.get("square_footage"),
@@ -2378,6 +4881,7 @@ def load_household_profile(account_number: str | None = None) -> dict[str, objec
             """
             SELECT
                 address,
+                zip_code,
                 occupant_count,
                 year_built,
                 square_footage,
@@ -2397,26 +4901,24 @@ def load_household_profile(account_number: str | None = None) -> dict[str, objec
 
 
 def save_household_profile(account_number: str | None, form_like) -> dict[str, object]:
-    address = clean_optional_text(form_like.get("address"))
-    occupant_count = clean_optional_int(form_like.get("occupant_count"), "occupancy")
-    year_built = clean_optional_int(form_like.get("year_built"), "year built")
-    square_footage = clean_optional_int(form_like.get("square_footage"), "square footage")
-    heating_system = clean_optional_text(form_like.get("heating_system"))
-    cooling_system = clean_optional_text(form_like.get("cooling_system"))
-    water_heater = clean_optional_text(form_like.get("water_heater"))
-    notes = clean_optional_text(form_like.get("notes"))
+    values = clean_household_profile_values(form_like)
+    address = values["address"]
+    zip_was_provided = bool(values["zip_was_provided"])
+    zip_code = str(values["zip_code"])
 
     with get_db_connection() as conn:
         account = get_or_create_account(conn, account_number)
         existing = conn.execute(
             """
-            SELECT address, latitude, longitude, weather_location
+            SELECT address, zip_code, latitude, longitude, weather_location
             FROM household_profiles
             WHERE account_id = ?
             """,
             (account["id"],),
         ).fetchone()
         existing_address = None if existing is None else (existing["address"] or None)
+        if not zip_was_provided and existing is not None:
+            zip_code = existing["zip_code"] or ""
         latitude = None if existing is None else existing["latitude"]
         longitude = None if existing is None else existing["longitude"]
         weather_location = None if existing is None else existing["weather_location"]
@@ -2427,12 +4929,13 @@ def save_household_profile(account_number: str | None, form_like) -> dict[str, o
         conn.execute(
             """
             INSERT INTO household_profiles (
-                account_id, address, occupant_count, year_built, square_footage,
+                account_id, address, zip_code, occupant_count, year_built, square_footage,
                 heating_system, cooling_system, water_heater, notes, latitude, longitude, weather_location, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(account_id) DO UPDATE SET
                 address = excluded.address,
+                zip_code = excluded.zip_code,
                 occupant_count = excluded.occupant_count,
                 year_built = excluded.year_built,
                 square_footage = excluded.square_footage,
@@ -2448,13 +4951,14 @@ def save_household_profile(account_number: str | None, form_like) -> dict[str, o
             (
                 account["id"],
                 address,
-                occupant_count,
-                year_built,
-                square_footage,
-                heating_system,
-                cooling_system,
-                water_heater,
-                notes,
+                zip_code,
+                values["occupant_count"],
+                values["year_built"],
+                values["square_footage"],
+                values["heating_system"],
+                values["cooling_system"],
+                values["water_heater"],
+                values["notes"],
                 latitude,
                 longitude,
                 weather_location,
@@ -2466,9 +4970,251 @@ def save_household_profile(account_number: str | None, form_like) -> dict[str, o
     return load_household_profile(account_number)
 
 
+def create_customer_signup(
+    *,
+    email: str,
+    full_name: str,
+    password: str,
+    account_number: str | None,
+    energy_company: str,
+    plan_id: str | None,
+    household_form,
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    normalized_email = clean_email(email)
+    normalized_name = (full_name or "").strip() or normalized_email
+    normalized_password = clean_password(password)
+    normalized_account_number = (account_number or "").strip()
+    if not normalized_account_number:
+        raise ValueError("Enter the electric account number.")
+    if len(normalized_account_number) > 100:
+        raise ValueError("The electric account number is too long.")
+    normalized_energy_company = clean_energy_company(energy_company)
+    if not normalized_energy_company:
+        raise ValueError("Enter the service address so we can identify the energy company.")
+    plan = get_billing_plan(plan_id)
+    profile = clean_household_profile_values(
+        household_form,
+        require_address=True,
+        require_zip=True,
+    )
+    timestamp = timestamp_now()
+    email_verified_at = None if email_verification_required() else timestamp
+
+    with get_db_connection() as conn:
+        existing_user = conn.execute(
+            "SELECT id FROM customer_users WHERE email = ?",
+            (normalized_email,),
+        ).fetchone()
+        if existing_user is not None:
+            raise ValueError("An account already uses that email address.")
+        existing_account = conn.execute(
+            "SELECT id FROM accounts WHERE account_number = ?",
+            (normalized_account_number,),
+        ).fetchone()
+        if existing_account is not None:
+            raise ValueError("That electric account is already registered. Sign in or contact support for access.")
+
+        conn.execute(
+            """
+            INSERT INTO customer_users (
+                email, full_name, password_hash, is_active, email_verified_at, auth_version,
+                created_at, updated_at, last_login_at
+            )
+            VALUES (?, ?, ?, 1, ?, 1, ?, ?, NULL)
+            """,
+            (
+                normalized_email,
+                normalized_name,
+                generate_password_hash(normalized_password),
+                email_verified_at,
+                timestamp,
+                timestamp,
+            ),
+        )
+        customer_row = conn.execute(
+            """
+            SELECT id, email, full_name, is_active, email_verified_at, auth_version, last_login_at
+            FROM customer_users
+            WHERE email = ?
+            """,
+            (normalized_email,),
+        ).fetchone()
+        customer_user = serialize_customer_user_row(customer_row) or {}
+        account = get_or_create_account(
+            conn,
+            normalized_account_number,
+            display_name=normalized_name,
+            energy_company=normalized_energy_company,
+        )
+        conn.execute(
+            """
+            INSERT INTO household_profiles (
+                account_id, address, zip_code, occupant_count, year_built, square_footage,
+                heating_system, cooling_system, water_heater, notes,
+                latitude, longitude, weather_location, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
+            """,
+            (
+                account["id"],
+                profile["address"],
+                profile["zip_code"],
+                profile["occupant_count"],
+                profile["year_built"],
+                profile["square_footage"],
+                profile["heating_system"],
+                profile["cooling_system"],
+                profile["water_heater"],
+                profile["notes"],
+                timestamp,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO account_access_emails (
+                account_id, email, full_name, access_level, created_at, updated_at
+            )
+            VALUES (?, ?, ?, 'Manager', ?, ?)
+            """,
+            (account["id"], normalized_email, normalized_name, timestamp, timestamp),
+        )
+        conn.execute(
+            """
+            INSERT INTO customer_billing (
+                customer_user_id, plan_id, subscription_status, created_at, updated_at
+            )
+            VALUES (?, ?, 'not_started', ?, ?)
+            """,
+            (customer_user["id"], plan["id"], timestamp, timestamp),
+        )
+        billing_row = conn.execute(
+            "SELECT * FROM customer_billing WHERE customer_user_id = ?",
+            (customer_user["id"],),
+        ).fetchone()
+
+    return customer_user, account, serialize_customer_billing_row(billing_row, int(customer_user["id"]))
+
+
 def fetch_json(url: str) -> dict[str, object]:
     with urlopen(url, timeout=15) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def geocode_electric_service_location(zip_code: str, address: str | None = None) -> dict[str, object] | None:
+    normalized_zip = clean_zip_code(zip_code, required=True)
+    address_text = clean_optional_text(address)
+    search_text = ", ".join(part for part in (address_text, normalized_zip, "North Carolina", "USA") if part)
+    params = urlencode(
+        {
+            "SingleLine": search_text,
+            "f": "json",
+            "outFields": "Match_addr,Addr_type,Postal,Region,Country",
+            "maxLocations": 5,
+            "countryCode": "USA",
+        }
+    )
+    payload = fetch_json(f"{ARCGIS_GEOCODER_URL}?{params}")
+    for candidate in payload.get("candidates") or []:
+        if float(candidate.get("score") or 0) < 80:
+            continue
+        attributes = candidate.get("attributes") or {}
+        region = str(attributes.get("Region") or "").strip().lower()
+        match_address = str(candidate.get("address") or attributes.get("Match_addr") or "")
+        if region not in {"nc", "north carolina"} and "north carolina" not in match_address.lower():
+            continue
+        postal = str(attributes.get("Postal") or "").strip()
+        if postal and not postal.startswith(normalized_zip):
+            continue
+        location = candidate.get("location") or {}
+        if location.get("x") is None or location.get("y") is None:
+            continue
+        return {
+            "longitude": float(location["x"]),
+            "latitude": float(location["y"]),
+            "match_address": match_address,
+        }
+    return None
+
+
+def lookup_energy_company_by_zip(zip_code: str, address: str | None = None) -> dict[str, object]:
+    normalized_zip = clean_zip_code(zip_code, required=True)
+    location = geocode_electric_service_location(normalized_zip, address)
+    if location is None:
+        raise ValueError("We could not locate that North Carolina service address. Check the address and ZIP code.")
+
+    matches: dict[tuple[str, str], dict[str, object]] = {}
+    for layer in NC_ELECTRIC_SERVICE_LAYERS:
+        params = urlencode(
+            {
+                "geometry": f"{location['longitude']},{location['latitude']}",
+                "geometryType": "esriGeometryPoint",
+                "inSR": 4326,
+                "spatialRel": "esriSpatialRelIntersects",
+                "outFields": "*",
+                "returnGeometry": "false",
+                "f": "json",
+            }
+        )
+        payload = fetch_json(f"{layer['url']}?{params}")
+        if payload.get("error"):
+            raise ValueError("The electric company lookup is unavailable right now. Please try again.")
+        for feature in payload.get("features") or []:
+            attributes = feature.get("attributes") or {}
+            raw_name = str(attributes.get(layer["owner_field"]) or "").strip()
+            utility_id = attributes.get(layer["utility_id_field"])
+            if not raw_name:
+                continue
+            company_name = canonical_energy_company_name(raw_name, utility_id)
+            normalized_id = ""
+            if utility_id is not None:
+                try:
+                    normalized_id = str(int(float(str(utility_id))))
+                except (TypeError, ValueError):
+                    normalized_id = str(utility_id).strip()
+            matches[(normalized_id, company_name.lower())] = {
+                "energy_company": company_name,
+                "eia_utility_id": normalized_id,
+            }
+
+    if not matches:
+        raise ValueError("We could not identify the electric company for that service address.")
+    if len(matches) > 1:
+        if not clean_optional_text(address):
+            raise ValueError("That ZIP code crosses electric service areas. Add the street address so we can identify the right company.")
+        raise ValueError("That address is near an electric service boundary. Check the service address and ZIP code.")
+
+    result = next(iter(matches.values()))
+    return {
+        **result,
+        "zip_code": normalized_zip,
+        "match_address": location["match_address"],
+        "match_basis": "service address" if clean_optional_text(address) else "ZIP code",
+    }
+
+
+def resolve_energy_company_for_form(
+    form_like,
+    *,
+    existing_account: dict[str, object] | None = None,
+    existing_profile: dict[str, object] | None = None,
+    require_zip: bool = False,
+) -> str:
+    zip_code = clean_zip_code(form_like.get("zip_code"), required=require_zip)
+    if not zip_code:
+        if existing_account and existing_account.get("energy_company"):
+            return str(existing_account["energy_company"])
+        return clean_energy_company(form_like.get("energy_company"))
+
+    address = clean_optional_text(form_like.get("address"))
+    if (
+        existing_account
+        and existing_account.get("energy_company")
+        and existing_profile
+        and zip_code == existing_profile.get("zip_code")
+        and (address or "") == (existing_profile.get("address") or "")
+    ):
+        return str(existing_account["energy_company"])
+    return str(lookup_energy_company_by_zip(zip_code, address).get("energy_company") or "")
 
 
 def geocode_address(address: str) -> dict[str, object] | None:
@@ -2633,6 +5379,130 @@ def build_weather_payload(hourly: dict[str, list[object]], location_name: str, w
     }
 
 
+def join_natural(items: list[str]) -> str:
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+def weather_value(summary: dict[str, object], key: str) -> float | None:
+    value = summary.get(key)
+    if value is None or pd.isna(value):
+        return None
+    return float(value)
+
+
+def weather_metric_text(label: str, value: float | None, suffix: str) -> str | None:
+    if value is None:
+        return None
+    return f"{label} {value:.1f}{suffix}"
+
+
+def condition_suggests_storm(conditions: str) -> bool:
+    normalized = conditions.lower()
+    storm_terms = (
+        "thunderstorm",
+        "storm",
+        "hail",
+        "heavy rain",
+        "rain shower",
+        "freezing rain",
+        "heavy snow",
+        "snow shower",
+    )
+    return any(term in normalized for term in storm_terms)
+
+
+def build_weather_context(weather: dict[str, object] | None) -> dict[str, object]:
+    if not weather or not weather.get("available"):
+        return {
+            "available": False,
+            "effect": "weather_unavailable",
+            "signals": [],
+            "summary": str((weather or {}).get("reason") or "Weather was not available for that day."),
+            "location_name": (weather or {}).get("location_name"),
+            "conditions": None,
+            "high_temp_f": None,
+            "low_temp_f": None,
+            "high_apparent_f": None,
+            "precipitation_in": None,
+            "max_wind_mph": None,
+        }
+
+    summary = weather.get("summary") or {}
+    if not isinstance(summary, dict):
+        summary = {}
+    conditions = str(summary.get("conditions") or "Weather")
+    high_temp = round_value(weather_value(summary, "high_temp_f"), 1)
+    low_temp = round_value(weather_value(summary, "low_temp_f"), 1)
+    high_apparent = round_value(weather_value(summary, "high_apparent_f"), 1)
+    precipitation = round_value(weather_value(summary, "precipitation_in"), 2)
+    max_wind = round_value(weather_value(summary, "max_wind_mph"), 1)
+
+    signals: list[str] = []
+    phrases: list[str] = []
+    if (
+        (high_temp is not None and high_temp >= WEATHER_HEAT_HIGH_F)
+        or (high_apparent is not None and high_apparent >= WEATHER_HEAT_APPARENT_F)
+        or (low_temp is not None and low_temp >= WEATHER_HEAT_LOW_F)
+    ):
+        signals.append("unusual_heat")
+        phrases.append("hot weather")
+    if (
+        (low_temp is not None and low_temp <= WEATHER_COLD_LOW_F)
+        or (high_temp is not None and high_temp <= WEATHER_COLD_HIGH_F)
+    ):
+        signals.append("unusual_cold")
+        phrases.append("cold weather")
+    if (
+        (precipitation is not None and precipitation >= WEATHER_STORM_PRECIP_IN)
+        or (max_wind is not None and max_wind >= WEATHER_STORM_WIND_MPH)
+        or condition_suggests_storm(conditions)
+    ):
+        signals.append("storm_conditions")
+        phrases.append("storm conditions")
+
+    metric_bits = [
+        weather_metric_text("high", high_temp, " F"),
+        weather_metric_text("feels like", high_apparent, " F"),
+        weather_metric_text("low", low_temp, " F"),
+        weather_metric_text("rain", precipitation, " in"),
+        weather_metric_text("wind", max_wind, " mph"),
+    ]
+    metrics_text = "; ".join(bit for bit in metric_bits if bit)
+    if signals:
+        summary_text = f"{join_natural(phrases).capitalize()} could explain part of the overnight spike."
+        if metrics_text:
+            summary_text = f"{summary_text} {metrics_text}."
+        effect = "plausible_explanation"
+    else:
+        summary_text = (
+            "No unusual heat, cold, or storm signal appears in the available weather; "
+            "that makes the spike stand out more."
+        )
+        if metrics_text:
+            summary_text = f"{summary_text} {conditions}: {metrics_text}."
+        effect = "makes_spike_stand_out"
+
+    return {
+        "available": True,
+        "effect": effect,
+        "signals": signals,
+        "summary": summary_text,
+        "location_name": weather.get("location_name"),
+        "conditions": conditions,
+        "high_temp_f": high_temp,
+        "low_temp_f": low_temp,
+        "high_apparent_f": high_apparent,
+        "precipitation_in": precipitation,
+        "max_wind_mph": max_wind,
+    }
+
+
 def fetch_historical_weather(latitude: float, longitude: float, weather_date: str, tz_name: str) -> dict[str, object]:
     params = urlencode(
         {
@@ -2735,6 +5605,85 @@ def load_day_weather(account_number: str | None, weather_date: str | None, tz_na
     return weather
 
 
+def date_key(value: object) -> str:
+    if isinstance(value, ddate):
+        return value.isoformat()
+    return str(value)
+
+
+def load_weather_contexts_for_suspicious_days(
+    summary: pd.DataFrame,
+    account_number: str | None,
+    tz_name: str,
+) -> dict[str, dict[str, object]]:
+    contexts: dict[str, dict[str, object]] = {}
+    if summary.empty:
+        return contexts
+
+    for reading_date, row in summary.iterrows():
+        if not bool(row.get("suspicious", False)):
+            continue
+        weather_date = date_key(reading_date)
+        try:
+            weather = load_day_weather(account_number, weather_date, tz_name)
+        except Exception:
+            weather = {"available": False, "reason": "Weather could not be loaded for that day."}
+        contexts[weather_date] = build_weather_context(weather)
+    return contexts
+
+
+def attach_weather_context_to_summary(
+    summary: pd.DataFrame,
+    weather_contexts: dict[str, dict[str, object]],
+) -> pd.DataFrame:
+    enriched = summary.copy()
+    default_columns: dict[str, object] = {
+        "weather_context": "",
+        "weather_effect": "",
+        "weather_signals": "",
+        "weather_location": "",
+        "weather_conditions": "",
+        "weather_high_temp_f": pd.NA,
+        "weather_low_temp_f": pd.NA,
+        "weather_high_apparent_f": pd.NA,
+        "weather_precipitation_in": pd.NA,
+        "weather_max_wind_mph": pd.NA,
+    }
+    for column, default_value in default_columns.items():
+        if column not in enriched.columns:
+            enriched[column] = default_value
+
+    for reading_date, context in weather_contexts.items():
+        try:
+            index_value: object = ddate.fromisoformat(reading_date)
+        except ValueError:
+            index_value = reading_date
+        if index_value not in enriched.index:
+            continue
+        enriched.loc[index_value, "weather_context"] = context.get("summary") or ""
+        enriched.loc[index_value, "weather_effect"] = context.get("effect") or ""
+        enriched.loc[index_value, "weather_signals"] = ",".join(str(signal) for signal in context.get("signals", []))
+        enriched.loc[index_value, "weather_location"] = context.get("location_name") or ""
+        enriched.loc[index_value, "weather_conditions"] = context.get("conditions") or ""
+        enriched.loc[index_value, "weather_high_temp_f"] = context.get("high_temp_f")
+        enriched.loc[index_value, "weather_low_temp_f"] = context.get("low_temp_f")
+        enriched.loc[index_value, "weather_high_apparent_f"] = context.get("high_apparent_f")
+        enriched.loc[index_value, "weather_precipitation_in"] = context.get("precipitation_in")
+        enriched.loc[index_value, "weather_max_wind_mph"] = context.get("max_wind_mph")
+    return enriched
+
+
+def attach_weather_context_to_rows(
+    rows: list[dict[str, object]],
+    weather_contexts: dict[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    for row in rows:
+        context = weather_contexts.get(str(row.get("date")))
+        if context is not None:
+            row["weather_context"] = context
+    return rows
+
+
 def serialize_load_item_row(row: sqlite3.Row | None) -> dict[str, object] | None:
     if row is None:
         return None
@@ -2798,7 +5747,7 @@ def add_load_item(
     watts_each: float,
     include_when_off: bool,
     notes: str | None = None,
-) -> None:
+) -> dict[str, object]:
     clean_label = (label or "").strip()
     if not clean_label:
         raise ValueError("Give this load a name.")
@@ -2828,7 +5777,18 @@ def add_load_item(
                 timestamp,
             ),
         )
+        row = conn.execute(
+            """
+            SELECT id, label, quantity, watts_each, include_when_off, notes
+            FROM account_load_items
+            WHERE account_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (account["id"],),
+        ).fetchone()
         conn.commit()
+    return serialize_load_item_row(row) or {}
 
 
 def delete_load_item(account_number: str | None, item_id: int) -> None:
@@ -3311,6 +6271,75 @@ def load_intervals_from_db(account_number: str | None = None, tz_name: str = DEF
     return frame
 
 
+def import_interval_frame_to_db(
+    frame: pd.DataFrame,
+    source_path: str,
+    account_number: str | None = None,
+    display_name: str | None = None,
+    energy_company: str | None = None,
+    baseline_date: str | None = None,
+    modified_time: float | None = None,
+    adapter_id: str = "interval_frame",
+    adapter_name: str = "Interval readings",
+) -> dict[str, object]:
+    if frame.empty:
+        raise ValueError("No interval rows were found to import.")
+
+    imported_at = timestamp_now()
+    modified_time = modified_time if modified_time is not None else datetime.now(tz.UTC).timestamp()
+
+    with get_db_connection() as conn:
+        account = get_or_create_account(
+            conn,
+            account_number,
+            display_name=display_name,
+            energy_company=energy_company,
+            baseline_date=baseline_date,
+        )
+        conn.executemany(
+            """
+            INSERT INTO interval_readings (account_id, start_epoch, duration_s, wh, source_path, imported_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, start_epoch, duration_s) DO UPDATE SET
+                wh = excluded.wh,
+                source_path = excluded.source_path,
+                imported_at = excluded.imported_at
+            """,
+            [
+                (
+                    int(account["id"]),
+                    int(row.start_epoch),
+                    int(row.duration_s),
+                    float(row.wh),
+                    source_path,
+                    imported_at,
+                )
+                for row in frame.itertuples(index=False)
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO imported_files (account_id, path, modified_time, interval_count, imported_at, service_point_id)
+            VALUES (?, ?, ?, ?, ?, NULL)
+            ON CONFLICT(account_id, path) DO UPDATE SET
+                modified_time = excluded.modified_time,
+                interval_count = excluded.interval_count,
+                imported_at = excluded.imported_at
+            """,
+            (int(account["id"]), source_path, modified_time, int(frame.shape[0]), imported_at),
+        )
+        conn.commit()
+
+    return {
+        "path": source_path,
+        "imported": True,
+        "interval_count": int(frame.shape[0]),
+        "account_number": account["account_number"],
+        "adapter_id": adapter_id,
+        "adapter_name": adapter_name,
+    }
+
+
 def import_interval_file_to_db(
     path: str | Path,
     account_number: str | None = None,
@@ -3352,58 +6381,17 @@ def import_interval_file_to_db(
 
     parsed = parse_interval_xml(path)
     frame = parsed.frame
-    imported_at = timestamp_now()
-
-    with get_db_connection() as conn:
-        account = get_or_create_account(
-            conn,
-            account_number,
-            display_name=display_name,
-            energy_company=energy_company,
-            baseline_date=baseline_date,
-        )
-        conn.executemany(
-            """
-            INSERT INTO interval_readings (account_id, start_epoch, duration_s, wh, source_path, imported_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(account_id, start_epoch, duration_s) DO UPDATE SET
-                wh = excluded.wh,
-                source_path = excluded.source_path,
-                imported_at = excluded.imported_at
-            """,
-            [
-                (
-                    int(account["id"]),
-                    int(row.start_epoch),
-                    int(row.duration_s),
-                    float(row.wh),
-                    path.as_posix(),
-                    imported_at,
-                )
-                for row in frame.itertuples(index=False)
-            ],
-        )
-        conn.execute(
-            """
-            INSERT INTO imported_files (account_id, path, modified_time, interval_count, imported_at, service_point_id)
-            VALUES (?, ?, ?, ?, ?, NULL)
-            ON CONFLICT(account_id, path) DO UPDATE SET
-                modified_time = excluded.modified_time,
-                interval_count = excluded.interval_count,
-                imported_at = excluded.imported_at
-            """,
-            (int(account["id"]), path.as_posix(), modified_time, int(frame.shape[0]), imported_at),
-        )
-        conn.commit()
-
-    return {
-        "path": path.as_posix(),
-        "imported": True,
-        "interval_count": int(frame.shape[0]),
-        "account_number": account["account_number"],
-        "adapter_id": parsed.adapter.adapter_id,
-        "adapter_name": parsed.adapter.display_name,
-    }
+    return import_interval_frame_to_db(
+        frame,
+        source_path=path.as_posix(),
+        account_number=account_number,
+        display_name=display_name,
+        energy_company=energy_company,
+        baseline_date=baseline_date,
+        modified_time=modified_time,
+        adapter_id=parsed.adapter.adapter_id,
+        adapter_name=parsed.adapter.display_name,
+    )
 
 
 def sync_input_files_to_db(
@@ -3884,17 +6872,60 @@ def analyze_history_store(
 
 
 def build_output_path(input_path: Path) -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return OUTPUT_DIR / f"{input_path.stem}-{timestamp}.csv"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    return OUTPUT_DIR / f"{input_path.stem}-{timestamp}-{uuid4().hex[:8]}.csv"
 
 
 def build_compare_output_path(left_input_path: Path, right_input_path: Path) -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return OUTPUT_DIR / f"{left_input_path.stem}-vs-{right_input_path.stem}-{timestamp}.md"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    return OUTPUT_DIR / (
+        f"{left_input_path.stem}-vs-{right_input_path.stem}-{timestamp}-{uuid4().hex[:8]}.md"
+    )
 
 
 def build_json_report_path(report_path: Path) -> Path:
     return report_path.with_suffix(".json")
+
+
+def normalize_report_filename(value: str | Path) -> str:
+    filename = Path(value).name
+    if filename != str(value) or Path(filename).suffix.lower() not in {".csv", ".json", ".md"}:
+        raise ValueError("That report file is not available.")
+    return filename
+
+
+def register_report_artifacts(account_number: str | None, paths: list[Path]) -> None:
+    filenames = [normalize_report_filename(path.name) for path in paths]
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        for filename in filenames:
+            conn.execute(
+                """
+                INSERT INTO report_artifacts (filename, account_id, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(filename) DO UPDATE SET
+                    account_id = excluded.account_id,
+                    created_at = excluded.created_at
+                """,
+                (filename, account["id"], timestamp),
+            )
+        conn.commit()
+
+
+def get_report_artifact_account_number(filename: str) -> str | None:
+    normalized_filename = normalize_report_filename(filename)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT accounts.account_number
+            FROM report_artifacts
+            JOIN accounts ON accounts.id = report_artifacts.account_id
+            WHERE report_artifacts.filename = ?
+            """,
+            (normalized_filename,),
+        ).fetchone()
+    return None if row is None else str(row["account_number"])
 
 
 def build_report_downloads(report_path: Path | None) -> list[dict[str, str]]:
@@ -4004,10 +7035,14 @@ def build_analysis_snapshot(
     baseline: float | None,
     report_path: Path | None,
     settings: dict[str, object],
+    weather_contexts: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     rows = serialize_summary(summary)
+    weather_contexts = weather_contexts or {}
     suspicious_rows = [row for row in rows if row["suspicious"]]
     ranked_suspicious_days = build_ranked_suspicious_days(rows, alert_events, baseline, settings)
+    attach_weather_context_to_rows(suspicious_rows, weather_contexts)
+    attach_weather_context_to_rows(ranked_suspicious_days, weather_contexts)
     coverage_start = df["date"].min().isoformat() if not df.empty else None
     coverage_end = df["date"].max().isoformat() if not df.empty else None
     focus_date = ranked_suspicious_days[0]["date"] if ranked_suspicious_days else choose_focus_date(rows)
@@ -4046,6 +7081,7 @@ def analyze_interval_file(
     min_night_kw: float = DEFAULT_MIN_NIGHT_KW,
     night_multiplier: float = DEFAULT_NIGHT_MULTIPLIER,
     baseline_date: str | None = None,
+    account_number: str | None = None,
 ) -> tuple[pd.DataFrame, float | None, Path]:
     ensure_data_dirs()
 
@@ -4068,20 +7104,23 @@ def analyze_interval_file(
         night_multiplier=night_multiplier,
         baseline_date=baseline_date,
     )
-    summary_with_flags.to_csv(report_path, index=True)
+    weather_contexts = load_weather_contexts_for_suspicious_days(summary_with_flags, account_number, tz_name)
+    report_summary = attach_weather_context_to_summary(summary_with_flags, weather_contexts)
+    report_summary.to_csv(report_path, index=True)
     save_json_report(
         report_path,
         build_analysis_snapshot(
             input_path.name,
             df,
-            summary_with_flags,
+            report_summary,
             alert_events,
             baseline,
             report_path,
             settings,
+            weather_contexts=weather_contexts,
         ),
     )
-    return summary_with_flags, baseline, report_path
+    return report_summary, baseline, report_path
 
 
 def summarize_monthly_usage(summary: pd.DataFrame) -> pd.DataFrame:
@@ -4388,7 +7427,7 @@ def render_comparison_markdown(comparison: dict[str, object]) -> str:
             f"({overview['flagged_nights_delta']:+d})"
         ),
         "",
-        "Months worth a closer look:",
+        "Biggest follow-up points:",
     ]
 
     major_deltas = comparison["major_deltas"]
@@ -4442,6 +7481,122 @@ def save_comparison_artifact(report_path: Path, comparison: dict[str, object]) -
         pd.DataFrame(comparison["rows"]).to_csv(report_path, index=False)
         return
     report_path.write_text(render_comparison_markdown(comparison), encoding="utf-8")
+
+
+def build_web_comparison_csv_path(report_path: Path) -> Path:
+    return report_path.with_suffix(".csv")
+
+
+def build_comparison_downloads(report_path: Path, csv_report_path: Path | None = None) -> list[dict[str, str]]:
+    downloads = [
+        {
+            "label": "Markdown" if report_path.suffix.lower() == ".md" else report_path.suffix.lstrip(".").upper(),
+            "filename": report_path.name,
+        }
+    ]
+    if csv_report_path is not None:
+        downloads.append({"label": "CSV", "filename": csv_report_path.name})
+    return downloads
+
+
+def build_comparison_packet_context(
+    comparison: dict[str, object],
+    report_path: Path,
+    csv_report_path: Path | None = None,
+) -> dict[str, object]:
+    overview = comparison["overview"]
+    total_kwh_detail = (
+        f"{format_number(overview['left_total_kwh'], 1, ' kWh')} to "
+        f"{format_number(overview['right_total_kwh'], 1, ' kWh')} "
+        f"({format_percent(overview['total_kwh_delta_pct'])})."
+    )
+    baseline_detail = (
+        f"{format_number(overview['left_baseline_kw'], 2, ' kW')} to "
+        f"{format_number(overview['right_baseline_kw'], 2, ' kW')} "
+        f"({format_percent(overview['baseline_delta_pct'])})."
+    )
+    flagged_delta = int(overview["flagged_nights_delta"])
+    metrics = [
+        {
+            "label": "Matched months",
+            "value": str(overview["matched_periods"]),
+            "detail": f"Compared with {comparison['alignment_label']} matching.",
+        },
+        {
+            "label": "Total kWh change",
+            "value": format_signed_number(overview["total_kwh_delta"], 1, " kWh"),
+            "detail": total_kwh_detail,
+        },
+        {
+            "label": "Overnight baseline shift",
+            "value": format_signed_number(overview["baseline_delta_kw"], 2, " kW"),
+            "detail": baseline_detail,
+        },
+        {
+            "label": "Flagged-night change",
+            "value": f"{flagged_delta:+d}",
+            "detail": (
+                f"{overview['left_flagged_nights']} to {overview['right_flagged_nights']} flagged nights."
+            ),
+        },
+    ]
+
+    follow_up_points = [
+        {
+            "label": row["comparison_label"],
+            "detail": (
+                f"Total kWh {format_percent(row['total_kwh_delta_pct'])}, "
+                f"overnight baseline {format_signed_number(row['overnight_baseline_delta_kw'], 2, ' kW')}, "
+                f"flagged nights {int(row['flagged_nights_delta']):+d}."
+            ),
+        }
+        for row in comparison["major_deltas"]
+    ]
+    if not follow_up_points:
+        follow_up_points.append(
+            {
+                "label": "No large monthly swing",
+                "detail": "The matched months stayed below the review thresholds for kWh, baseline, and flagged nights.",
+            }
+        )
+
+    matched_rows = [
+        {
+            "label": row["comparison_label"],
+            "total_kwh": (
+                f"{format_number(row['left_total_kwh'], 1)} to "
+                f"{format_number(row['right_total_kwh'], 1)}"
+            ),
+            "total_delta": (
+                f"{format_signed_number(row['total_kwh_delta'], 1)} / "
+                f"{format_percent(row['total_kwh_delta_pct'])}"
+            ),
+            "overnight_baseline": (
+                f"{format_number(row['left_overnight_baseline_kw'], 2, ' kW')} to "
+                f"{format_number(row['right_overnight_baseline_kw'], 2, ' kW')}"
+            ),
+            "baseline_delta": (
+                f"{format_signed_number(row['overnight_baseline_delta_kw'], 2, ' kW')} / "
+                f"{format_percent(row['overnight_baseline_delta_pct'])}"
+            ),
+            "flagged_nights": f"{row['left_flagged_nights']} to {row['right_flagged_nights']}",
+            "flagged_delta": f"{int(row['flagged_nights_delta']):+d}",
+        }
+        for row in comparison["rows"]
+    ]
+
+    return {
+        "report_file": report_path.name,
+        "report_files": build_comparison_downloads(report_path, csv_report_path),
+        "left_label": comparison["left_label"],
+        "right_label": comparison["right_label"],
+        "alignment_label": comparison["alignment_label"],
+        "metrics": metrics,
+        "follow_up_points": follow_up_points,
+        "matched_rows": matched_rows,
+        "left_only_periods": comparison["left_only_periods"],
+        "right_only_periods": comparison["right_only_periods"],
+    }
 
 
 def analyze_interval_file_comparison(
@@ -4512,6 +7667,9 @@ def print_human_report(summary: pd.DataFrame, baseline: float | None) -> None:
         )
         if row["reasons"]:
             print(f"    reasons: {row['reasons']}")
+        weather_context = row.get("weather_context", "")
+        if weather_context:
+            print(f"    weather: {weather_context}")
     print("")
 
 
@@ -4673,6 +7831,7 @@ def build_report_context(
     household_profile: dict[str, object],
     load_items: list[dict[str, object]],
     imported_files_count: int = 0,
+    weather_contexts: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     snapshot = build_analysis_snapshot(
         subject_name,
@@ -4682,6 +7841,7 @@ def build_report_context(
         baseline,
         report_path,
         settings,
+        weather_contexts=weather_contexts,
     )
     focus_date = snapshot["focus_date"]
     load_summary = build_load_inventory_summary(load_items)
@@ -4734,6 +7894,7 @@ def parse_settings(form_like) -> dict[str, object]:
 def has_household_profile_fields(form_like) -> bool:
     keys = {
         "address",
+        "zip_code",
         "occupant_count",
         "year_built",
         "square_footage",
@@ -4833,6 +7994,7 @@ def build_customer_account_scaffold(
             "load_items": [],
             "load_summary": build_load_inventory_summary([]),
             "account_access": [],
+            "customer_account_access": None,
             "utility_connections": [],
         }
     account = find_account(selected_account_number) or load_account(selected_account_number)
@@ -4846,14 +8008,25 @@ def build_customer_account_scaffold(
         "load_items": load_items,
         "load_summary": build_load_inventory_summary(load_items),
         "account_access": list_account_access_emails(account["account_number"]),
+        "customer_account_access": get_customer_account_access(customer_email, account["account_number"]),
         "utility_connections": list_utility_connections(account["account_number"]),
     }
 
 
 def create_web_app() -> Flask:
+    validate_runtime_security()
     app = Flask(__name__)
-    app.secret_key = os.getenv("POWER_APP_SECRET", "local-power-data-only")
-    app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
+    app.secret_key = get_app_secret()
+    app.config.update(
+        MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=is_production_environment(),
+        SESSION_COOKIE_NAME="home_energy_watch_session",
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+    )
+    if (os.getenv("POWER_TRUST_PROXY") or "").strip().lower() in {"1", "true", "yes"}:
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     marketing_endpoints = {
         "index",
         "pricing_page",
@@ -4866,24 +8039,143 @@ def create_web_app() -> Flask:
         "static",
     }
 
+    def get_csrf_token() -> str:
+        token = session.get("_csrf_token")
+        if not token:
+            token = secrets.token_urlsafe(32)
+            session["_csrf_token"] = token
+        return str(token)
+
+    def auth_request_identity(scope: str, email: str | None) -> str:
+        return auth_rate_limit_identity(scope, email, request.remote_addr)
+
+    def auth_limit_message(retry_after: int) -> str:
+        minutes = max(1, (int(retry_after) + 59) // 60)
+        return f"Too many sign-in attempts. Try again in {minutes} minute{'s' if minutes != 1 else ''}."
+
+    @app.before_request
+    def establish_request_context():
+        g.request_id = uuid4().hex
+
+    @app.before_request
+    def enforce_csrf_protection():
+        if request.method in {"GET", "HEAD", "OPTIONS", "TRACE"}:
+            return None
+        if request.endpoint == "stripe_webhook":
+            return None
+        if app.config.get("TESTING") and not app.config.get("CSRF_ENFORCE_TESTS"):
+            return None
+        expected = session.get("_csrf_token")
+        supplied = request.headers.get("X-CSRF-Token") or request.form.get("_csrf_token")
+        if expected and supplied and secrets.compare_digest(str(expected), str(supplied)):
+            return None
+        message = "That form has expired. Refresh the page and try again."
+        if request.path.startswith("/api/") or request.is_json:
+            return jsonify({"error": message}), 400
+        return message, 400
+
+    @app.after_request
+    def add_security_headers(response):
+        response.headers["X-Request-ID"] = str(getattr(g, "request_id", "") or uuid4().hex)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data: https:; style-src 'self'; "
+            "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; "
+            "form-action 'self' https://app.homeenergywatch.com",
+        )
+        if session.get("staff_user_id") or session.get("customer_user_id"):
+            response.headers["Cache-Control"] = "no-store, private"
+        if is_production_environment():
+            response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return response
+
     def current_staff_user() -> dict[str, object] | None:
         staff_user_id = session.get("staff_user_id")
         if staff_user_id is None:
             return None
-        return get_staff_user_by_id(int(staff_user_id))
+        staff_user = get_staff_user_by_id(int(staff_user_id))
+        if staff_user is None or not staff_user.get("is_active"):
+            session.pop("staff_user_id", None)
+            session.pop("staff_auth_version", None)
+            return None
+        session_auth_version = session.get("staff_auth_version")
+        current_auth_version = int(staff_user.get("auth_version") or 1)
+        if session_auth_version is None:
+            session["staff_auth_version"] = current_auth_version
+        elif int(session_auth_version) != current_auth_version:
+            session.pop("staff_user_id", None)
+            session.pop("staff_auth_version", None)
+            return None
+        return staff_user
 
     def current_customer_user() -> dict[str, object] | None:
         customer_user_id = session.get("customer_user_id")
         if customer_user_id is None:
             return None
-        return get_customer_user_by_id(int(customer_user_id))
+        customer_user = get_customer_user_by_id(int(customer_user_id))
+        if customer_user is None or not customer_user.get("is_active"):
+            session.pop("customer_user_id", None)
+            session.pop("customer_auth_version", None)
+            return None
+        session_auth_version = session.get("customer_auth_version")
+        current_auth_version = int(customer_user.get("auth_version") or 1)
+        if session_auth_version is None:
+            session["customer_auth_version"] = current_auth_version
+        elif int(session_auth_version) != current_auth_version:
+            session.pop("customer_user_id", None)
+            session.pop("customer_auth_version", None)
+            return None
+        return customer_user
+
+    def establish_staff_session(staff_user: dict[str, object]) -> None:
+        session.clear()
+        session.permanent = True
+        session["staff_user_id"] = int(staff_user["id"])
+        session["staff_auth_version"] = int(staff_user.get("auth_version") or 1)
+
+    def establish_pending_staff_mfa_session(staff_user: dict[str, object], next_url: str) -> None:
+        session.clear()
+        session.permanent = True
+        session["pending_staff_user_id"] = int(staff_user["id"])
+        session["pending_staff_auth_version"] = int(staff_user.get("auth_version") or 1)
+        session["pending_staff_mfa_at"] = timestamp_now()
+        if next_url.startswith("/") and not next_url.startswith("//"):
+            session["pending_staff_next"] = next_url
+
+    def pending_staff_mfa_user() -> dict[str, object] | None:
+        staff_user_id = session.get("pending_staff_user_id")
+        started_at = session.get("pending_staff_mfa_at")
+        if staff_user_id is None or not started_at:
+            return None
+        try:
+            expired = datetime.fromisoformat(str(started_at)) + timedelta(
+                minutes=MFA_CHALLENGE_EXPIRY_MINUTES
+            ) <= datetime.now()
+        except ValueError:
+            expired = True
+        staff_user = get_staff_user_by_id(int(staff_user_id))
+        if (
+            expired
+            or staff_user is None
+            or not staff_user.get("is_active")
+            or not staff_user.get("mfa_enabled")
+            or int(session.get("pending_staff_auth_version") or 0)
+            != int(staff_user.get("auth_version") or 1)
+        ):
+            session.clear()
+            return None
+        return staff_user
 
     def staff_bootstrap_needed() -> bool:
         return count_staff_users() == 0
 
     def next_destination(default_endpoint: str = "index") -> str:
         next_url = request.args.get("next") or request.form.get("next")
-        if next_url and next_url.startswith("/"):
+        if next_url and next_url.startswith("/") and not next_url.startswith("//"):
             return next_url
         return url_for(default_endpoint)
 
@@ -4908,15 +8200,43 @@ def create_web_app() -> Flask:
             return redirect(url_for("customer_login", next=request.full_path if request.query_string else request.path))
         return customer_user
 
-    def require_account_actor(account_number: str | None, api: bool = False):
+    @app.before_request
+    def enforce_required_staff_mfa():
+        if not staff_mfa_required() or session.get("staff_user_id") is None:
+            return None
+        allowed_endpoints = {
+            "staff_security",
+            "staff_mfa_start",
+            "staff_mfa_confirm",
+            "staff_mfa_cancel",
+            "logout",
+            "health",
+            "static",
+        }
+        if request.endpoint in allowed_endpoints:
+            return None
+        staff_user = current_staff_user()
+        if staff_user is not None and not staff_user.get("mfa_enabled"):
+            if request.path.startswith("/api/") or request.is_json:
+                return jsonify({"error": "Set up authenticator protection to continue."}), 403
+            return redirect(url_for("staff_security"))
+        return None
+
+    def require_account_actor(account_number: str | None, api: bool = False, write: bool = False):
         staff_user = current_staff_user()
         if staff_user is not None:
             return {"kind": "staff", "user": staff_user}
 
         customer_user = current_customer_user()
         if customer_user is not None:
-            if customer_has_account_access(str(customer_user["email"]), account_number):
-                return {"kind": "customer", "user": customer_user}
+            account_access = get_customer_account_access(str(customer_user["email"]), account_number)
+            if account_access is not None:
+                if write and account_access["access_level"] != "Manager":
+                    message = "Manager access is required to change this account."
+                    if api:
+                        return jsonify({"error": message}), 403
+                    return message, 403
+                return {"kind": "customer", "user": customer_user, "account_access": account_access}
             if api:
                 return jsonify({"error": "That account is not available for this sign-in."}), 403
             flash("That account is not available for this sign-in.")
@@ -4925,6 +8245,26 @@ def create_web_app() -> Flask:
         if api:
             return jsonify({"error": "Sign in to continue."}), 401
         return redirect(url_for("customer_login", next=request.full_path if request.query_string else request.path))
+
+    def record_actor_event(
+        actor: dict[str, object],
+        action: str,
+        *,
+        account_number: str | None = None,
+        target_type: str | None = None,
+        target_id: object | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> int:
+        user = actor["user"]
+        return record_audit_event(
+            action,
+            actor_type=str(actor["kind"]),
+            actor_id=int(user["id"]),
+            account_number=account_number,
+            target_type=target_type,
+            target_id=target_id,
+            metadata=metadata,
+        )
 
     def signed_in_for_reports(api: bool = False):
         staff_user = current_staff_user()
@@ -5036,6 +8376,7 @@ def create_web_app() -> Flask:
             "load_items": scaffold["load_items"],
             "load_summary": scaffold["load_summary"],
             "account_access": scaffold["account_access"],
+            "customer_account_access": scaffold["customer_account_access"],
             "utility_connections": scaffold["utility_connections"],
             "setup_section": setup_section,
             "active_account_number": scaffold["account"]["account_number"],
@@ -5063,10 +8404,10 @@ def create_web_app() -> Flask:
         return {
             "full_name": value("full_name"),
             "email": value("email"),
-            "password": value("password"),
+            "password": "",
             "account_number": value("account_number"),
-            "energy_company": value("energy_company"),
             "address": value("address"),
+            "zip_code": value("zip_code"),
             "plan_id": selected_plan_id,
         }
 
@@ -5079,6 +8420,37 @@ def create_web_app() -> Flask:
             signup_form=signup_form,
         )
 
+    def start_customer_session(customer_user: dict[str, object]) -> None:
+        session.clear()
+        session.permanent = True
+        session["customer_user_id"] = int(customer_user["id"])
+        session["customer_auth_version"] = int(customer_user.get("auth_version") or 1)
+
+    def render_verification_notice(email: str | None = None):
+        pending_email = (email or session.get("pending_verification_email") or "").strip()
+        return render_template(
+            "customer_verification_notice.html",
+            page_title="Check Your Email",
+            pending_email=pending_email,
+            masked_email=mask_email_address(pending_email),
+        )
+
+    def continue_customer_after_verification(customer_user: dict[str, object]):
+        start_customer_session(customer_user)
+        billing = load_customer_billing(int(customer_user["id"]))
+        selected_plan = get_billing_plan(str(billing["plan_id"]))
+        if selected_plan["payment_ready"]:
+            try:
+                session_obj = create_customer_checkout_session(
+                    customer_user,
+                    str(billing["plan_id"]),
+                    build_public_base_url(request.url_root),
+                )
+                return redirect(str(session_obj["url"]))
+            except Exception as exc:
+                flash(str(exc))
+        return redirect(url_for("customer_dashboard"))
+
     @app.context_processor
     def inject_layout_context():
         return {
@@ -5087,8 +8459,9 @@ def create_web_app() -> Flask:
             "staff_roles": STAFF_ROLES,
             "customer_access_levels": CUSTOMER_ACCESS_LEVELS,
             "billing_plans": list_billing_plans(),
-            "energy_company_groups": list_energy_company_groups(),
             "supported_feeds": list_supported_utility_adapters(),
+            "utility_access_guides": list_utility_access_guides(),
+            "csrf_token": get_csrf_token,
             "app_base_url": build_public_base_url(),
             "marketing_base_url": build_marketing_base_url(),
             "request_on_marketing_host": is_marketing_host(current_request_host()),
@@ -5159,6 +8532,7 @@ def create_web_app() -> Flask:
             load_items=scaffold["load_items"],
             load_summary=scaffold["load_summary"],
             account_access=scaffold["account_access"],
+            customer_account_access=scaffold["customer_account_access"],
             utility_connections=scaffold["utility_connections"],
             staff_team=[],
             latest_invite_url=None,
@@ -5190,44 +8564,238 @@ def create_web_app() -> Flask:
             flash(str(exc))
             return redirect(url_for("first_run"))
 
+        session.clear()
+        session.permanent = True
         session["staff_user_id"] = int(staff_user["id"])
-        session.pop("customer_user_id", None)
+        session["staff_auth_version"] = int(staff_user.get("auth_version") or 1)
+        record_audit_event(
+            "staff.first_run_completed",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=staff_user["id"],
+        )
         return redirect(url_for("index"))
 
     @app.get("/signup")
     def customer_signup():
         if current_customer_user() is not None and current_staff_user() is None:
             return redirect(url_for("customer_dashboard"))
-        return render_customer_signup_page()
+        return render_customer_signup_page(request.args)
 
     @app.post("/signup")
     def customer_signup_post():
+        selected_plan_id = request.form.get("plan_id") or "home"
         try:
-            customer_user = create_customer_user(
-                request.form.get("email", ""),
-                request.form.get("full_name", ""),
-                request.form.get("password", ""),
+            energy_company = resolve_energy_company_for_form(request.form, require_zip=True)
+            customer_user, account, billing = create_customer_signup(
+                email=request.form.get("email", ""),
+                full_name=request.form.get("full_name", ""),
+                password=request.form.get("password", ""),
+                account_number=request.form.get("account_number"),
+                energy_company=energy_company,
+                plan_id=selected_plan_id,
+                household_form=request.form,
             )
-            account = save_account_profile(
-                request.form.get("account_number"),
-                display_name=request.form.get("full_name"),
-                energy_company=request.form.get("energy_company"),
-            )
-            save_household_profile(account["account_number"], request.form)
-            add_account_access_email(
-                account["account_number"],
-                str(customer_user["email"]),
-                full_name=str(customer_user["full_name"]),
-                access_level="Manager",
-            )
-            record_customer_plan_selection(int(customer_user["id"]), request.form.get("plan_id") or "home")
         except Exception as exc:
             flash(str(exc))
             return render_customer_signup_page(request.form)
 
-        session["customer_user_id"] = int(customer_user["id"])
-        session.pop("staff_user_id", None)
-        return redirect(url_for("customer_dashboard"))
+        record_audit_event(
+            "customer.signup",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=str(account["account_number"]),
+            target_type="customer_user",
+            target_id=customer_user["id"],
+            metadata={"plan_id": str(billing["plan_id"])},
+        )
+        if not customer_user.get("email_verified"):
+            session.clear()
+            session.permanent = True
+            session["pending_verification_email"] = str(customer_user["email"])
+            try:
+                send_customer_verification_email(
+                    customer_user,
+                    build_public_base_url(request.url_root),
+                )
+                record_audit_event(
+                    "customer.email_verification_sent",
+                    actor_type="customer",
+                    actor_id=int(customer_user["id"]),
+                    account_number=str(account["account_number"]),
+                    target_type="customer_user",
+                    target_id=customer_user["id"],
+                )
+            except Exception as exc:
+                flash("We could not send the confirmation message. Try sending it again in a moment.")
+                record_audit_event(
+                    "customer.email_verification_delivery_failed",
+                    actor_type="customer",
+                    actor_id=int(customer_user["id"]),
+                    account_number=str(account["account_number"]),
+                    target_type="customer_user",
+                    target_id=customer_user["id"],
+                    metadata={"error_type": type(exc).__name__},
+                )
+            return render_verification_notice(str(customer_user["email"]))
+
+        return continue_customer_after_verification(customer_user)
+
+    @app.get("/customer/verification-sent")
+    def customer_verification_sent():
+        return render_verification_notice()
+
+    @app.post("/customer/verification/resend")
+    def customer_verification_resend():
+        email = request.form.get("email") or session.get("pending_verification_email") or ""
+        identity_hash = auth_request_identity("customer_verification_resend", str(email))
+        limit_status = auth_rate_limit_status("customer_verification_resend", identity_hash)
+        if limit_status["blocked"]:
+            flash("Please wait before asking for another confirmation message.")
+            return render_verification_notice(str(email)), 429
+        record_auth_failure("customer_verification_resend", identity_hash)
+        customer_user = get_customer_user_by_email(str(email))
+        if customer_user is not None and not customer_user.get("email_verified"):
+            try:
+                send_customer_verification_email(customer_user, build_public_base_url(request.url_root))
+                record_audit_event(
+                    "customer.email_verification_resent",
+                    actor_type="customer",
+                    actor_id=int(customer_user["id"]),
+                    target_type="customer_user",
+                    target_id=customer_user["id"],
+                )
+            except Exception as exc:
+                record_audit_event(
+                    "customer.email_verification_delivery_failed",
+                    actor_type="customer",
+                    actor_id=int(customer_user["id"]),
+                    target_type="customer_user",
+                    target_id=customer_user["id"],
+                    metadata={"error_type": type(exc).__name__},
+                )
+        session["pending_verification_email"] = str(email).strip()
+        flash("If that address still needs confirmation, a new message is on its way.")
+        return render_verification_notice(str(email))
+
+    @app.get("/customer/verify-email")
+    def customer_verify_email():
+        token = request.args.get("token", "")
+        token_record = load_valid_customer_auth_token(token, "verify_email")
+        return render_template(
+            "customer_verify_email.html",
+            page_title="Confirm Your Email",
+            token=token,
+            token_valid=token_record is not None,
+            masked_email=(
+                mask_email_address(str(token_record["customer_user"]["email"]))
+                if token_record is not None
+                else ""
+            ),
+        )
+
+    @app.post("/customer/verify-email")
+    def customer_verify_email_post():
+        try:
+            customer_user = verify_customer_email(request.form.get("token"))
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("customer_verification_sent"))
+        session.pop("pending_verification_email", None)
+        account_number = choose_customer_account_number(str(customer_user["email"]))
+        record_audit_event(
+            "customer.email_verified",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=account_number,
+            target_type="customer_user",
+            target_id=customer_user["id"],
+        )
+        flash("Your email address is confirmed.")
+        return continue_customer_after_verification(customer_user)
+
+    @app.get("/customer/forgot-password")
+    def customer_forgot_password():
+        return render_template(
+            "customer_forgot_password.html",
+            page_title="Reset Your Password",
+            request_sent=False,
+        )
+
+    @app.post("/customer/forgot-password")
+    def customer_forgot_password_post():
+        email = request.form.get("email", "")
+        identity_hash = auth_request_identity("customer_password_reset", email)
+        limit_status = auth_rate_limit_status("customer_password_reset", identity_hash)
+        if limit_status["blocked"]:
+            return (
+                render_template(
+                    "customer_forgot_password.html",
+                    page_title="Reset Your Password",
+                    request_sent=True,
+                    rate_limited=True,
+                ),
+                429,
+            )
+        record_auth_failure("customer_password_reset", identity_hash)
+        customer_user = get_customer_user_by_email(email)
+        delivered = False
+        if customer_user is not None and customer_user.get("is_active"):
+            try:
+                send_customer_password_reset_email(customer_user, build_public_base_url(request.url_root))
+                delivered = True
+            except Exception:
+                delivered = False
+        record_audit_event(
+            "customer.password_reset_requested",
+            actor_type="customer" if customer_user is not None else "anonymous",
+            actor_id=None if customer_user is None else int(customer_user["id"]),
+            target_type="customer_user" if customer_user is not None else None,
+            target_id=None if customer_user is None else customer_user["id"],
+            metadata={"delivery_attempted": delivered},
+        )
+        return render_template(
+            "customer_forgot_password.html",
+            page_title="Reset Your Password",
+            request_sent=True,
+            rate_limited=False,
+        )
+
+    @app.get("/customer/reset-password")
+    def customer_reset_password():
+        token = request.args.get("token", "")
+        token_record = load_valid_customer_auth_token(token, "password_reset")
+        return render_template(
+            "customer_reset_password.html",
+            page_title="Choose a New Password",
+            token=token,
+            token_valid=token_record is not None,
+        )
+
+    @app.post("/customer/reset-password")
+    def customer_reset_password_post():
+        try:
+            if request.form.get("password") != request.form.get("password_confirm"):
+                raise ValueError("Enter the same new password twice.")
+            customer_user = reset_customer_password(
+                request.form.get("token"),
+                request.form.get("password"),
+            )
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("customer_forgot_password"))
+        session.clear()
+        record_audit_event(
+            "customer.password_reset_completed",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=choose_customer_account_number(str(customer_user["email"])),
+            target_type="customer_user",
+            target_id=customer_user["id"],
+        )
+        flash("Your password has been changed. Sign in with the new password.")
+        return redirect(url_for("customer_login"))
 
     @app.get("/customer/login")
     def customer_login():
@@ -5237,17 +8805,67 @@ def create_web_app() -> Flask:
 
     @app.post("/customer/login")
     def customer_login_post():
+        email = request.form.get("email", "")
+        identity_hash = auth_request_identity("customer_login", email)
+        limit_status = auth_rate_limit_status("customer_login", identity_hash)
+        if limit_status["blocked"]:
+            flash(auth_limit_message(int(limit_status["retry_after"])))
+            return (
+                render_template(
+                    "customer_login.html",
+                    page_title="Customer Sign In",
+                    next_url=request.form.get("next", ""),
+                ),
+                429,
+            )
         try:
             customer_user = authenticate_customer_user(
-                request.form.get("email", ""),
+                email,
                 request.form.get("password", ""),
             )
+        except EmailVerificationRequired as exc:
+            clear_auth_failures("customer_login", identity_hash)
+            session.clear()
+            session.permanent = True
+            session["pending_verification_email"] = str(exc.customer_user["email"])
+            record_audit_event(
+                "customer.login_verification_required",
+                actor_type="customer",
+                actor_id=int(exc.customer_user["id"]),
+                target_type="customer_user",
+                target_id=exc.customer_user["id"],
+            )
+            return redirect(url_for("customer_verification_sent"))
         except Exception as exc:
+            failed_status = record_auth_failure("customer_login", identity_hash)
+            record_audit_event(
+                "customer.login_failed",
+                actor_type="anonymous",
+                metadata={"rate_limited": bool(failed_status["blocked"])},
+            )
             flash(str(exc))
+            if failed_status["blocked"]:
+                flash(auth_limit_message(int(failed_status["retry_after"])))
+                return (
+                    render_template(
+                        "customer_login.html",
+                        page_title="Customer Sign In",
+                        next_url=request.form.get("next", ""),
+                    ),
+                    429,
+                )
             return redirect(url_for("customer_login", next=request.form.get("next", "")))
 
-        session["customer_user_id"] = int(customer_user["id"])
-        session.pop("staff_user_id", None)
+        clear_auth_failures("customer_login", identity_hash)
+        start_customer_session(customer_user)
+        record_audit_event(
+            "customer.login_succeeded",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=choose_customer_account_number(str(customer_user["email"])),
+            target_type="customer_user",
+            target_id=customer_user["id"],
+        )
         return redirect(next_destination(default_endpoint="customer_dashboard"))
 
     @app.get("/pricing")
@@ -5311,13 +8929,36 @@ def create_web_app() -> Flask:
         except Exception as exc:
             flash(str(exc))
             return redirect(url_for("pricing_page"))
+        record_audit_event(
+            "billing.checkout_started",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=choose_customer_account_number(str(customer_user["email"])),
+            target_type="stripe_checkout_session",
+            target_id=session_obj.get("id"),
+            metadata={"plan_id": str(request.form.get("plan_id") or "")},
+        )
         return redirect(str(session_obj["url"]))
 
     @app.get("/billing/success")
     def billing_success():
-        if current_customer_user() is None:
+        customer_user = current_customer_user()
+        if customer_user is None:
             return redirect(url_for("customer_login"))
-        flash("Billing is started. Stripe will confirm the subscription shortly.")
+        try:
+            billing = refresh_customer_billing_from_stripe(customer_user, request.args.get("session_id"))
+            record_audit_event(
+                "billing.status_refreshed",
+                actor_type="customer",
+                actor_id=int(customer_user["id"]),
+                account_number=choose_customer_account_number(str(customer_user["email"])),
+                target_type="customer_billing",
+                target_id=customer_user["id"],
+                metadata={"status": str(billing.get("status") or "")},
+            )
+        except Exception:
+            pass
+        flash("Billing is being confirmed.")
         return redirect(url_for("customer_dashboard"))
 
     @app.get("/billing/cancel")
@@ -5337,22 +8978,36 @@ def create_web_app() -> Flask:
         except Exception as exc:
             flash(str(exc))
             return redirect(url_for("customer_dashboard"))
+        record_audit_event(
+            "billing.portal_opened",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=choose_customer_account_number(str(customer_user["email"])),
+            target_type="customer_billing",
+            target_id=customer_user["id"],
+        )
         return redirect(str(session_obj["url"]))
 
     @app.post("/stripe/webhook")
     def stripe_webhook():
         try:
-            if os.getenv("STRIPE_WEBHOOK_SECRET"):
-                if stripe is None:
-                    raise ValueError("Stripe is not available in this build.")
-                event = stripe.Webhook.construct_event(
-                    request.get_data(),
-                    request.headers.get("Stripe-Signature"),
-                    os.getenv("STRIPE_WEBHOOK_SECRET"),
-                )
-            else:
-                event = request.get_json(force=True)
-            handle_billing_event(event)
+            if stripe is None:
+                return jsonify({"error": "Stripe is not available in this build."}), 400
+            webhook_secret = get_stripe_webhook_secret()
+            if not webhook_secret:
+                return jsonify({"error": "Stripe webhook is not connected."}), 400
+            payload = request.get_data()
+            signature = request.headers.get("Stripe-Signature", "")
+            event = stripe.Webhook.construct_event(payload, signature, webhook_secret)
+            handle_stripe_event(event)
+            event_type = str(event.get("type") or "unknown")
+            record_audit_event(
+                "billing.webhook_processed",
+                actor_type="system",
+                target_type="stripe_event",
+                target_id=event.get("id"),
+                metadata={"event_type": event_type},
+            )
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
         return jsonify({"received": True})
@@ -5370,6 +9025,26 @@ def create_web_app() -> Flask:
         if not isinstance(customer_user, dict):
             return customer_user
         return render_customer_setup_page(customer_user, "Account", "account")
+
+    @app.get("/customer/data-export.zip")
+    def customer_data_export():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        archive, account_count = build_customer_data_archive(customer_user)
+        record_audit_event(
+            "customer.data_exported",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            target_type="customer_data",
+            target_id=customer_user["id"],
+            metadata={"account_count": account_count},
+        )
+        filename = f"home-energy-watch-data-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+        response = app.response_class(archive, mimetype="application/zip")
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/customer/utility")
     def customer_utility_page():
@@ -5418,28 +9093,387 @@ def create_web_app() -> Flask:
             return redirect(url_for("index"))
         return render_template("login.html", page_title="Commission Sign In", next_url=request.args.get("next", ""))
 
+    @app.get("/staff/forgot-password")
+    def staff_forgot_password():
+        if staff_bootstrap_needed():
+            return redirect(url_for("first_run"))
+        return render_template(
+            "staff_forgot_password.html",
+            page_title="Reset Commission Password",
+            request_sent=False,
+        )
+
+    @app.post("/staff/forgot-password")
+    def staff_forgot_password_post():
+        if staff_bootstrap_needed():
+            return redirect(url_for("first_run"))
+        email = request.form.get("email", "")
+        identity_hash = auth_request_identity("staff_password_reset", email)
+        limit_status = auth_rate_limit_status("staff_password_reset", identity_hash)
+        if limit_status["blocked"]:
+            return (
+                render_template(
+                    "staff_forgot_password.html",
+                    page_title="Reset Commission Password",
+                    request_sent=True,
+                    rate_limited=True,
+                ),
+                429,
+            )
+        record_auth_failure("staff_password_reset", identity_hash)
+        staff_user = get_staff_user_by_email(email)
+        delivered = False
+        if staff_user is not None and staff_user.get("is_active") and not staff_user.get("invite_pending"):
+            try:
+                send_staff_password_reset_email(staff_user, build_public_base_url(request.url_root))
+                delivered = True
+            except Exception:
+                delivered = False
+        record_audit_event(
+            "staff.password_reset_requested",
+            actor_type="staff" if staff_user is not None else "anonymous",
+            actor_id=None if staff_user is None else int(staff_user["id"]),
+            target_type="staff_user" if staff_user is not None else None,
+            target_id=None if staff_user is None else staff_user["id"],
+            metadata={"delivery_attempted": delivered},
+        )
+        return render_template(
+            "staff_forgot_password.html",
+            page_title="Reset Commission Password",
+            request_sent=True,
+            rate_limited=False,
+        )
+
+    @app.get("/staff/reset-password")
+    def staff_reset_password():
+        token = request.args.get("token", "")
+        token_record = load_valid_staff_auth_token(token, "password_reset")
+        return render_template(
+            "staff_reset_password.html",
+            page_title="Choose a Commission Password",
+            token=token,
+            token_valid=token_record is not None,
+        )
+
+    @app.post("/staff/reset-password")
+    def staff_reset_password_post():
+        token = request.form.get("token", "")
+        try:
+            if request.form.get("password") != request.form.get("password_confirm"):
+                raise ValueError("Enter the same new password twice.")
+            staff_user = reset_staff_password(
+                token,
+                request.form.get("password"),
+            )
+        except ValueError as exc:
+            flash(str(exc))
+            token_record = load_valid_staff_auth_token(token, "password_reset")
+            return render_template(
+                "staff_reset_password.html",
+                page_title="Choose a Commission Password",
+                token=token,
+                token_valid=token_record is not None,
+            ), 400
+        session.clear()
+        record_audit_event(
+            "staff.password_reset_completed",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=staff_user["id"],
+        )
+        flash("Your password has been changed. Sign in with the new password.")
+        return redirect(url_for("login"))
+
     @app.post("/login")
     def login_post():
         if staff_bootstrap_needed():
             return redirect(url_for("first_run"))
+        email = request.form.get("email", "")
+        identity_hash = auth_request_identity("staff_login", email)
+        limit_status = auth_rate_limit_status("staff_login", identity_hash)
+        if limit_status["blocked"]:
+            flash(auth_limit_message(int(limit_status["retry_after"])))
+            return (
+                render_template(
+                    "login.html",
+                    page_title="Commission Sign In",
+                    next_url=request.form.get("next", ""),
+                ),
+                429,
+            )
         try:
             staff_user = authenticate_staff_user(
-                request.form.get("email", ""),
+                email,
                 request.form.get("password", ""),
             )
         except Exception as exc:
+            failed_status = record_auth_failure("staff_login", identity_hash)
+            record_audit_event(
+                "staff.login_failed",
+                actor_type="anonymous",
+                metadata={"rate_limited": bool(failed_status["blocked"])},
+            )
             flash(str(exc))
+            if failed_status["blocked"]:
+                flash(auth_limit_message(int(failed_status["retry_after"])))
+                return (
+                    render_template(
+                        "login.html",
+                        page_title="Commission Sign In",
+                        next_url=request.form.get("next", ""),
+                    ),
+                    429,
+                )
             return redirect(url_for("login", next=request.form.get("next", "")))
 
-        session["staff_user_id"] = int(staff_user["id"])
-        session.pop("customer_user_id", None)
-        return redirect(next_destination())
+        clear_auth_failures("staff_login", identity_hash)
+        destination = next_destination()
+        if staff_user.get("mfa_enabled"):
+            establish_pending_staff_mfa_session(staff_user, destination)
+            record_audit_event(
+                "staff.password_verified",
+                actor_type="staff",
+                actor_id=int(staff_user["id"]),
+                target_type="staff_user",
+                target_id=staff_user["id"],
+            )
+            return redirect(url_for("staff_mfa_challenge"))
+
+        establish_staff_session(staff_user)
+        mark_staff_login_succeeded(int(staff_user["id"]))
+        record_audit_event(
+            "staff.login_succeeded",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=staff_user["id"],
+            metadata={"mfa": "not_enabled"},
+        )
+        return redirect(destination)
+
+    @app.get("/staff/mfa/challenge")
+    def staff_mfa_challenge():
+        staff_user = pending_staff_mfa_user()
+        if staff_user is None:
+            flash("Sign in again to continue.")
+            return redirect(url_for("login"))
+        return render_template(
+            "staff_mfa_challenge.html",
+            page_title="Verify Commission Sign In",
+            staff_email=mask_email_address(str(staff_user["email"])),
+        )
+
+    @app.post("/staff/mfa/challenge")
+    def staff_mfa_challenge_post():
+        staff_user = pending_staff_mfa_user()
+        if staff_user is None:
+            flash("Sign in again to continue.")
+            return redirect(url_for("login"))
+        identity_hash = auth_request_identity("staff_mfa", str(staff_user["email"]))
+        limit_status = auth_rate_limit_status("staff_mfa", identity_hash)
+        if limit_status["blocked"]:
+            flash(auth_limit_message(int(limit_status["retry_after"])))
+            return (
+                render_template(
+                    "staff_mfa_challenge.html",
+                    page_title="Verify Commission Sign In",
+                    staff_email=mask_email_address(str(staff_user["email"])),
+                ),
+                429,
+            )
+        method = verify_staff_mfa_code(int(staff_user["id"]), request.form.get("code"))
+        if method is None:
+            failed_status = record_auth_failure("staff_mfa", identity_hash)
+            record_audit_event(
+                "staff.mfa_failed",
+                actor_type="staff",
+                actor_id=int(staff_user["id"]),
+                target_type="staff_user",
+                target_id=staff_user["id"],
+                metadata={"rate_limited": bool(failed_status["blocked"])},
+            )
+            flash("That authenticator or recovery code did not work.")
+            status_code = 429 if failed_status["blocked"] else 400
+            if failed_status["blocked"]:
+                flash(auth_limit_message(int(failed_status["retry_after"])))
+            return (
+                render_template(
+                    "staff_mfa_challenge.html",
+                    page_title="Verify Commission Sign In",
+                    staff_email=mask_email_address(str(staff_user["email"])),
+                ),
+                status_code,
+            )
+        clear_auth_failures("staff_mfa", identity_hash)
+        destination = str(session.get("pending_staff_next") or url_for("index"))
+        establish_staff_session(staff_user)
+        mark_staff_login_succeeded(int(staff_user["id"]))
+        record_audit_event(
+            "staff.login_succeeded",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=staff_user["id"],
+            metadata={"mfa": method},
+        )
+        return redirect(destination)
+
+    @app.get("/staff/security")
+    def staff_security():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        return render_template(
+            "staff_security.html",
+            page_title="Sign-in Security",
+            enrollment=load_staff_mfa_enrollment(int(staff_user["id"])),
+            recovery_code_count=count_staff_mfa_recovery_codes(int(staff_user["id"])),
+            mfa_required=staff_mfa_required(),
+        )
+
+    @app.post("/staff/security/mfa/start")
+    def staff_mfa_start():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        try:
+            begin_staff_mfa_enrollment(int(staff_user["id"]))
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("staff_security"))
+        record_audit_event(
+            "staff.mfa_enrollment_started",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=staff_user["id"],
+        )
+        return redirect(url_for("staff_security"))
+
+    @app.post("/staff/security/mfa/confirm")
+    def staff_mfa_confirm():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        try:
+            result = confirm_staff_mfa_enrollment(
+                int(staff_user["id"]),
+                request.form.get("code"),
+            )
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("staff_security"))
+        updated_user = result["staff_user"]
+        session["staff_auth_version"] = int(updated_user.get("auth_version") or 1)
+        record_audit_event(
+            "staff.mfa_enabled",
+            actor_type="staff",
+            actor_id=int(updated_user["id"]),
+            target_type="staff_user",
+            target_id=updated_user["id"],
+        )
+        return render_template(
+            "staff_mfa_recovery_codes.html",
+            page_title="Recovery Codes",
+            recovery_codes=result["recovery_codes"],
+        )
+
+    @app.post("/staff/security/mfa/cancel")
+    def staff_mfa_cancel():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        cancel_staff_mfa_enrollment(int(staff_user["id"]))
+        record_audit_event(
+            "staff.mfa_enrollment_cancelled",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=staff_user["id"],
+        )
+        flash("Authenticator setup was cancelled.")
+        return redirect(url_for("staff_security"))
+
+    @app.post("/staff/security/mfa/recovery-codes")
+    def staff_mfa_recovery_codes():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        try:
+            result = regenerate_staff_mfa_recovery_codes(
+                int(staff_user["id"]),
+                request.form.get("code"),
+            )
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("staff_security"))
+        updated_user = result["staff_user"]
+        session["staff_auth_version"] = int(updated_user.get("auth_version") or 1)
+        record_audit_event(
+            "staff.mfa_recovery_codes_replaced",
+            actor_type="staff",
+            actor_id=int(updated_user["id"]),
+            target_type="staff_user",
+            target_id=updated_user["id"],
+        )
+        return render_template(
+            "staff_mfa_recovery_codes.html",
+            page_title="Recovery Codes",
+            recovery_codes=result["recovery_codes"],
+        )
+
+    @app.post("/staff/security/mfa/disable")
+    def staff_mfa_disable():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        if staff_mfa_required():
+            flash("Authenticator protection is required for commission access.")
+            return redirect(url_for("staff_security"))
+        try:
+            updated_user = disable_staff_mfa(
+                int(staff_user["id"]),
+                request.form.get("password"),
+                request.form.get("code"),
+            )
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("staff_security"))
+        session["staff_auth_version"] = int(updated_user.get("auth_version") or 1)
+        record_audit_event(
+            "staff.mfa_disabled",
+            actor_type="staff",
+            actor_id=int(updated_user["id"]),
+            target_type="staff_user",
+            target_id=updated_user["id"],
+        )
+        flash("Authenticator protection was turned off.")
+        return redirect(url_for("staff_security"))
 
     @app.post("/logout")
     def logout():
-        had_customer = current_customer_user() is not None and current_staff_user() is None
-        session.pop("staff_user_id", None)
-        session.pop("customer_user_id", None)
+        customer_user = current_customer_user()
+        staff_user = current_staff_user()
+        had_customer = customer_user is not None and staff_user is None
+        if customer_user is not None:
+            record_audit_event(
+                "customer.logout",
+                actor_type="customer",
+                actor_id=int(customer_user["id"]),
+                account_number=choose_customer_account_number(str(customer_user["email"])),
+                target_type="customer_user",
+                target_id=customer_user["id"],
+            )
+        elif staff_user is not None:
+            record_audit_event(
+                "staff.logout",
+                actor_type="staff",
+                actor_id=int(staff_user["id"]),
+                target_type="staff_user",
+                target_id=staff_user["id"],
+            )
+        session.clear()
         return redirect(url_for("customer_login" if had_customer else "login"))
 
     @app.get("/staff/setup/<token>")
@@ -5467,8 +9501,17 @@ def create_web_app() -> Flask:
             flash(str(exc))
             return redirect(url_for("accept_staff_invite_route", token=token))
 
+        session.clear()
+        session.permanent = True
         session["staff_user_id"] = int(staff_user["id"])
-        session.pop("customer_user_id", None)
+        session["staff_auth_version"] = int(staff_user.get("auth_version") or 1)
+        record_audit_event(
+            "staff.invite_accepted",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=staff_user["id"],
+        )
         return redirect(url_for("index"))
 
     @app.post("/staff/invite")
@@ -5487,11 +9530,111 @@ def create_web_app() -> Flask:
             flash(str(exc))
             return redirect(url_for("index"))
 
-        session["latest_invite_token"] = invite["token"]
-        flash(f"{invite['full_name']} is ready for setup.")
+        delivery = "manual"
+        if email_delivery_backend() == "disabled":
+            session["latest_invite_token"] = invite["token"]
+        else:
+            try:
+                send_staff_invitation_email(invite, build_public_base_url(request.url_root))
+                delivery = "email"
+            except Exception:
+                delivery = "failed"
+        record_audit_event(
+            "staff.invited",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=invite["email"],
+            metadata={"role": str(invite["role"]), "delivery": delivery},
+        )
+        if delivery == "email":
+            flash(f"An invitation was sent to {invite['email']}.")
+        elif delivery == "failed":
+            flash("The invitation was saved, but the email could not be sent. Try inviting that address again.")
+        else:
+            flash(f"{invite['full_name']} is ready for setup.")
         return_to = (request.form.get("return_to") or "").strip()
         if return_to.startswith("/") and not return_to.startswith("//"):
             return redirect(return_to)
+        return redirect(url_for("staff_page"))
+
+    @app.post("/staff/<int:staff_user_id>/access")
+    def update_staff_access(staff_user_id: int):
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        try:
+            change = update_staff_user_access(
+                staff_user_id,
+                role=request.form.get("role", ""),
+                is_active=request.form.get("status") == "active",
+                acting_staff_user_id=int(staff_user["id"]),
+            )
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("staff_page"))
+        before = change["before"]
+        after = change["after"]
+        record_audit_event(
+            "staff.access_updated",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=staff_user_id,
+            metadata={
+                "previous_role": before["role"],
+                "role": after["role"],
+                "previous_status": "active" if before["is_active"] else "inactive",
+                "status": "active" if after["is_active"] else "inactive",
+            },
+        )
+        flash(f"Access for {after['full_name']} was updated.")
+        return redirect(url_for("staff_page"))
+
+    @app.get("/staff/<int:staff_user_id>/mfa/reset")
+    def staff_mfa_reset(staff_user_id: int):
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        if int(staff_user_id) == int(staff_user["id"]):
+            flash("Another commissioner must reset your authenticator.")
+            return redirect(url_for("staff_page"))
+        target_user = get_staff_user_by_id(staff_user_id)
+        if target_user is None:
+            flash("That staff member is no longer available.")
+            return redirect(url_for("staff_page"))
+        if not target_user.get("mfa_enabled"):
+            flash("Authenticator protection is already off for that staff member.")
+            return redirect(url_for("staff_page"))
+        return render_template(
+            "staff_mfa_reset.html",
+            page_title="Reset Authenticator",
+            target_user=target_user,
+        )
+
+    @app.post("/staff/<int:staff_user_id>/mfa/reset")
+    def staff_mfa_reset_post(staff_user_id: int):
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        try:
+            change = reset_staff_mfa_by_commissioner(
+                staff_user_id,
+                acting_staff_user_id=int(staff_user["id"]),
+            )
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("staff_page"))
+        target_user = change["after"]
+        record_audit_event(
+            "staff.mfa_reset_by_commissioner",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=staff_user_id,
+            metadata={"target_role": str(target_user["role"])},
+        )
+        flash(f"Authenticator protection for {target_user['full_name']} was reset. They must set it up again.")
         return redirect(url_for("staff_page"))
 
     @app.get("/")
@@ -5585,6 +9728,53 @@ def create_web_app() -> Flask:
             page_title="Staff",
         )
 
+    @app.get("/audit")
+    def audit_page():
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        return render_template(
+            "audit_page.html",
+            audit_page=list_audit_events(
+                account_number=request.args.get("account_number"),
+                action=request.args.get("action"),
+                page=parse_positive_int(request.args.get("page"), default=1),
+            ),
+            audit_integrity=verify_audit_chain(),
+            page_title="Audit Record",
+        )
+
+    @app.get("/audit/export.csv")
+    def audit_export():
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        integrity = verify_audit_chain()
+        if not integrity["valid"]:
+            return app.response_class(
+                "The audit record did not pass its integrity check.\n",
+                status=409,
+                mimetype="text/plain",
+            )
+        account_number = request.args.get("account_number")
+        action = request.args.get("action")
+        csv_body = build_audit_export_csv(account_number=account_number, action=action)
+        record_audit_event(
+            "audit.exported",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="audit_record",
+            metadata={
+                "account_number": normalize_account_number(account_number) if account_number else "",
+                "action": (action or "").strip(),
+            },
+        )
+        filename = f"home-energy-watch-audit-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"
+        response = app.response_class(csv_body, mimetype="text/csv")
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.get("/health")
     def health():
         ensure_database()
@@ -5621,10 +9811,68 @@ def create_web_app() -> Flask:
 
     @app.get("/reports/<path:filename>")
     def download_report(filename: str):
-        actor = signed_in_for_reports()
+        staff_user = current_staff_user()
+        if staff_user is not None:
+            return send_from_directory(OUTPUT_DIR, normalize_report_filename(filename), as_attachment=True)
+
+        customer_user = current_customer_user()
+        if customer_user is None:
+            return redirect(url_for("customer_login", next=request.path))
+        try:
+            artifact_account_number = get_report_artifact_account_number(filename)
+        except ValueError:
+            artifact_account_number = None
+        if artifact_account_number is None or not customer_has_account_access(
+            str(customer_user["email"]),
+            artifact_account_number,
+        ):
+            return "Report not found.", 404
+        return send_from_directory(OUTPUT_DIR, normalize_report_filename(filename), as_attachment=True)
+
+    @app.post("/compare")
+    def compare_exports():
+        ensure_data_dirs()
+        settings = parse_settings(request.form)
+        account_number = request.form.get("account_number")
+        actor = require_account_actor(account_number, write=True)
         if not isinstance(actor, dict):
             return actor
-        return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+
+        try:
+            left_path = save_uploaded_file(request.files.get("left_file"))
+            right_path = save_uploaded_file(request.files.get("right_file"))
+            comparison, report_path = analyze_interval_file_comparison(
+                left_input_path=left_path,
+                right_input_path=right_path,
+                tz_name=settings["tz"],
+                night_start_str=settings["night_start"],
+                night_end_str=settings["night_end"],
+                min_night_kw=settings["min_night_kw"],
+                night_multiplier=settings["night_multiplier"],
+            )
+            csv_report_path = build_web_comparison_csv_path(report_path)
+            save_comparison_artifact(csv_report_path, comparison)
+            register_report_artifacts(account_number, [report_path, csv_report_path])
+            record_actor_event(
+                actor,
+                "history.compared",
+                account_number=account_number,
+                target_type="comparison_report",
+                target_id=report_path.name,
+            )
+        except Exception as exc:
+            flash(str(exc))
+            endpoint = "customer_history_page" if actor["kind"] == "customer" else "history_page"
+            return redirect(url_for(endpoint, account_number=normalize_account_number(account_number)))
+
+        return render_template(
+            "comparison_report.html",
+            comparison_packet=build_comparison_packet_context(comparison, report_path, csv_report_path),
+            account=load_account(account_number),
+            active_account_number=normalize_account_number(account_number),
+            customer_mode=actor["kind"] == "customer",
+            page_title="Comparison packet",
+        )
 
     @app.get("/api/files")
     def api_files():
@@ -5636,6 +9884,19 @@ def create_web_app() -> Flask:
     @app.get("/api/supported-feeds")
     def api_supported_feeds():
         return jsonify({"supported_feeds": list_supported_utility_adapters()})
+
+    @app.get("/api/utility-by-zip")
+    def utility_lookup_api():
+        try:
+            match = lookup_energy_company_by_zip(
+                request.args.get("zip_code", ""),
+                request.args.get("address"),
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception:
+            return jsonify({"error": "The electric company lookup is unavailable right now. Please try again."}), 503
+        return jsonify(match)
 
     @app.get("/api/day-detail")
     def api_day_detail():
@@ -5695,7 +9956,7 @@ def create_web_app() -> Flask:
             baseline_date = request.form.get("baseline_date")
             input_path = save_uploaded_file(request.files.get("xml_file"))
 
-        actor = require_account_actor(account_number, api=True)
+        actor = require_account_actor(account_number, api=True, write=True)
         if not isinstance(actor, dict):
             return actor
 
@@ -5738,14 +9999,20 @@ def create_web_app() -> Flask:
             baseline_date=account.get("baseline_date"),
         )
         report_path = build_output_path(Path("combined-history.xml"))
-        summary.to_csv(report_path, index=True)
+        weather_contexts = load_weather_contexts_for_suspicious_days(
+            summary,
+            account["account_number"],
+            settings["tz"],
+        )
+        report_summary = attach_weather_context_to_summary(summary, weather_contexts)
+        report_summary.to_csv(report_path, index=True)
         visible_accounts = list_accounts()
         if actor["kind"] == "customer":
             visible_accounts = list_customer_account_page(str(actor["user"]["email"]))["accounts"]
         analysis = build_report_context(
             "Customer history",
             df,
-            summary,
+            report_summary,
             alert_events,
             baseline,
             report_path,
@@ -5755,23 +10022,50 @@ def create_web_app() -> Flask:
             household_profile=load_household_profile(account["account_number"]),
             load_items=list_load_items(account["account_number"]),
             imported_files_count=count_imported_files(account["account_number"]),
+            weather_contexts=weather_contexts,
         )
-        save_json_report(report_path, analysis)
+        json_report_path = save_json_report(report_path, analysis)
+        register_report_artifacts(account["account_number"], [report_path, json_report_path])
+        record_actor_event(
+            actor,
+            "history.imported_and_analyzed",
+            account_number=account["account_number"],
+            target_type="imported_history",
+            target_id=report_path.name,
+            metadata={"interval_rows": int(len(df)), "flagged_days": int(report_summary["suspicious"].sum())},
+        )
         return jsonify(analysis)
 
     @app.post("/account")
     def save_account():
-        actor = require_account_actor(request.form.get("account_number"))
+        account_number = request.form.get("account_number")
+        actor = require_account_actor(account_number, write=True)
         if not isinstance(actor, dict):
             return actor
         try:
+            existing_account = find_account(account_number)
+            existing_profile = None if existing_account is None else load_household_profile(account_number)
+            energy_company = resolve_energy_company_for_form(
+                request.form,
+                existing_account=existing_account,
+                existing_profile=existing_profile,
+                require_zip=existing_account is None,
+            )
             account = save_account_profile(
-                request.form.get("account_number"),
+                account_number,
                 display_name=request.form.get("display_name"),
-                energy_company=request.form.get("energy_company"),
+                energy_company=energy_company,
                 baseline_date=request.form.get("baseline_date"),
             )
             save_household_profile(account["account_number"], request.form)
+            record_actor_event(
+                actor,
+                "account.profile_updated",
+                account_number=account["account_number"],
+                target_type="account",
+                target_id=account["account_number"],
+                metadata={"energy_company": str(account.get("energy_company") or "")},
+            )
         except Exception as exc:
             flash(str(exc))
             return redirect_back_or_account(request.form.get("account_number"))
@@ -5785,11 +10079,19 @@ def create_web_app() -> Flask:
             return staff_user
         account_number = request.form.get("account_number")
         try:
-            add_account_access_email(
+            access = add_account_access_email(
                 account_number,
                 request.form.get("email", ""),
                 full_name=request.form.get("full_name"),
                 access_level=request.form.get("access_level", "Viewer"),
+            )
+            record_actor_event(
+                {"kind": "staff", "user": staff_user},
+                "account.access_granted",
+                account_number=account_number,
+                target_type="account_access",
+                target_id=access["id"],
+                metadata={"access_level": str(access["access_level"])},
             )
         except Exception as exc:
             flash(str(exc))
@@ -5802,16 +10104,36 @@ def create_web_app() -> Flask:
             return staff_user
         account_number = request.form.get("account_number")
         delete_account_access_email(account_number, access_id)
+        record_actor_event(
+            {"kind": "staff", "user": staff_user},
+            "account.access_revoked",
+            account_number=account_number,
+            target_type="account_access",
+            target_id=access_id,
+        )
         return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection")
     def save_connection():
         account_number = request.form.get("account_number")
-        actor = require_account_actor(account_number)
+        actor = require_account_actor(account_number, write=True)
         if not isinstance(actor, dict):
             return actor
         try:
-            save_utility_connection(account_number, request.form)
+            account = find_account(account_number)
+            if account is None or not account.get("energy_company"):
+                raise ValueError("Add the service ZIP code before saving a utility connection.")
+            connection_form = request.form.to_dict(flat=True)
+            connection_form["provider_name"] = str(account["energy_company"])
+            connection = save_utility_connection(account_number, connection_form)
+            record_actor_event(
+                actor,
+                "utility.connection_saved",
+                account_number=account_number,
+                target_type="utility_connection",
+                target_id=connection["id"],
+                metadata={"access_method": str(connection["access_method"])},
+            )
         except Exception as exc:
             flash(str(exc))
         return redirect_back_or_account(account_number)
@@ -5819,39 +10141,73 @@ def create_web_app() -> Flask:
     @app.post("/utility-connection/<int:connection_id>/delete")
     def remove_connection(connection_id: int):
         account_number = request.form.get("account_number")
-        actor = require_account_actor(account_number)
+        actor = require_account_actor(account_number, write=True)
         if not isinstance(actor, dict):
             return actor
         delete_utility_connection(account_number, connection_id)
+        record_actor_event(
+            actor,
+            "utility.connection_deleted",
+            account_number=account_number,
+            target_type="utility_connection",
+            target_id=connection_id,
+        )
         return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection/<int:connection_id>/sync")
     def sync_connection(connection_id: int):
         account_number = request.form.get("account_number")
-        actor = require_account_actor(account_number)
+        actor = require_account_actor(account_number, write=True)
         if not isinstance(actor, dict):
             return actor
         try:
             sync_utility_connection(account_number, connection_id)
+            record_actor_event(
+                actor,
+                "utility.connection_synced",
+                account_number=account_number,
+                target_type="utility_connection",
+                target_id=connection_id,
+            )
             flash("Utility history synced.")
         except Exception as exc:
+            try:
+                record_utility_connection_sync_failure(account_number, connection_id, exc)
+            except Exception:
+                pass
+            record_actor_event(
+                actor,
+                "utility.connection_sync_failed",
+                account_number=account_number,
+                target_type="utility_connection",
+                target_id=connection_id,
+                metadata={"error_type": type(exc).__name__},
+            )
             flash(str(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/load-items")
     def create_load_item():
         account_number = request.form.get("account_number")
-        actor = require_account_actor(account_number)
+        actor = require_account_actor(account_number, write=True)
         if not isinstance(actor, dict):
             return actor
         try:
-            add_load_item(
+            item = add_load_item(
                 account_number=account_number,
                 label=request.form.get("label", ""),
                 quantity=int(request.form.get("quantity", "1")),
                 watts_each=float(request.form.get("watts_each", "0")),
                 include_when_off=bool(request.form.get("include_when_off")),
                 notes=request.form.get("notes"),
+            )
+            record_actor_event(
+                actor,
+                "inventory.item_saved",
+                account_number=account_number,
+                target_type="load_item",
+                target_id=item["id"],
+                metadata={"quantity": int(item["quantity"]), "watts_each": float(item["watts_each"])},
             )
         except Exception as exc:
             flash(str(exc))
@@ -5860,10 +10216,17 @@ def create_web_app() -> Flask:
     @app.post("/load-items/<int:item_id>/delete")
     def remove_load_item(item_id: int):
         account_number = request.form.get("account_number")
-        actor = require_account_actor(account_number)
+        actor = require_account_actor(account_number, write=True)
         if not isinstance(actor, dict):
             return actor
         delete_load_item(account_number, item_id)
+        record_actor_event(
+            actor,
+            "inventory.item_deleted",
+            account_number=account_number,
+            target_type="load_item",
+            target_id=item_id,
+        )
         return redirect_back_or_account(account_number)
 
     @app.get("/analyze")
@@ -5884,7 +10247,7 @@ def create_web_app() -> Flask:
         display_name = request.form.get("display_name")
         energy_company = request.form.get("energy_company")
         baseline_date = request.form.get("baseline_date")
-        actor = require_account_actor(account_number)
+        actor = require_account_actor(account_number, write=True)
         if not isinstance(actor, dict):
             return actor
 
@@ -5913,7 +10276,13 @@ def create_web_app() -> Flask:
                 baseline_date=account.get("baseline_date"),
             )
             report_path = build_output_path(Path("combined-history.xml"))
-            summary.to_csv(report_path, index=True)
+            weather_contexts = load_weather_contexts_for_suspicious_days(
+                summary,
+                account["account_number"],
+                settings["tz"],
+            )
+            report_summary = attach_weather_context_to_summary(summary, weather_contexts)
+            report_summary.to_csv(report_path, index=True)
         except Exception as exc:
             flash(str(exc))
             return redirect(url_for("index", account_number=normalize_account_number(account_number)))
@@ -5921,7 +10290,7 @@ def create_web_app() -> Flask:
         analysis = build_report_context(
             "Customer history",
             df,
-            summary,
+            report_summary,
             alert_events,
             baseline,
             report_path,
@@ -5931,6 +10300,7 @@ def create_web_app() -> Flask:
             household_profile=load_household_profile(account["account_number"]),
             load_items=list_load_items(account["account_number"]),
             imported_files_count=count_imported_files(account["account_number"]),
+            weather_contexts=weather_contexts,
         )
         account_page = list_account_page()
         rendered_accounts = list_accounts()
@@ -5938,7 +10308,16 @@ def create_web_app() -> Flask:
             account_page = list_customer_account_page(str(actor["user"]["email"]))
             rendered_accounts = account_page["accounts"]
             analysis["accounts"] = rendered_accounts
-        save_json_report(report_path, analysis)
+        json_report_path = save_json_report(report_path, analysis)
+        register_report_artifacts(account["account_number"], [report_path, json_report_path])
+        record_actor_event(
+            actor,
+            "history.imported_and_analyzed",
+            account_number=account["account_number"],
+            target_type="imported_history",
+            target_id=report_path.name,
+            metadata={"interval_rows": int(len(df)), "flagged_days": int(report_summary["suspicious"].sum())},
+        )
         return render_template(
             "report.html",
             analysis=analysis,
@@ -5963,6 +10342,21 @@ def create_web_app() -> Flask:
 web_app = create_web_app()
 
 
+def print_scheduled_utility_sync_report(summary: dict[str, object]) -> None:
+    total = int(summary["total"])
+    succeeded = int(summary["succeeded"])
+    failed = int(summary["failed"])
+    print(f"Utility sync: {succeeded}/{total} succeeded, {failed} failed")
+    for connection in summary["connections"]:
+        account_number = connection["account_number"]
+        label = f"{account_number} {connection['provider_name']} - {connection['connection_label']}"
+        if connection["success"]:
+            interval_count = int(connection.get("interval_count") or 0)
+            print(f"[ok] {label}: imported {interval_count} intervals")
+        else:
+            print(f"[failed] {label}: {connection['error']}")
+
+
 def main() -> None:
     parser = build_cli_parser()
     args = parser.parse_args()
@@ -5972,8 +10366,19 @@ def main() -> None:
         web_app.run(host=args.host, port=args.port, debug=False)
         return
 
+    if args.sync_utilities:
+        try:
+            sync_summary = run_scheduled_utility_sync(account_number=args.account_number)
+        except Exception as exc:
+            print(f"Error syncing utilities: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print_scheduled_utility_sync_report(sync_summary)
+        if sync_summary["failed"]:
+            sys.exit(1)
+        return
+
     if not args.input:
-        parser.error("--input is required unless --serve is used")
+        parser.error("--input is required unless --serve or --sync-utilities is used")
 
     try:
         if args.compare_to:
@@ -5999,6 +10404,7 @@ def main() -> None:
             night_end_str=args.night_end,
             min_night_kw=args.min_night_kw,
             night_multiplier=args.night_multiplier,
+            account_number=args.account_number,
         )
     except Exception as exc:
         print(f"Error analyzing XML: {exc}", file=sys.stderr)

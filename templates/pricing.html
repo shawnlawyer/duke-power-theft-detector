@@ -26,21 +26,30 @@
                 Built around the review team and the number of accounts involved.
               {% endif %}
             </p>
-            {% if customer_user %}
+            {% if customer_user and plan.payment_ready %}
               <form action="{{ url_for('billing_checkout') }}" method="post">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="plan_id" value="{{ plan.id }}">
                 <button type="submit">
                   {% if billing and billing.plan_id == plan.id and billing.status in ["active", "trialing"] %}
                     Current plan
-                  {% elif plan.price_id %}
-                    Start {{ plan.name }}
                   {% else %}
-                    Ask about {{ plan.name }}
+                    Continue to secure payment
                   {% endif %}
                 </button>
               </form>
+            {% elif customer_user %}
+              <a class="button-link" href="{{ url_for('customer_dashboard') }}">
+                Ask about {{ plan.name }}
+              </a>
             {% else %}
-              <a class="button-link" href="{{ url_for('customer_signup') }}">Create account</a>
+              <a class="button-link" href="{{ url_for('customer_signup', plan_id=plan.id) }}">
+                {% if plan.payment_ready %}
+                  Start {{ plan.name }}
+                {% else %}
+                  Ask about {{ plan.name }}
+                {% endif %}
+              </a>
             {% endif %}
           </article>
         {% endfor %}

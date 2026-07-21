@@ -9,6 +9,7 @@
 
   {% if staff_user.role == "Commissioner" %}
     <form class="account-form" action="{{ url_for('invite_staff') }}" method="post">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="return_to" value="{{ request.full_path if request.query_string else request.path }}">
       <div class="field-grid">
         <label>
@@ -47,7 +48,9 @@
           <th>Name</th>
           <th>Access</th>
           <th>Status</th>
+          <th>Authenticator</th>
           <th>Last sign-in</th>
+          {% if staff_user.role == "Commissioner" %}<th>Manage</th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -65,7 +68,40 @@
                 <span class="pill">{{ "Active" if member.is_active else "Inactive" }}</span>
               {% endif %}
             </td>
+            <td><span class="pill{% if not member.mfa_enabled %} danger{% endif %}">{{ "On" if member.mfa_enabled else "Off" }}</span></td>
             <td>{{ member.last_login_at or "Not yet" }}</td>
+            {% if staff_user.role == "Commissioner" %}
+              <td>
+                {% if member.id != staff_user.id %}
+                  <div class="staff-manage-stack">
+                    <form class="staff-access-form" action="{{ url_for('update_staff_access', staff_user_id=member.id) }}" method="post">
+                      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                      <label>
+                        <span class="visually-hidden">Access for {{ member.full_name }}</span>
+                        <select name="role" aria-label="Access for {{ member.full_name }}">
+                          {% for role in staff_roles %}
+                            <option value="{{ role }}" {% if member.role == role %}selected{% endif %}>{{ role }}</option>
+                          {% endfor %}
+                        </select>
+                      </label>
+                      <label>
+                        <span class="visually-hidden">Status for {{ member.full_name }}</span>
+                        <select name="status" aria-label="Status for {{ member.full_name }}">
+                          <option value="active" {% if member.is_active %}selected{% endif %}>Active</option>
+                          <option value="inactive" {% if not member.is_active %}selected{% endif %}>Inactive</option>
+                        </select>
+                      </label>
+                      <button type="submit" class="button-secondary button-small">Save</button>
+                    </form>
+                    {% if member.mfa_enabled %}
+                      <a class="inline-link" href="{{ url_for('staff_mfa_reset', staff_user_id=member.id) }}">Reset authenticator</a>
+                    {% endif %}
+                  </div>
+                {% else %}
+                  <span class="table-note">Your access</span>
+                {% endif %}
+              </td>
+            {% endif %}
           </tr>
         {% endfor %}
       </tbody>

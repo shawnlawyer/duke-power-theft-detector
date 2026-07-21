@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout auth-layout">
+    <section class="section-block auth-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">One more step</p>
+          <h2>Check your email.</h2>
+          <p class="plain-note">We sent a confirmation link to {{ masked_email }}. Confirm the address before opening energy history or continuing to payment.</p>
+        </div>
+      </div>
+
+      <form class="account-form" action="{{ url_for('customer_verification_resend') }}" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        {% if pending_email %}
+          <input type="hidden" name="email" value="{{ pending_email }}">
+        {% else %}
+          <label>
+            <span>Email</span>
+            <input type="email" name="email" autocomplete="email" required>
+          </label>
+        {% endif %}
+        <button type="submit" class="button-secondary">Send another confirmation</button>
+      </form>
+
+      <p class="plain-note auth-note">
+        Already confirmed? <a class="inline-link" href="{{ url_for('customer_login') }}">Sign in</a>.
+      </p>
+    </section>
+  </main>
+{% endblock %}
