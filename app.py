@@ -11451,6 +11451,18 @@ def create_web_app() -> Flask:
             return actor
         if not account_has_active_data_authorization(account_number):
             return jsonify({"error": "Customer data permission is required before new history can be added."}), 403
+        existing_account = find_account(account_number)
+        existing_profile = None if existing_account is None else load_household_profile(account_number)
+        profile_source = payload if request.is_json else request.form
+        try:
+            energy_company = resolve_energy_company_for_form(
+                profile_source,
+                existing_account=existing_account,
+                existing_profile=existing_profile,
+                require_zip=existing_account is None,
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
         if not request.is_json:
             input_path = save_uploaded_file(request.files.get("xml_file"))
 
@@ -11480,7 +11492,6 @@ def create_web_app() -> Flask:
             energy_company=energy_company,
             baseline_date=baseline_date,
         )
-        profile_source = payload if request.is_json else request.form
         if has_household_profile_fields(profile_source):
             save_household_profile(account["account_number"], profile_source)
         df, summary, baseline, alert_events = analyze_history_store(
@@ -11826,6 +11837,14 @@ def create_web_app() -> Flask:
         try:
             if not account_has_active_data_authorization(account_number):
                 raise ValueError("Customer data permission is required before new history can be added.")
+            existing_account = find_account(account_number)
+            existing_profile = None if existing_account is None else load_household_profile(account_number)
+            energy_company = resolve_energy_company_for_form(
+                request.form,
+                existing_account=existing_account,
+                existing_profile=existing_profile,
+                require_zip=existing_account is None,
+            )
             input_path = save_uploaded_file(request.files.get("xml_file"))
             import_interval_file_to_db(
                 input_path,

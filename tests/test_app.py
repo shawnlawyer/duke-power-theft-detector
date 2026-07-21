@@ -1600,6 +1600,53 @@ def test_account_save_matches_provider_from_service_zip(tmp_path, monkeypatch):
     assert app.load_household_profile("acct-new")["zip_code"] == "28205"
 
 
+def test_history_import_keeps_zip_matched_provider_when_request_is_tampered(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    authorize_account("acct-1")
+    app.save_account_profile("acct-1", energy_company="Duke Energy Progress, LLC")
+    app.save_household_profile("acct-1", {"address": "1 E Edenton St", "zip_code": "27601"})
+    client = app.web_app.test_client()
+    sign_in(client)
+
+    response = client.post(
+        "/analyze",
+        data={
+            "account_number": "acct-1",
+            "energy_company": "Town of Apex",
+            "xml_file": (BytesIO(FIXTURE.read_bytes()), "history.xml"),
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 200
+    assert app.find_account("acct-1")["energy_company"] == "Duke Energy Progress, LLC"
+
+
+def test_api_history_import_keeps_zip_matched_provider_when_request_is_tampered(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    authorize_account("acct-1")
+    app.save_account_profile("acct-1", energy_company="Duke Energy Progress, LLC")
+    app.save_household_profile("acct-1", {"address": "1 E Edenton St", "zip_code": "27601"})
+    input_path = app.INPUT_DIR / "history.xml"
+    input_path.write_bytes(FIXTURE.read_bytes())
+    client = app.web_app.test_client()
+    sign_in(client)
+
+    response = client.post(
+        "/api/analyze",
+        json={
+            "account_number": "acct-1",
+            "energy_company": "Town of Apex",
+            "input_file": input_path.name,
+        },
+    )
+
+    assert response.status_code == 200
+    assert app.find_account("acct-1")["energy_company"] == "Duke Energy Progress, LLC"
+
+
 def test_utility_connection_uses_account_provider_instead_of_submitted_provider(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
