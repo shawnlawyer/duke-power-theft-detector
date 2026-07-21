@@ -634,6 +634,36 @@ th {
   font-size: 0.92rem;
 }
 
+.compact-confirmation {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  margin-bottom: 10px;
+}
+
+.compact-confirmation input {
+  width: 18px;
+  min-height: 18px;
+  margin-top: 2px;
+}
+
+.lifecycle-actions {
+  min-width: 280px;
+}
+
+.lifecycle-actions form {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.lifecycle-actions form:last-child {
+  margin-bottom: 0;
+}
+
+.lifecycle-table table {
+  min-width: 980px;
+}
+
 .staff-access-form {
   display: flex;
   align-items: center;
@@ -703,7 +733,7 @@ th {
   justify-content: center;
   min-width: 64px;
   padding: 4px 10px;
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--surface-soft);
   font-size: 0.88rem;
 }
@@ -1171,5 +1201,80 @@ th {
 
   .file-type {
     justify-self: start;
+  }
+
+  .data-request-table table,
+  .data-request-history table,
+  .lifecycle-table table,
+  .legal-hold-table table {
+    min-width: 0;
+  }
+
+  .data-request-table thead,
+  .data-request-history thead,
+  .lifecycle-table thead,
+  .legal-hold-table thead {
+    display: none;
+  }
+
+  .data-request-table tbody,
+  .data-request-history tbody,
+  .lifecycle-table tbody,
+  .legal-hold-table tbody,
+  .data-request-table tr,
+  .data-request-history tr,
+  .lifecycle-table tr,
+  .legal-hold-table tr {
+    display: block;
+    width: 100%;
+  }
+
+  .data-request-table tr,
+  .data-request-history tr,
+  .lifecycle-table tr,
+  .legal-hold-table tr {
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .data-request-table td,
+  .data-request-history td,
+  .lifecycle-table td,
+  .legal-hold-table td {
+    display: grid;
+    grid-template-columns: minmax(92px, 0.42fr) minmax(0, 1fr);
+    gap: 12px;
+    width: 100%;
+    padding: 7px 0;
+    border: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .data-request-table td::before,
+  .data-request-history td::before,
+  .lifecycle-table td::before,
+  .legal-hold-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 0.82rem;
+    font-weight: 700;
+  }
+
+  .data-request-table td > .table-note,
+  .data-request-history td > .table-note,
+  .lifecycle-table td > .table-note,
+  .legal-hold-table td > .table-note {
+    grid-column: 2;
+  }
+
+  .lifecycle-actions {
+    min-width: 0;
+  }
+
+  .lifecycle-actions form,
+  .data-request-table .action-cell form,
+  .legal-hold-table .action-cell form {
+    min-width: 0;
+    width: 100%;
   }
 }

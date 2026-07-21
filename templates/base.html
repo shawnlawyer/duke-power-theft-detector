@@ -40,6 +40,7 @@
               <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}">Staff</a>
               <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}">Security</a>
               {% if staff_user.role == "Commissioner" %}
+                <a class="{% if request.endpoint in ['data_requests_page', 'review_data_request', 'execute_data_request', 'place_legal_hold', 'release_legal_hold'] %}active{% endif %}" href="{{ url_for('data_requests_page') }}">Data requests</a>
                 <a class="{% if request.endpoint == 'audit_page' %}active{% endif %}" href="{{ url_for('audit_page') }}">Audit</a>
               {% endif %}
             {% else %}
@@ -48,6 +49,7 @@
               <a class="{% if request.endpoint == 'customer_utility_page' %}active{% endif %}" href="{{ url_for('customer_utility_page', account_number=nav_account) }}">Utility</a>
               <a class="{% if request.endpoint == 'customer_inventory_page' %}active{% endif %}" href="{{ url_for('customer_inventory_page', account_number=nav_account) }}">Inventory</a>
               <a class="{% if request.endpoint == 'customer_history_page' %}active{% endif %}" href="{{ url_for('customer_history_page', account_number=nav_account) }}">History</a>
+              <a class="{% if request.endpoint in ['customer_data_requests_page', 'request_account_deletion', 'cancel_account_deletion'] %}active{% endif %}" href="{{ url_for('customer_data_requests_page') }}">My data</a>
               <a class="{% if request.endpoint == 'customer_billing_page' %}active{% endif %}" href="{{ url_for('customer_billing_page', account_number=nav_account) }}">Billing</a>
             {% endif %}
           </nav>
