@@ -346,6 +346,12 @@ BILLING_PLAN_DEFINITIONS = (
 DEFAULT_STRIPE_API_VERSION = "2026-02-25.clover"
 DEFAULT_MARKETING_HOSTS = ("homeenergywatch.com", "www.homeenergywatch.com")
 DEFAULT_APP_HOSTS = ("app.homeenergywatch.com",)
+CURRENT_TERMS_VERSION = "2026-07-21"
+CURRENT_PRIVACY_VERSION = "2026-07-21"
+CURRENT_UTILITY_AUTHORIZATION_VERSION = "2026-07-21"
+UTILITY_AUTHORIZATION_SCOPE = (
+    "Import, store, analyze, compare, and report electricity usage for this account."
+)
 
 
 class DatabaseConnection:
@@ -892,6 +898,54 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         conn.execute("ALTER TABLE customer_users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 1")
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS customer_policy_acceptances (
+            id BIGSERIAL PRIMARY KEY,
+            customer_user_id BIGINT NOT NULL,
+            terms_version TEXT NOT NULL,
+            privacy_version TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            remote_hash TEXT,
+            user_agent_hash TEXT,
+            UNIQUE(customer_user_id, terms_version, privacy_version),
+            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_data_authorizations (
+            id BIGSERIAL PRIMARY KEY,
+            account_id BIGINT NOT NULL,
+            customer_user_id BIGINT NOT NULL,
+            authorization_version TEXT NOT NULL,
+            authorization_scope TEXT NOT NULL,
+            status TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            revoked_at TEXT,
+            remote_hash TEXT,
+            user_agent_hash TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_account_data_authorizations_account_status
+        ON account_data_authorizations (account_id, status, updated_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_account_data_authorizations_active_user
+        ON account_data_authorizations (account_id, customer_user_id)
+        WHERE status = 'active'
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS customer_auth_tokens (
             id BIGSERIAL PRIMARY KEY,
             customer_user_id BIGINT NOT NULL,
@@ -1347,6 +1401,54 @@ def migrate_database(conn: DatabaseConnection) -> None:
         conn.execute("UPDATE customer_users SET email_verified_at = created_at WHERE email_verified_at IS NULL")
     if "auth_version" not in customer_columns:
         conn.execute("ALTER TABLE customer_users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 1")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS customer_policy_acceptances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_user_id INTEGER NOT NULL,
+            terms_version TEXT NOT NULL,
+            privacy_version TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            remote_hash TEXT,
+            user_agent_hash TEXT,
+            UNIQUE(customer_user_id, terms_version, privacy_version),
+            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_data_authorizations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            customer_user_id INTEGER NOT NULL,
+            authorization_version TEXT NOT NULL,
+            authorization_scope TEXT NOT NULL,
+            status TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            revoked_at TEXT,
+            remote_hash TEXT,
+            user_agent_hash TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_account_data_authorizations_account_status
+        ON account_data_authorizations (account_id, status, updated_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_account_data_authorizations_active_user
+        ON account_data_authorizations (account_id, customer_user_id)
+        WHERE status = 'active'
+        """
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS customer_auth_tokens (
@@ -2337,6 +2439,19 @@ def request_remote_hash() -> str | None:
     ).hexdigest()
 
 
+def request_user_agent_hash() -> str | None:
+    if not has_request_context():
+        return None
+    user_agent = (request.headers.get("User-Agent") or "").strip()
+    if not user_agent:
+        return None
+    return hmac.new(
+        get_app_secret().encode("utf-8"),
+        user_agent.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def create_customer_auth_token(
     customer_user_id: int,
     purpose: str,
@@ -2931,11 +3046,21 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
             """,
             (customer_id,),
         ).fetchone()
+        policy_rows = conn.execute(
+            """
+            SELECT terms_version, privacy_version, accepted_at
+            FROM customer_policy_acceptances
+            WHERE customer_user_id = ?
+            ORDER BY accepted_at, id
+            """,
+            (customer_id,),
+        ).fetchall()
         manifest = {
-            "format_version": 1,
+            "format_version": 2,
             "generated_at": timestamp_now(),
             "customer": {} if user_row is None else dict(user_row),
             "billing": {} if billing_row is None else dict(billing_row),
+            "policy_acceptances": [dict(row) for row in policy_rows],
             "account_count": len(accounts),
         }
         archive.writestr("manifest.json", customer_export_json(manifest))
@@ -2975,6 +3100,16 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
                 """,
                 (account_id,),
             ).fetchall()
+            authorization_rows = conn.execute(
+                """
+                SELECT authorization_version, authorization_scope, status,
+                       granted_at, revoked_at
+                FROM account_data_authorizations
+                WHERE account_id = ? AND customer_user_id = ?
+                ORDER BY created_at, id
+                """,
+                (account_id, customer_id),
+            ).fetchall()
             import_rows = conn.execute(
                 """
                 SELECT path, interval_count, imported_at, service_point_id
@@ -3006,6 +3141,7 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
                 "household": {} if household_row is None else dict(household_row),
                 "inventory": [dict(row) for row in inventory_rows],
                 "utility_connections": [dict(row) for row in connection_rows],
+                "data_authorizations": [dict(row) for row in authorization_rows],
                 "imports": imports,
             }
             archive.writestr(f"{prefix}/profile.json", customer_export_json(profile))
@@ -4039,14 +4175,325 @@ def add_account_access_email(
     return next(item for item in list_account_access_emails(account_number) if item["email"] == normalized_email)
 
 
-def delete_account_access_email(account_number: str | None, access_id: int) -> None:
+def delete_account_access_email(account_number: str | None, access_id: int) -> dict[str, object]:
+    timestamp = timestamp_now()
     with get_db_connection() as conn:
         account = get_or_create_account(conn, account_number)
+        access_row = conn.execute(
+            """
+            SELECT account_access_emails.email, customer_users.id AS customer_user_id
+            FROM account_access_emails
+            LEFT JOIN customer_users ON customer_users.email = account_access_emails.email
+            WHERE account_access_emails.account_id = ? AND account_access_emails.id = ?
+            """,
+            (account["id"], int(access_id)),
+        ).fetchone()
+        if access_row is None:
+            raise ValueError("That account access record could not be found.")
+        customer_user_id = access_row["customer_user_id"]
+        revoked_ids: list[int] = []
+        if customer_user_id is not None:
+            active_rows = conn.execute(
+                """
+                SELECT id
+                FROM account_data_authorizations
+                WHERE account_id = ? AND customer_user_id = ? AND status = 'active'
+                """,
+                (account["id"], int(customer_user_id)),
+            ).fetchall()
+            revoked_ids = [int(row["id"]) for row in active_rows]
+            if revoked_ids:
+                conn.execute(
+                    """
+                    UPDATE account_data_authorizations
+                    SET status = 'revoked_access_removed', revoked_at = ?, updated_at = ?
+                    WHERE account_id = ? AND customer_user_id = ? AND status = 'active'
+                    """,
+                    (timestamp, timestamp, account["id"], int(customer_user_id)),
+                )
         conn.execute(
             "DELETE FROM account_access_emails WHERE account_id = ? AND id = ?",
             (account["id"], int(access_id)),
         )
-        conn.commit()
+        credentials_cleared = clear_utility_access_if_unauthorized(
+            conn,
+            account_id=int(account["id"]),
+            timestamp=timestamp,
+            reason="The authorizing customer's account access was removed.",
+        )
+    return {
+        "email": str(access_row["email"]),
+        "authorization_ids": revoked_ids,
+        "credentials_cleared": credentials_cleared,
+    }
+
+
+def record_customer_policy_acceptance(
+    conn: DatabaseConnection,
+    customer_user_id: int,
+    *,
+    accepted_at: str,
+    remote_hash: str | None,
+    user_agent_hash: str | None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO customer_policy_acceptances (
+            customer_user_id, terms_version, privacy_version, accepted_at,
+            remote_hash, user_agent_hash
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(customer_user_id, terms_version, privacy_version) DO UPDATE SET
+            accepted_at = excluded.accepted_at,
+            remote_hash = excluded.remote_hash,
+            user_agent_hash = excluded.user_agent_hash
+        """,
+        (
+            int(customer_user_id),
+            CURRENT_TERMS_VERSION,
+            CURRENT_PRIVACY_VERSION,
+            accepted_at,
+            remote_hash,
+            user_agent_hash,
+        ),
+    )
+
+
+def create_account_data_authorization(
+    conn: DatabaseConnection,
+    *,
+    account_id: int,
+    customer_user_id: int,
+    granted_at: str,
+    remote_hash: str | None,
+    user_agent_hash: str | None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE account_data_authorizations
+        SET status = 'superseded', revoked_at = ?, updated_at = ?
+        WHERE account_id = ? AND customer_user_id = ? AND status = 'active'
+        """,
+        (granted_at, granted_at, int(account_id), int(customer_user_id)),
+    )
+    conn.execute(
+        """
+        INSERT INTO account_data_authorizations (
+            account_id, customer_user_id, authorization_version, authorization_scope,
+            status, granted_at, revoked_at, remote_hash, user_agent_hash, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?)
+        """,
+        (
+            int(account_id),
+            int(customer_user_id),
+            CURRENT_UTILITY_AUTHORIZATION_VERSION,
+            UTILITY_AUTHORIZATION_SCOPE,
+            granted_at,
+            remote_hash,
+            user_agent_hash,
+            granted_at,
+            granted_at,
+        ),
+    )
+
+
+def serialize_account_data_authorization(row) -> dict[str, object] | None:
+    if row is None:
+        return None
+    mapping = dict(row)
+    return {
+        "id": int(mapping["id"]),
+        "customer_user_id": int(mapping["customer_user_id"]),
+        "customer_email": mapping.get("customer_email") or "",
+        "customer_name": mapping.get("customer_name") or "",
+        "authorization_version": mapping["authorization_version"],
+        "authorization_scope": mapping["authorization_scope"],
+        "status": mapping["status"],
+        "active": mapping["status"] == "active",
+        "granted_at": mapping["granted_at"],
+        "revoked_at": mapping.get("revoked_at"),
+    }
+
+
+def list_account_data_authorizations(account_number: str | None) -> list[dict[str, object]]:
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        rows = conn.execute(
+            """
+            SELECT account_data_authorizations.id,
+                   account_data_authorizations.customer_user_id,
+                   customer_users.email AS customer_email,
+                   customer_users.full_name AS customer_name,
+                   account_data_authorizations.authorization_version,
+                   account_data_authorizations.authorization_scope,
+                   account_data_authorizations.status,
+                   account_data_authorizations.granted_at,
+                   account_data_authorizations.revoked_at
+            FROM account_data_authorizations
+            JOIN customer_users ON customer_users.id = account_data_authorizations.customer_user_id
+            WHERE account_data_authorizations.account_id = ?
+            ORDER BY account_data_authorizations.updated_at DESC, account_data_authorizations.id DESC
+            """,
+            (account["id"],),
+        ).fetchall()
+    return [
+        authorization
+        for row in rows
+        if (authorization := serialize_account_data_authorization(row)) is not None
+    ]
+
+
+def account_has_active_data_authorization(account_number: str | None) -> bool:
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        row = conn.execute(
+            """
+            SELECT id
+            FROM account_data_authorizations
+            WHERE account_id = ? AND status = 'active'
+            LIMIT 1
+            """,
+            (account["id"],),
+        ).fetchone()
+    return row is not None
+
+
+def get_customer_account_data_authorization(
+    account_number: str | None,
+    customer_user_id: int,
+) -> dict[str, object] | None:
+    return next(
+        (
+            authorization
+            for authorization in list_account_data_authorizations(account_number)
+            if int(authorization["customer_user_id"]) == int(customer_user_id)
+        ),
+        None,
+    )
+
+
+def ensure_customer_manages_account(
+    conn: DatabaseConnection,
+    *,
+    account_id: int,
+    customer_user_id: int,
+) -> None:
+    row = conn.execute(
+        """
+        SELECT account_access_emails.id
+        FROM account_access_emails
+        JOIN customer_users ON customer_users.email = account_access_emails.email
+        WHERE account_access_emails.account_id = ?
+          AND customer_users.id = ?
+          AND account_access_emails.access_level = 'Manager'
+        """,
+        (int(account_id), int(customer_user_id)),
+    ).fetchone()
+    if row is None:
+        raise ValueError("Manager access is required to change data permission for this account.")
+
+
+def clear_utility_access_if_unauthorized(
+    conn: DatabaseConnection,
+    *,
+    account_id: int,
+    timestamp: str,
+    reason: str,
+) -> bool:
+    remaining = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM account_data_authorizations
+        WHERE account_id = ? AND status = 'active'
+        """,
+        (int(account_id),),
+    ).fetchone()
+    if int(remaining["count"] if remaining is not None else 0) > 0:
+        return False
+    cursor = conn.execute(
+        """
+        UPDATE utility_connections
+        SET access_identifier = NULL, secret_hash = NULL, secret_token = NULL,
+            secret_last4 = NULL, status = 'Authorization withdrawn',
+            last_sync_status = 'authorization_revoked',
+            last_sync_error = ?, updated_at = ?
+        WHERE account_id = ?
+        """,
+        (reason, timestamp, int(account_id)),
+    )
+    return int(cursor.rowcount or 0) > 0
+
+
+def grant_account_data_authorization(
+    account_number: str | None,
+    customer_user_id: int,
+    *,
+    remote_hash: str | None = None,
+    user_agent_hash: str | None = None,
+) -> dict[str, object]:
+    granted_at = timestamp_now()
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        ensure_customer_manages_account(
+            conn,
+            account_id=int(account["id"]),
+            customer_user_id=int(customer_user_id),
+        )
+        create_account_data_authorization(
+            conn,
+            account_id=int(account["id"]),
+            customer_user_id=int(customer_user_id),
+            granted_at=granted_at,
+            remote_hash=remote_hash,
+            user_agent_hash=user_agent_hash,
+        )
+    authorization = get_customer_account_data_authorization(account_number, customer_user_id)
+    if authorization is None:
+        raise RuntimeError("The data permission could not be saved.")
+    return authorization
+
+
+def revoke_account_data_authorization(
+    account_number: str | None,
+    customer_user_id: int,
+) -> dict[str, object]:
+    revoked_at = timestamp_now()
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        ensure_customer_manages_account(
+            conn,
+            account_id=int(account["id"]),
+            customer_user_id=int(customer_user_id),
+        )
+        active = conn.execute(
+            """
+            SELECT id
+            FROM account_data_authorizations
+            WHERE account_id = ? AND customer_user_id = ? AND status = 'active'
+            """,
+            (account["id"], int(customer_user_id)),
+        ).fetchall()
+        if not active:
+            raise ValueError("Data permission is already withdrawn for this account.")
+        conn.execute(
+            """
+            UPDATE account_data_authorizations
+            SET status = 'revoked', revoked_at = ?, updated_at = ?
+            WHERE account_id = ? AND customer_user_id = ? AND status = 'active'
+            """,
+            (revoked_at, revoked_at, account["id"], int(customer_user_id)),
+        )
+        clear_utility_access_if_unauthorized(
+            conn,
+            account_id=int(account["id"]),
+            timestamp=revoked_at,
+            reason="Customer authorization was withdrawn.",
+        )
+    authorization = get_customer_account_data_authorization(account_number, customer_user_id)
+    if authorization is None:
+        raise RuntimeError("The data permission could not be updated.")
+    return authorization
 
 
 def build_secret_hash(value: str | None) -> str | None:
@@ -4712,6 +5159,8 @@ def record_utility_connection_sync_failure(account_number: str | None, connectio
 
 def sync_utility_connection(account_number: str | None, connection_id: int) -> dict[str, object]:
     ensure_data_dirs()
+    if not account_has_active_data_authorization(account_number):
+        raise ValueError("Customer authorization is required before utility data can be synced.")
     connection = load_utility_connection_for_sync(account_number, connection_id)
     exported = fetch_utility_connection_export(connection)
     filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
@@ -4790,6 +5239,10 @@ def delete_utility_connection(account_number: str | None, connection_id: int) ->
 def clean_optional_text(value: str | None) -> str | None:
     normalized = (value or "").strip()
     return normalized or None
+
+
+def form_checkbox_checked(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def clean_optional_int(value: str | int | None, field_label: str) -> int | None:
@@ -4979,10 +5432,18 @@ def create_customer_signup(
     energy_company: str,
     plan_id: str | None,
     household_form,
+    accept_policies: bool,
+    confirm_account_authority: bool,
+    evidence_remote_hash: str | None = None,
+    evidence_user_agent_hash: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     normalized_email = clean_email(email)
     normalized_name = (full_name or "").strip() or normalized_email
     normalized_password = clean_password(password)
+    if not accept_policies:
+        raise ValueError("Agree to the Terms and Privacy Notice to create an account.")
+    if not confirm_account_authority:
+        raise ValueError("Confirm that you are allowed to manage this electric account.")
     normalized_account_number = (account_number or "").strip()
     if not normalized_account_number:
         raise ValueError("Enter the electric account number.")
@@ -5077,6 +5538,21 @@ def create_customer_signup(
             VALUES (?, ?, ?, 'Manager', ?, ?)
             """,
             (account["id"], normalized_email, normalized_name, timestamp, timestamp),
+        )
+        record_customer_policy_acceptance(
+            conn,
+            int(customer_user["id"]),
+            accepted_at=timestamp,
+            remote_hash=evidence_remote_hash,
+            user_agent_hash=evidence_user_agent_hash,
+        )
+        create_account_data_authorization(
+            conn,
+            account_id=int(account["id"]),
+            customer_user_id=int(customer_user["id"]),
+            granted_at=timestamp,
+            remote_hash=evidence_remote_hash,
+            user_agent_hash=evidence_user_agent_hash,
         )
         conn.execute(
             """
@@ -7959,6 +8435,7 @@ def build_account_scaffold(
     account_page = list_account_page(search=account_search, page=account_page_number, per_page=10)
     household_profile = load_household_profile(account["account_number"])
     load_items = list_load_items(account["account_number"])
+    data_authorizations = list_account_data_authorizations(account["account_number"])
     return {
         "account": account,
         "accounts": account_page["accounts"],
@@ -7968,6 +8445,8 @@ def build_account_scaffold(
         "load_summary": build_load_inventory_summary(load_items),
         "account_access": list_account_access_emails(account["account_number"]),
         "utility_connections": list_utility_connections(account["account_number"]),
+        "data_authorizations": data_authorizations,
+        "has_active_data_authorization": any(item["active"] for item in data_authorizations),
     }
 
 
@@ -7996,10 +8475,22 @@ def build_customer_account_scaffold(
             "account_access": [],
             "customer_account_access": None,
             "utility_connections": [],
+            "data_authorizations": [],
+            "customer_data_authorization": None,
+            "has_active_data_authorization": False,
         }
     account = find_account(selected_account_number) or load_account(selected_account_number)
     household_profile = load_household_profile(account["account_number"])
     load_items = list_load_items(account["account_number"])
+    data_authorizations = list_account_data_authorizations(account["account_number"])
+    customer_data_authorization = next(
+        (
+            authorization
+            for authorization in data_authorizations
+            if int(authorization["customer_user_id"]) == int(customer_user["id"])
+        ),
+        None,
+    )
     return {
         "account": account,
         "accounts": account_page["accounts"],
@@ -8010,6 +8501,9 @@ def build_customer_account_scaffold(
         "account_access": list_account_access_emails(account["account_number"]),
         "customer_account_access": get_customer_account_access(customer_email, account["account_number"]),
         "utility_connections": list_utility_connections(account["account_number"]),
+        "data_authorizations": data_authorizations,
+        "customer_data_authorization": customer_data_authorization,
+        "has_active_data_authorization": any(item["active"] for item in data_authorizations),
     }
 
 
@@ -8033,6 +8527,9 @@ def create_web_app() -> Flask:
         "how_it_works_page",
         "for_homeowners_page",
         "for_commissions_page",
+        "terms_page",
+        "privacy_page",
+        "utility_data_authorization_page",
         "robots_txt",
         "sitemap_xml",
         "health",
@@ -8324,6 +8821,9 @@ def create_web_app() -> Flask:
             "how_it_works_url": build_absolute_url(marketing_base_url, "/how-it-works"),
             "for_homeowners_url": build_absolute_url(marketing_base_url, "/for-homeowners"),
             "for_commissions_url": build_absolute_url(marketing_base_url, "/for-commissions"),
+            "terms_url": build_absolute_url(marketing_base_url, "/terms"),
+            "privacy_url": build_absolute_url(marketing_base_url, "/privacy"),
+            "utility_authorization_url": build_absolute_url(marketing_base_url, "/utility-data-authorization"),
             "start_home_url": build_absolute_url(app_base_url, "/signup"),
             "home_login_url": build_absolute_url(app_base_url, "/customer/login"),
             "commission_login_url": build_absolute_url(app_base_url, "/login"),
@@ -8349,6 +8849,8 @@ def create_web_app() -> Flask:
             "load_summary": scaffold["load_summary"],
             "account_access": scaffold["account_access"],
             "utility_connections": scaffold["utility_connections"],
+            "data_authorizations": scaffold["data_authorizations"],
+            "has_active_data_authorization": scaffold["has_active_data_authorization"],
             "setup_section": setup_section,
             "active_account_number": scaffold["account"]["account_number"],
             "page_title": page_title,
@@ -8378,6 +8880,9 @@ def create_web_app() -> Flask:
             "account_access": scaffold["account_access"],
             "customer_account_access": scaffold["customer_account_access"],
             "utility_connections": scaffold["utility_connections"],
+            "data_authorizations": scaffold["data_authorizations"],
+            "customer_data_authorization": scaffold["customer_data_authorization"],
+            "has_active_data_authorization": scaffold["has_active_data_authorization"],
             "setup_section": setup_section,
             "active_account_number": scaffold["account"]["account_number"],
             "customer_mode": True,
@@ -8409,6 +8914,10 @@ def create_web_app() -> Flask:
             "address": value("address"),
             "zip_code": value("zip_code"),
             "plan_id": selected_plan_id,
+            "accept_policies": "yes" if form_checkbox_checked(source.get("accept_policies")) else "",
+            "confirm_account_authority": (
+                "yes" if form_checkbox_checked(source.get("confirm_account_authority")) else ""
+            ),
         }
 
     def render_customer_signup_page(form_like=None):
@@ -8534,6 +9043,9 @@ def create_web_app() -> Flask:
             account_access=scaffold["account_access"],
             customer_account_access=scaffold["customer_account_access"],
             utility_connections=scaffold["utility_connections"],
+            data_authorizations=scaffold["data_authorizations"],
+            customer_data_authorization=scaffold["customer_data_authorization"],
+            has_active_data_authorization=scaffold["has_active_data_authorization"],
             staff_team=[],
             latest_invite_url=None,
             customer_mode=True,
@@ -8587,6 +9099,14 @@ def create_web_app() -> Flask:
     def customer_signup_post():
         selected_plan_id = request.form.get("plan_id") or "home"
         try:
+            accept_policies = form_checkbox_checked(request.form.get("accept_policies"))
+            confirm_account_authority = form_checkbox_checked(
+                request.form.get("confirm_account_authority")
+            )
+            if not accept_policies:
+                raise ValueError("Agree to the Terms and Privacy Notice to create an account.")
+            if not confirm_account_authority:
+                raise ValueError("Confirm that you are allowed to manage this electric account.")
             energy_company = resolve_energy_company_for_form(request.form, require_zip=True)
             customer_user, account, billing = create_customer_signup(
                 email=request.form.get("email", ""),
@@ -8596,6 +9116,10 @@ def create_web_app() -> Flask:
                 energy_company=energy_company,
                 plan_id=selected_plan_id,
                 household_form=request.form,
+                accept_policies=accept_policies,
+                confirm_account_authority=confirm_account_authority,
+                evidence_remote_hash=request_remote_hash(),
+                evidence_user_agent_hash=request_user_agent_hash(),
             )
         except Exception as exc:
             flash(str(exc))
@@ -8608,7 +9132,42 @@ def create_web_app() -> Flask:
             account_number=str(account["account_number"]),
             target_type="customer_user",
             target_id=customer_user["id"],
-            metadata={"plan_id": str(billing["plan_id"])},
+            metadata={
+                "plan_id": str(billing["plan_id"]),
+                "terms_version": CURRENT_TERMS_VERSION,
+                "privacy_version": CURRENT_PRIVACY_VERSION,
+                "utility_authorization_version": CURRENT_UTILITY_AUTHORIZATION_VERSION,
+            },
+        )
+        record_audit_event(
+            "customer.policy_accepted",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=str(account["account_number"]),
+            target_type="policy_acceptance",
+            target_id=f"{CURRENT_TERMS_VERSION}:{CURRENT_PRIVACY_VERSION}",
+            metadata={
+                "terms_version": CURRENT_TERMS_VERSION,
+                "privacy_version": CURRENT_PRIVACY_VERSION,
+            },
+        )
+        signup_authorization = get_customer_account_data_authorization(
+            str(account["account_number"]),
+            int(customer_user["id"]),
+        )
+        if signup_authorization is None:
+            raise RuntimeError("The utility data permission record could not be confirmed.")
+        record_audit_event(
+            "utility.authorization_granted",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=str(account["account_number"]),
+            target_type="account_data_authorization",
+            target_id=signup_authorization["id"],
+            metadata={
+                "authorization_version": CURRENT_UTILITY_AUTHORIZATION_VERSION,
+                "authorization_scope": UTILITY_AUTHORIZATION_SCOPE,
+            },
         )
         if not customer_user.get("email_verified"):
             session.clear()
@@ -8912,6 +9471,43 @@ def create_web_app() -> Flask:
                 page_title="For Commissions",
                 page_description="Review export files, compare periods, and keep a sharper record when an overnight-load question needs a regulator follow-up.",
                 active_page="for-commissions",
+            ),
+        )
+
+    @app.get("/terms")
+    def terms_page():
+        return render_template(
+            "marketing_terms.html",
+            effective_date="July 21, 2026",
+            **build_marketing_page_context(
+                page_title="Terms",
+                page_description="The terms for using Home Energy Watch to store and review electric usage history.",
+                active_page="terms",
+            ),
+        )
+
+    @app.get("/privacy")
+    def privacy_page():
+        return render_template(
+            "marketing_privacy.html",
+            effective_date="July 21, 2026",
+            **build_marketing_page_context(
+                page_title="Privacy Notice",
+                page_description="How Home Energy Watch handles account, household, usage, and billing information.",
+                active_page="privacy",
+            ),
+        )
+
+    @app.get("/utility-data-authorization")
+    def utility_data_authorization_page():
+        return render_template(
+            "marketing_data_authorization.html",
+            effective_date="July 21, 2026",
+            authorization_scope=UTILITY_AUTHORIZATION_SCOPE,
+            **build_marketing_page_context(
+                page_title="Utility Data Permission",
+                page_description="What permission Home Energy Watch needs to import and analyze electric usage history.",
+                active_page="utility-data-authorization",
             ),
         )
 
@@ -9675,6 +10271,8 @@ def create_web_app() -> Flask:
             load_summary=scaffold["load_summary"],
             account_access=scaffold["account_access"],
             utility_connections=scaffold["utility_connections"],
+            data_authorizations=scaffold["data_authorizations"],
+            has_active_data_authorization=scaffold["has_active_data_authorization"],
             staff_team=list_staff_users(),
             latest_invite_url=consume_latest_invite_url(),
             active_account_number=scaffold["account"]["account_number"],
@@ -9800,6 +10398,9 @@ def create_web_app() -> Flask:
             build_absolute_url(marketing_base_url, "/how-it-works"),
             build_absolute_url(marketing_base_url, "/for-homeowners"),
             build_absolute_url(marketing_base_url, "/for-commissions"),
+            build_absolute_url(marketing_base_url, "/terms"),
+            build_absolute_url(marketing_base_url, "/privacy"),
+            build_absolute_url(marketing_base_url, "/utility-data-authorization"),
         ]
         xml_lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
@@ -9839,6 +10440,8 @@ def create_web_app() -> Flask:
             return actor
 
         try:
+            if not account_has_active_data_authorization(account_number):
+                raise ValueError("Customer data permission is required before exports can be compared.")
             left_path = save_uploaded_file(request.files.get("left_file"))
             right_path = save_uploaded_file(request.files.get("right_file"))
             comparison, report_path = analyze_interval_file_comparison(
@@ -9954,11 +10557,14 @@ def create_web_app() -> Flask:
             display_name = request.form.get("display_name")
             energy_company = request.form.get("energy_company")
             baseline_date = request.form.get("baseline_date")
-            input_path = save_uploaded_file(request.files.get("xml_file"))
 
         actor = require_account_actor(account_number, api=True, write=True)
         if not isinstance(actor, dict):
             return actor
+        if not account_has_active_data_authorization(account_number):
+            return jsonify({"error": "Customer data permission is required before new history can be added."}), 403
+        if not request.is_json:
+            input_path = save_uploaded_file(request.files.get("xml_file"))
 
         if request.is_json:
             mounted_name = payload.get("input_file")
@@ -10103,14 +10709,90 @@ def create_web_app() -> Flask:
         if not isinstance(staff_user, dict):
             return staff_user
         account_number = request.form.get("account_number")
-        delete_account_access_email(account_number, access_id)
+        removal = delete_account_access_email(account_number, access_id)
         record_actor_event(
             {"kind": "staff", "user": staff_user},
             "account.access_revoked",
             account_number=account_number,
             target_type="account_access",
             target_id=access_id,
+            metadata={
+                "authorization_count": len(removal["authorization_ids"]),
+                "credentials_cleared": bool(removal["credentials_cleared"]),
+            },
         )
+        if removal["authorization_ids"]:
+            record_actor_event(
+                {"kind": "staff", "user": staff_user},
+                "utility.authorization_revoked",
+                account_number=account_number,
+                target_type="account_access",
+                target_id=access_id,
+                metadata={
+                    "reason": "account_access_removed",
+                    "authorization_ids": removal["authorization_ids"],
+                },
+            )
+        return redirect_back_or_account(account_number)
+
+    @app.post("/account/data-authorization")
+    def grant_data_authorization():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        account_number = request.form.get("account_number")
+        access = get_customer_account_access(str(customer_user["email"]), account_number)
+        if access is None or access["access_level"] != "Manager":
+            return "Manager access is required to change data permission for this account.", 403
+        try:
+            if not form_checkbox_checked(request.form.get("confirm_data_authorization")):
+                raise ValueError("Confirm the data permission before authorizing access.")
+            authorization = grant_account_data_authorization(
+                account_number,
+                int(customer_user["id"]),
+                remote_hash=request_remote_hash(),
+                user_agent_hash=request_user_agent_hash(),
+            )
+            record_audit_event(
+                "utility.authorization_granted",
+                actor_type="customer",
+                actor_id=int(customer_user["id"]),
+                account_number=account_number,
+                target_type="account_data_authorization",
+                target_id=authorization["id"],
+                metadata={"authorization_version": str(authorization["authorization_version"])},
+            )
+            flash("Permission to use this account's utility data is active.")
+        except Exception as exc:
+            flash(str(exc))
+        return redirect_back_or_account(account_number)
+
+    @app.post("/account/data-authorization/revoke")
+    def revoke_data_authorization():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        account_number = request.form.get("account_number")
+        access = get_customer_account_access(str(customer_user["email"]), account_number)
+        if access is None or access["access_level"] != "Manager":
+            return "Manager access is required to change data permission for this account.", 403
+        try:
+            authorization = revoke_account_data_authorization(
+                account_number,
+                int(customer_user["id"]),
+            )
+            record_audit_event(
+                "utility.authorization_revoked",
+                actor_type="customer",
+                actor_id=int(customer_user["id"]),
+                account_number=account_number,
+                target_type="account_data_authorization",
+                target_id=authorization["id"],
+                metadata={"authorization_version": str(authorization["authorization_version"])},
+            )
+            flash("Permission was withdrawn. Saved utility access details were removed.")
+        except Exception as exc:
+            flash(str(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection")
@@ -10123,6 +10805,8 @@ def create_web_app() -> Flask:
             account = find_account(account_number)
             if account is None or not account.get("energy_company"):
                 raise ValueError("Add the service ZIP code before saving a utility connection.")
+            if not account_has_active_data_authorization(account_number):
+                raise ValueError("Customer authorization is required before saving a utility connection.")
             connection_form = request.form.to_dict(flat=True)
             connection_form["provider_name"] = str(account["energy_company"])
             connection = save_utility_connection(account_number, connection_form)
@@ -10252,6 +10936,8 @@ def create_web_app() -> Flask:
             return actor
 
         try:
+            if not account_has_active_data_authorization(account_number):
+                raise ValueError("Customer data permission is required before new history can be added.")
             input_path = save_uploaded_file(request.files.get("xml_file"))
             import_interval_file_to_db(
                 input_path,
@@ -10330,6 +11016,8 @@ def create_web_app() -> Flask:
             load_summary=build_load_inventory_summary(list_load_items(account["account_number"])),
             account_access=list_account_access_emails(account["account_number"]),
             utility_connections=list_utility_connections(account["account_number"]),
+            data_authorizations=list_account_data_authorizations(account["account_number"]),
+            has_active_data_authorization=account_has_active_data_authorization(account["account_number"]),
             staff_team=[] if actor["kind"] == "customer" else list_staff_users(),
             latest_invite_url=None if actor["kind"] == "customer" else consume_latest_invite_url(),
             customer_mode=actor["kind"] == "customer",

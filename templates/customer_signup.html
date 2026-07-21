@@ -67,6 +67,35 @@
             </output>
             <small>We match it to the service area for this address.</small>
           </label>
+          <div class="consent-row wide-field">
+            <input
+              id="accept-policies"
+              type="checkbox"
+              name="accept_policies"
+              value="yes"
+              {% if signup_form.accept_policies %}checked{% endif %}
+              required
+            >
+            <label for="accept-policies">
+              I agree to the
+              <a class="inline-link" href="{{ url_for('terms_page') }}" target="_blank" rel="noopener">Terms</a>
+              and
+              <a class="inline-link" href="{{ url_for('privacy_page') }}" target="_blank" rel="noopener">Privacy Notice</a>.
+            </label>
+          </div>
+          <div class="consent-row wide-field">
+            <input
+              id="confirm-account-authority"
+              type="checkbox"
+              name="confirm_account_authority"
+              value="yes"
+              {% if signup_form.confirm_account_authority %}checked{% endif %}
+              required
+            >
+            <label for="confirm-account-authority">
+              I confirm that I am the account holder or have permission to manage this electric account and its usage history.
+            </label>
+          </div>
         </div>
         <button type="submit">Create account and continue to payment</button>
       </form>

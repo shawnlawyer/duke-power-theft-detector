@@ -1,5 +1,6 @@
 {% set is_customer_history = customer_mode|default(false) %}
 {% set can_manage_history = not is_customer_history or (customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager") %}
+{% set data_permission_active = has_active_data_authorization|default(false) %}
 <section class="section-block upload-block">
   <div class="section-header">
     <div>
@@ -49,6 +50,7 @@
     <input type="hidden" name="energy_company" value="{{ (analysis.account.energy_company if analysis else account.energy_company) }}">
     <input type="hidden" name="baseline_date" value="{{ (analysis.account.baseline_date if analysis and analysis.account.baseline_date else account.baseline_date or '') }}">
 
+    <fieldset class="form-fieldset" {% if not data_permission_active %}disabled{% endif %}>
     <label class="upload-field">
       <span>History file</span>
       <input type="file" name="xml_file" accept=".xml,.csv,application/xml,text/xml,text/csv" required>
@@ -80,8 +82,12 @@
       </div>
     </details>
 
-    <button type="submit">Add history</button>
+    <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Add history</button>
+    </fieldset>
     </form>
+    {% if not data_permission_active %}
+      <p class="plain-note">Customer data permission must be active before new history can be added.</p>
+    {% endif %}
   {% else %}
     <p class="plain-note">You have view-only access. An account manager can add more history.</p>
   {% endif %}

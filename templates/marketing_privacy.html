@@ -1,0 +1,40 @@
+{% extends "marketing_base.html" %}
+
+{% block content %}
+  <main class="marketing-main compact-main legal-page">
+    <section class="page-intro">
+      <p class="mini-label">Effective {{ effective_date }}</p>
+      <h1>Privacy Notice</h1>
+      <p>Your energy history can reveal patterns about a household. We treat it as private account information and explain its use here.</p>
+    </section>
+
+    <section class="legal-section">
+      <h2>Information we keep</h2>
+      <p>We keep the name, email, service address, electric account number, utility company, household details, equipment inventory, uploaded usage history, weather context, reports, account permissions, and billing status needed to provide the service.</p>
+      <p>Stripe handles payment-card details. Home Energy Watch does not store full card numbers.</p>
+    </section>
+
+    <section class="legal-section">
+      <h2>How we use it</h2>
+      <p>We use this information to secure accounts, import and analyze usage, compare periods, identify patterns, prepare reports, support billing, and maintain a record of important account actions.</p>
+      <p>We may keep protected technical evidence of acceptance, sign-in, and authorization events to help investigate account or security questions.</p>
+    </section>
+
+    <section class="legal-section">
+      <h2>Who can receive it</h2>
+      <p>Information is available to the customer and the reviewers assigned to that electric account. We also use service providers that support hosting, email, weather, security, and billing. We may disclose records when required by law or necessary to protect the service and its users.</p>
+      <p>We do not sell household energy history.</p>
+    </section>
+
+    <section class="legal-section">
+      <h2>Your choices</h2>
+      <p>You can download an account archive, withdraw utility-data permission, and ask us to correct or delete account information. Some records may need to be retained for security, billing, dispute, or legal obligations.</p>
+      <p>Withdrawing utility-data permission stops future utility synchronization and removes saved utility access details. Existing history remains until it is deleted under an approved request or retention rule.</p>
+    </section>
+
+    <section class="legal-section">
+      <h2>Contact us</h2>
+      <p>Email <a href="mailto:support@homeenergywatch.com">support@homeenergywatch.com</a> to ask about your information, request a correction, or begin a deletion request.</p>
+    </section>
+  </main>
+{% endblock %}

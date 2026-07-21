@@ -7,6 +7,9 @@
 {% set current_comparison = analysis.inventory_comparison if analysis else none %}
 {% set current_account_access = account_access if account_access is defined else [] %}
 {% set current_utility_connections = utility_connections if utility_connections is defined else [] %}
+{% set current_data_authorizations = data_authorizations if data_authorizations is defined else [] %}
+{% set current_customer_data_authorization = customer_data_authorization if customer_data_authorization is defined else none %}
+{% set data_permission_active = has_active_data_authorization|default(false) %}
 {% set is_customer = customer_mode|default(false) %}
 {% set can_manage_account = not is_customer or (customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager") %}
 {% set account_list_endpoint = "customer_dashboard" if is_customer else "index" %}
@@ -232,6 +235,51 @@
     </div>
   </div>
 
+  <div class="permission-panel {% if data_permission_active %}permission-active{% endif %}">
+    <div>
+      <p class="section-kicker">Customer permission</p>
+      <h3>{{ "Active" if data_permission_active else "Needed before a connection can be saved" }}</h3>
+      <p class="plain-note">
+        Import, store, analyze, compare, and report electricity usage for this account.
+        <a class="inline-link" href="{{ url_for('utility_data_authorization_page') }}" target="_blank" rel="noopener">Read what this permits</a>.
+      </p>
+      {% if data_permission_active %}
+        {% if current_customer_data_authorization and current_customer_data_authorization.active %}
+          <p class="permission-detail">Granted {{ current_customer_data_authorization.granted_at|replace("T", " ") }}.</p>
+        {% elif not is_customer and current_data_authorizations %}
+          {% set active_permissions = current_data_authorizations|selectattr('active')|list %}
+          {% if active_permissions %}
+            <p class="permission-detail">
+              Granted by {{ active_permissions[0].customer_name or active_permissions[0].customer_email }} on {{ active_permissions[0].granted_at|replace("T", " ") }}.
+            </p>
+          {% endif %}
+        {% endif %}
+      {% endif %}
+    </div>
+
+    {% if is_customer and can_manage_account %}
+      {% if current_customer_data_authorization and current_customer_data_authorization.active %}
+        <form action="{{ url_for('revoke_data_authorization') }}" method="post">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+          <input type="hidden" name="return_to" value="{{ return_path }}">
+          <button type="submit" class="button-secondary">Withdraw permission</button>
+        </form>
+      {% elif not data_permission_active %}
+        <form class="permission-form" action="{{ url_for('grant_data_authorization') }}" method="post">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+          <input type="hidden" name="return_to" value="{{ return_path }}">
+          <label class="checkbox-field">
+            <input type="checkbox" name="confirm_data_authorization" value="yes" required>
+            <span>I authorize Home Energy Watch to use this account's electricity history for the purposes above.</span>
+          </label>
+          <button type="submit">Give permission</button>
+        </form>
+      {% endif %}
+    {% endif %}
+  </div>
+
   <div class="access-guide-grid" aria-label="Ways to bring in utility history">
     {% for guide in utility_access_guides %}
       <article class="access-guide-card">
@@ -253,6 +301,7 @@
     <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
     <input type="hidden" name="return_to" value="{{ return_path }}">
+    <fieldset class="form-fieldset" {% if not data_permission_active %}disabled{% endif %}>
     <div class="field-grid">
       <label>
         <span>Energy company</span>
@@ -280,8 +329,12 @@
         <input type="password" name="access_secret" autocomplete="new-password" placeholder="Paste the customer-approved key, if one was issued">
       </label>
     </div>
-    <button type="submit" {% if not selected_connection_provider %}disabled{% endif %}>Save connection</button>
+    <button type="submit" {% if not selected_connection_provider or not data_permission_active %}disabled{% endif %}>Save connection</button>
+    </fieldset>
     </form>
+    {% if not data_permission_active %}
+      <p class="plain-note">The customer must give permission before utility access details can be saved.</p>
+    {% endif %}
   {% else %}
     <p class="plain-note">You have view-only access. An account manager can add or change utility connections.</p>
   {% endif %}
@@ -334,7 +387,7 @@
                   <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                   <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
                   <input type="hidden" name="return_to" value="{{ return_path }}">
-                  <button type="submit" class="button-secondary button-small">Sync now</button>
+                  <button type="submit" class="button-secondary button-small" {% if not data_permission_active %}disabled{% endif %}>Sync now</button>
                 </form>
                 <form action="{{ url_for('remove_connection', connection_id=connection.id) }}" method="post">
                   <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">

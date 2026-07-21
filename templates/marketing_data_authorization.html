@@ -1,0 +1,38 @@
+{% extends "marketing_base.html" %}
+
+{% block content %}
+  <main class="marketing-main compact-main legal-page">
+    <section class="page-intro">
+      <p class="mini-label">Effective {{ effective_date }}</p>
+      <h1>Permission to use utility data</h1>
+      <p>You stay in control of whether Home Energy Watch can bring electricity history into your account.</p>
+    </section>
+
+    <section class="legal-section">
+      <h2>What you permit</h2>
+      <p>{{ authorization_scope }}</p>
+      <p>This permission covers files you upload and utility access that you ask us to save for the account.</p>
+    </section>
+
+    <section class="legal-section">
+      <h2>What you do not permit</h2>
+      <p>This does not allow Home Energy Watch or a reviewer to change utility service, change account ownership, alter meter settings, make utility payments, or buy anything on your behalf.</p>
+    </section>
+
+    <section class="legal-section">
+      <h2>Who can give permission</h2>
+      <p>The account holder or another person with permission to manage the electric account may authorize access. Commission staff can review the recorded permission but cannot create it for the customer.</p>
+    </section>
+
+    <section class="legal-section">
+      <h2>Withdrawing permission</h2>
+      <p>An account manager can withdraw permission from the Utility page. Home Energy Watch then removes saved utility access details and stops future utility synchronization.</p>
+      <p>Previously imported history remains available until it is removed through a deletion request or an approved retention rule.</p>
+    </section>
+
+    <section class="legal-section">
+      <h2>Questions</h2>
+      <p>Contact <a href="mailto:support@homeenergywatch.com">support@homeenergywatch.com</a> before authorizing access if anything here is unclear.</p>
+    </section>
+  </main>
+{% endblock %}
