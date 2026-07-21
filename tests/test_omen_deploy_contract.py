@@ -31,6 +31,7 @@ class OmenDeployContractTest(unittest.TestCase):
         self.assertIn("-e POWER_EMAIL_BACKEND=$POWER_EMAIL_BACKEND_Q", script_text)
         self.assertIn("-e POWER_EMAIL_FROM=$POWER_EMAIL_FROM_Q", script_text)
         self.assertIn("-e POWER_EMAIL_REGION=$POWER_EMAIL_REGION_Q", script_text)
+        self.assertIn("-e POWER_BILLING_ENABLED=$POWER_BILLING_ENABLED_Q", script_text)
 
 
 if __name__ == "__main__":

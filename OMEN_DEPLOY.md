@@ -37,9 +37,10 @@ Omen defaults to `POWER_EMAIL_BACKEND=disabled`, so staging accounts are immedia
 
 ## Billing on Omen
 
-Set these in `.env.omen` before deploying if you want checkout through Stripe:
+Pricing has not been approved for Home Energy Watch, so Omen defaults to `POWER_BILLING_ENABLED=false`. Leave it off while evaluating the product. When pricing is approved, set the approved Stripe Price IDs and then explicitly enable checkout:
 
 ```bash
+POWER_BILLING_ENABLED=true
 STRIPE_ACCOUNT_ID=acct_1TEP6v39IosmExPF
 STRIPE_SECRET_KEY=...
 STRIPE_WEBHOOK_SECRET=...
@@ -48,7 +49,7 @@ STRIPE_PRICE_HOME=...
 STRIPE_PRICE_REVIEW=...
 ```
 
-Keep Stripe secret values out of git and chat. Configure the Stripe webhook endpoint as `https://app.homeenergywatch.com/stripe/webhook` for production.
+Keep Stripe secret values out of git and chat. A leftover Price ID cannot open checkout while `POWER_BILLING_ENABLED=false`. Configure the Stripe webhook endpoint as `https://app.homeenergywatch.com/stripe/webhook` for production.
 
 Then redeploy:
 

@@ -7,7 +7,7 @@
         <div>
           <p class="section-kicker">Pricing</p>
           <h2>Choose the level that fits the review.</h2>
-          <p class="plain-note">Start with one home, then move up when you need to review more accounts.</p>
+          <p class="plain-note">Start with one home, then move up when you need to review more accounts. Pricing is still being finalized.</p>
         </div>
       </div>
 
@@ -40,14 +40,14 @@
               </form>
             {% elif customer_user %}
               <a class="button-link" href="{{ url_for('customer_dashboard') }}">
-                Ask about {{ plan.name }}
+                Return to your account
               </a>
             {% else %}
               <a class="button-link" href="{{ url_for('customer_signup', plan_id=plan.id) }}">
                 {% if plan.payment_ready %}
                   Start {{ plan.name }}
                 {% else %}
-                  Ask about {{ plan.name }}
+                  Create an account
                 {% endif %}
               </a>
             {% endif %}

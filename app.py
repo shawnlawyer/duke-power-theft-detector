@@ -318,27 +318,27 @@ BILLING_PLAN_DEFINITIONS = (
     {
         "id": "home",
         "name": "Home Watch",
-        "monthly_price_label": "$19/mo",
-        "amount_cents": 1900,
+        "monthly_price_label": "Pricing being finalized",
         "account_limit": 1,
+        "checkout_supported": True,
         "stripe_price_env": "STRIPE_PRICE_HOME",
         "summary": "For one household watching its own electric account.",
     },
     {
         "id": "review",
         "name": "Review Desk",
-        "monthly_price_label": "$99/mo",
-        "amount_cents": 9900,
+        "monthly_price_label": "Pricing being finalized",
         "account_limit": 20,
+        "checkout_supported": True,
         "stripe_price_env": "STRIPE_PRICE_REVIEW",
         "summary": "For advocates and reviewers working across a small set of accounts.",
     },
     {
         "id": "agency",
         "name": "Agency Pilot",
-        "monthly_price_label": "Custom",
-        "amount_cents": None,
+        "monthly_price_label": "Talk with us",
         "account_limit": None,
+        "checkout_supported": False,
         "stripe_price_env": "STRIPE_PRICE_AGENCY",
         "summary": "For a commission or agency review workspace.",
     },
@@ -3223,8 +3223,12 @@ def list_billing_plans() -> list[dict[str, object]]:
     plans: list[dict[str, object]] = []
     for plan in BILLING_PLAN_DEFINITIONS:
         plan_copy = dict(plan)
-        amount_cents = plan_copy.get("amount_cents")
-        plan_copy["payment_ready"] = amount_cents is not None
+        plan_copy["payment_ready"] = bool(
+            plan_copy.get("checkout_supported")
+            and billing_checkout_enabled()
+            and get_stripe_secret_key()
+            and get_stripe_price_id(plan_copy)
+        )
         plans.append(plan_copy)
     return plans
 
@@ -3302,6 +3306,7 @@ def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: in
             "plan_id": plan["id"],
             "plan_name": plan["name"],
             "monthly_price_label": plan["monthly_price_label"],
+            "payment_ready": plan["payment_ready"],
             "status": "not_started",
             "status_label": "Not started",
             "checkout_session_id": "",
@@ -3332,6 +3337,7 @@ def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: in
         "plan_id": plan["id"],
         "plan_name": plan["name"],
         "monthly_price_label": plan["monthly_price_label"],
+        "payment_ready": plan["payment_ready"],
         "status": status,
         "status_label": status_labels.get(str(status), str(status).replace("_", " ").title()),
         "checkout_session_id": mapping.get("checkout_session_id") or "",
@@ -3561,6 +3567,10 @@ def get_stripe_account_id() -> str:
     return (os.getenv("STRIPE_ACCOUNT_ID") or "").strip()
 
 
+def billing_checkout_enabled() -> bool:
+    return (os.getenv("POWER_BILLING_ENABLED") or "false").strip().lower() in {"1", "true", "yes"}
+
+
 def get_stripe_price_id(plan: dict[str, object]) -> str:
     env_name = str(plan.get("stripe_price_env") or "")
     return (os.getenv(env_name) or "").strip()
@@ -3617,6 +3627,8 @@ def create_customer_checkout_session(
     plan_id: str | None,
     base_url: str,
 ) -> dict[str, object]:
+    if not billing_checkout_enabled():
+        raise ValueError("Online payment is not open yet.")
     configure_stripe()
     plan = get_billing_plan(plan_id)
     price_id = get_stripe_price_id(plan)

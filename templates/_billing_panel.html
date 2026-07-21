@@ -19,12 +19,14 @@
       <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
       <button type="submit" class="button-secondary">Manage billing</button>
     </form>
-  {% else %}
+  {% elif current_billing and current_billing.payment_ready %}
     <form class="billing-action-form" action="{{ url_for('billing_checkout') }}" method="post">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
-      <input type="hidden" name="plan_id" value="{{ current_billing.plan_id if current_billing else 'home' }}">
+      <input type="hidden" name="plan_id" value="{{ current_billing.plan_id }}">
       <button type="submit">Continue to secure payment</button>
     </form>
     <p class="plain-note">Card details are entered on Stripe's secure checkout page.</p>
+  {% else %}
+    <p class="plain-note">Online billing is not open yet. Your account remains available while pricing is finalized.</p>
   {% endif %}
 </section>
