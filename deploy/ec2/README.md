@@ -17,6 +17,8 @@ The current control status and remaining enterprise gates are tracked in `ENTERP
    - `POWER_EMAIL_FROM=support@homeenergywatch.com`
    - `POWER_EMAIL_REGION=us-east-1`
    - `POWER_STAFF_MFA_REQUIRED=true` when commission MFA enforcement is ready
+   - `POWER_DATA_DELETION_ENABLED=false` until a retention policy is approved
+   - `POWER_DATA_DELETION_POLICY_VERSION` only when that approved policy is ready for use
    - `POWER_BILLING_ENABLED=false` until Home Energy Watch pricing is approved
    - `STRIPE_SECRET_KEY`
    - `STRIPE_WEBHOOK_SECRET`

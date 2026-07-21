@@ -35,6 +35,8 @@ Omen runs with `POWER_ENV=staging`. Set a unique `POWER_APP_SECRET` and, when sa
 
 Omen defaults to `POWER_EMAIL_BACKEND=disabled`, so staging accounts are immediately usable and no email is sent. Set `POWER_EMAIL_BACKEND=memory` only when testing confirmation or password-reset flows inside the app test suite.
 
+Account-data deletion also defaults to paused. Leave `POWER_DATA_DELETION_ENABLED=false` until an approved retention policy exists. Enabling it requires a matching `POWER_DATA_DELETION_POLICY_VERSION`; the app refuses to start when the switch is on without a policy version.
+
 ## Billing on Omen
 
 Pricing has not been approved for Home Energy Watch, so Omen defaults to `POWER_BILLING_ENABLED=false`. Leave it off while evaluating the product. When pricing is approved, set the approved Stripe Price IDs and then explicitly enable checkout:

@@ -31,6 +31,8 @@ def configure_tmp_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("POWER_PUBLIC_BASE_URL", "https://app.homeenergywatch.com")
     monkeypatch.setenv("POWER_MARKETING_BASE_URL", "https://homeenergywatch.com")
     monkeypatch.setenv("POWER_STAFF_MFA_REQUIRED", "false")
+    monkeypatch.delenv("POWER_DATA_DELETION_ENABLED", raising=False)
+    monkeypatch.delenv("POWER_DATA_DELETION_POLICY_VERSION", raising=False)
     monkeypatch.delenv("POWER_BILLING_ENABLED", raising=False)
     monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
     monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
@@ -612,13 +614,14 @@ def test_customer_data_export_is_tenant_bounded_and_excludes_secrets(tmp_path, m
     assert "home-energy-watch-data-" in response.headers["Content-Disposition"]
     assert manifest["customer"]["email"] == "owner@example.com"
     assert manifest["account_count"] == 1
-    assert manifest["format_version"] == 2
+    assert manifest["format_version"] == 3
     assert manifest["policy_acceptances"][0]["terms_version"] == app.CURRENT_TERMS_VERSION
     assert profile["account"]["account_number"] == "acct-a"
     assert profile["household"]["address"] == "123 Main Street"
     assert profile["inventory"][0]["label"] == "Kitchen refrigerator"
     assert profile["utility_connections"][0]["provider_name"] == "Duke Energy Carolinas, LLC"
     assert profile["data_authorizations"][0]["status"] == "active"
+    assert profile["data_requests"] == []
     assert b"2024-01-01" in extracted[interval_name]
     assert b"2026-01-01,12.3" in extracted[report_name]
     assert b"acct-b" not in combined
@@ -644,6 +647,315 @@ def test_customer_data_export_requires_customer_sign_in(tmp_path, monkeypatch):
 
     assert response.status_code == 302
     assert "/customer/login" in response.headers["Location"]
+
+
+def test_customer_manager_can_request_and_cancel_deletion_but_viewer_cannot(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    manager = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.create_customer_user("viewer@example.com", "Account Viewer", "customer-password-123")
+    app.save_account_profile("acct-delete", display_name="Main home")
+    app.add_account_access_email("acct-delete", "owner@example.com", access_level="Manager")
+    app.add_account_access_email("acct-delete", "viewer@example.com", access_level="Viewer")
+
+    manager_client = app.web_app.test_client()
+    customer_sign_in(manager_client)
+    page = manager_client.get("/customer/data-requests")
+    unconfirmed = manager_client.post(
+        "/customer/data-requests",
+        data={"account_number": "acct-delete"},
+        follow_redirects=True,
+    )
+    submitted = manager_client.post(
+        "/customer/data-requests",
+        data={"account_number": "acct-delete", "confirm_deletion_request": "yes"},
+        follow_redirects=True,
+    )
+    requests = app.list_customer_data_requests(int(manager["id"]))
+    duplicate = manager_client.post(
+        "/customer/data-requests",
+        data={"account_number": "acct-delete", "confirm_deletion_request": "yes"},
+        follow_redirects=True,
+    )
+
+    viewer_client = app.web_app.test_client()
+    customer_sign_in(viewer_client, "viewer@example.com")
+    viewer_page = viewer_client.get("/customer/data-requests")
+    viewer_submit = viewer_client.post(
+        "/customer/data-requests",
+        data={"account_number": "acct-delete", "confirm_deletion_request": "yes"},
+        follow_redirects=True,
+    )
+
+    canceled = manager_client.post(
+        f"/customer/data-requests/{requests[0]['id']}/cancel",
+        follow_redirects=True,
+    )
+    saved = app.get_account_data_request(int(requests[0]["id"]))
+    with app.get_db_connection() as conn:
+        actions = {
+            row["action"]
+            for row in conn.execute(
+                "SELECT action FROM audit_events WHERE target_type = 'account_data_request'"
+            ).fetchall()
+        }
+
+    assert page.status_code == 200
+    assert b"Download my data" in page.data
+    assert b"Submit request" in page.data
+    assert b"Confirm that you want" in unconfirmed.data
+    assert b"submitted for review" in submitted.data
+    assert len(requests) == 1
+    assert requests[0]["status"] == "pending"
+    assert b"already open" in duplicate.data
+    assert b"A manager can submit this request" in viewer_page.data
+    assert b"Manager access" in viewer_submit.data
+    assert canceled.status_code == 200
+    assert saved["status"] == "canceled"
+    assert actions == {"customer.data_deletion_requested", "customer.data_deletion_canceled"}
+
+
+def test_data_request_review_is_commissioner_only_and_legal_hold_blocks_approval(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    commissioner = app.create_first_staff_user(
+        "commission@example.gov",
+        "Commissioner One",
+        "test-password-123",
+    )
+    invite = app.invite_staff_user(
+        "analyst@example.gov",
+        "Analyst One",
+        "Analyst",
+        invited_by_id=int(commissioner["id"]),
+    )
+    app.accept_staff_invite(invite["token"], "analyst-password-123")
+    customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.save_account_profile("acct-hold", display_name="Held account")
+    app.add_account_access_email("acct-hold", "owner@example.com", access_level="Manager")
+    data_request = app.create_account_deletion_request("acct-hold", int(customer["id"]))
+
+    analyst_client = app.web_app.test_client()
+    analyst_client.post(
+        "/login",
+        data={"email": "analyst@example.gov", "password": "analyst-password-123"},
+    )
+    analyst_page = analyst_client.get("/data-requests")
+
+    commissioner_client = app.web_app.test_client()
+    sign_in(commissioner_client)
+    queue = commissioner_client.get("/data-requests")
+    hold_response = commissioner_client.post(
+        "/data-holds",
+        data={
+            "account_number": "acct-hold",
+            "reason": "Open billing dispute requires preservation.",
+        },
+        follow_redirects=True,
+    )
+    blocked = commissioner_client.post(
+        f"/data-requests/{data_request['id']}/review",
+        data={"decision": "approve", "review_note": "Identity verified."},
+        follow_redirects=True,
+    )
+    active_hold = app.list_account_legal_holds(active_only=True)[0]
+    release_response = commissioner_client.post(
+        f"/data-holds/{active_hold['id']}/release",
+        follow_redirects=True,
+    )
+    approved = commissioner_client.post(
+        f"/data-requests/{data_request['id']}/review",
+        data={"decision": "approve", "review_note": "Identity verified."},
+        follow_redirects=True,
+    )
+    execution_paused = commissioner_client.post(
+        f"/data-requests/{data_request['id']}/execute",
+        data={"password": "test-password-123"},
+        follow_redirects=True,
+    )
+    saved = app.get_account_data_request(int(data_request["id"]))
+    with app.get_db_connection() as conn:
+        actions = {
+            row["action"]
+            for row in conn.execute(
+                "SELECT action FROM audit_events WHERE action LIKE 'account.legal_hold_%'"
+            ).fetchall()
+        }
+
+    assert analyst_page.status_code == 302
+    assert analyst_page.headers["Location"].endswith("/")
+    assert queue.status_code == 200
+    assert b"Customer deletion requests" in queue.data
+    assert b"Deletion paused" in queue.data
+    assert b"The legal hold is active" in hold_response.data
+    assert b"Release the legal hold" in blocked.data
+    assert b"legal hold was released" in release_response.data
+    assert b"approved, awaiting deletion" in approved.data.lower()
+    assert b"deletion remains paused" in execution_paused.data.lower()
+    assert saved["status"] == "approved"
+    assert actions == {"account.legal_hold_placed", "account.legal_hold_released"}
+
+
+def test_data_deletion_requires_policy_version_when_enabled(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setenv("POWER_DATA_DELETION_ENABLED", "true")
+
+    with pytest.raises(RuntimeError, match="POWER_DATA_DELETION_POLICY_VERSION"):
+        app.validate_runtime_security()
+
+
+def test_approved_data_deletion_removes_customer_data_and_keeps_compliance_record(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setenv("POWER_DATA_DELETION_ENABLED", "true")
+    monkeypatch.setenv("POWER_DATA_DELETION_POLICY_VERSION", "retention-2026-07")
+    app.web_app.config["TESTING"] = True
+    commissioner = app.create_first_staff_user(
+        "commission@example.gov",
+        "Commissioner One",
+        "test-password-123",
+    )
+    customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.save_account_profile(
+        "acct-erase",
+        display_name="Erase this home",
+        energy_company="Duke Energy Progress, LLC",
+        baseline_date="2026-01-15",
+    )
+    app.save_household_profile(
+        "acct-erase",
+        {
+            "address": "123 Private Lane",
+            "zip_code": "27601",
+            "occupant_count": "2",
+            "year_built": "1990",
+            "square_footage": "1800",
+            "heating_system": "Heat pump",
+            "cooling_system": "Central air",
+            "water_heater": "Gas",
+            "notes": "Private household note",
+        },
+    )
+    app.add_account_access_email("acct-erase", "owner@example.com", access_level="Manager")
+    authorization = app.grant_account_data_authorization("acct-erase", int(customer["id"]))
+    app.add_load_item(
+        "acct-erase",
+        label="Kitchen refrigerator",
+        quantity=1,
+        watts_each=150,
+        include_when_off=True,
+    )
+    app.save_utility_connection(
+        "acct-erase",
+        {
+            "provider_name": "Duke Energy Progress, LLC",
+            "connection_label": "Main account",
+            "access_method": "customer_api_key",
+            "access_identifier": "owner-utility@example.com",
+            "access_secret": "customer-approved-secret-1234",
+        },
+    )
+    input_path = app.INPUT_DIR / "customer-history.xml"
+    input_path.write_bytes(FIXTURE.read_bytes())
+    app.import_interval_file_to_db(input_path, account_number="acct-erase")
+    report_path = app.OUTPUT_DIR / "customer-report.csv"
+    report_path.write_text("date,total_kwh\n2026-01-01,12.3\n", encoding="utf-8")
+    app.register_report_artifacts("acct-erase", [report_path])
+    account = app.find_account("acct-erase")
+    with app.get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO weather_daily_cache (
+                account_id, weather_date, latitude, longitude, timezone,
+                location_name, data_json, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(account["id"]),
+                "2026-01-01",
+                35.77,
+                -78.64,
+                "America/New_York",
+                "Raleigh",
+                '{"temperature": 40}',
+                app.timestamp_now(),
+            ),
+        )
+    data_request = app.create_account_deletion_request("acct-erase", int(customer["id"]))
+    app.review_account_deletion_request(
+        int(data_request["id"]),
+        int(commissioner["id"]),
+        "approve",
+        "Identity and ownership verified.",
+    )
+
+    commissioner_client = app.web_app.test_client()
+    sign_in(commissioner_client)
+    wrong_password = commissioner_client.post(
+        f"/data-requests/{data_request['id']}/execute",
+        data={"password": "wrong-password"},
+        follow_redirects=True,
+    )
+    completed = commissioner_client.post(
+        f"/data-requests/{data_request['id']}/execute",
+        data={"password": "test-password-123"},
+        follow_redirects=True,
+    )
+    saved = app.get_account_data_request(int(data_request["id"]))
+    deleted_account = app.find_account(str(saved["account_number"]))
+    with app.get_db_connection() as conn:
+        erased_counts = {
+            table: int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS count FROM {table} WHERE account_id = ?",
+                    (int(account["id"]),),
+                ).fetchone()["count"]
+            )
+            for table in (
+                "imported_files",
+                "interval_readings",
+                "account_load_items",
+                "household_profiles",
+                "weather_daily_cache",
+                "account_access_emails",
+                "utility_connections",
+                "report_artifacts",
+            )
+        }
+        retained_authorization = conn.execute(
+            """
+            SELECT status, remote_hash, user_agent_hash
+            FROM account_data_authorizations WHERE id = ?
+            """,
+            (int(authorization["id"]),),
+        ).fetchone()
+        completion_event = conn.execute(
+            """
+            SELECT account_id, metadata_json
+            FROM audit_events
+            WHERE action = 'customer.data_deletion_completed'
+            ORDER BY id DESC LIMIT 1
+            """
+        ).fetchone()
+
+    assert b"That password did not work" in wrong_password.data
+    assert b"approved account data was deleted" in completed.data
+    assert app.find_account("acct-erase") is None
+    assert deleted_account["display_name"] == "Deleted account"
+    assert deleted_account["energy_company"] == ""
+    assert deleted_account["baseline_date"] is None
+    assert set(erased_counts.values()) == {0}
+    assert retained_authorization["status"] == "revoked_deletion"
+    assert retained_authorization["remote_hash"] is None
+    assert retained_authorization["user_agent_hash"] is None
+    assert saved["status"] == "completed"
+    assert saved["policy_version"] == "retention-2026-07"
+    assert saved["account_number"].startswith(f"deleted-{account['id']}-")
+    assert not input_path.exists()
+    assert not report_path.exists()
+    assert app.get_customer_account_access("owner@example.com", "acct-erase") is None
+    assert int(completion_event["account_id"]) == int(account["id"])
+    assert json.loads(completion_event["metadata_json"])["policy_version"] == "retention-2026-07"
+    assert app.verify_audit_chain()["valid"] is True
 
 
 def test_utility_connection_stores_customer_granted_access_without_exposing_secret(tmp_path, monkeypatch):

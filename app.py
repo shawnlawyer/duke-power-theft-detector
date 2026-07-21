@@ -946,6 +946,77 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS account_data_requests (
+            id BIGSERIAL PRIMARY KEY,
+            account_id BIGINT NOT NULL,
+            customer_user_id BIGINT NOT NULL,
+            request_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            canceled_at TEXT,
+            reviewed_at TEXT,
+            reviewed_by_staff_id BIGINT,
+            review_note TEXT,
+            completed_at TEXT,
+            completed_by_staff_id BIGINT,
+            policy_version TEXT,
+            completion_note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id),
+            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id),
+            FOREIGN KEY(reviewed_by_staff_id) REFERENCES staff_users(id),
+            FOREIGN KEY(completed_by_staff_id) REFERENCES staff_users(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_account_data_requests_status_time
+        ON account_data_requests (status, requested_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_account_data_requests_open_customer
+        ON account_data_requests (account_id, customer_user_id, request_type)
+        WHERE status IN ('pending', 'approved')
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_legal_holds (
+            id BIGSERIAL PRIMARY KEY,
+            account_id BIGINT NOT NULL,
+            status TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            placed_by_staff_id BIGINT NOT NULL,
+            placed_at TEXT NOT NULL,
+            released_by_staff_id BIGINT,
+            released_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id),
+            FOREIGN KEY(placed_by_staff_id) REFERENCES staff_users(id),
+            FOREIGN KEY(released_by_staff_id) REFERENCES staff_users(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_account_legal_holds_account_status
+        ON account_legal_holds (account_id, status, placed_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_account_legal_holds_active_account
+        ON account_legal_holds (account_id)
+        WHERE status = 'active'
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS customer_auth_tokens (
             id BIGSERIAL PRIMARY KEY,
             customer_user_id BIGINT NOT NULL,
@@ -1451,6 +1522,77 @@ def migrate_database(conn: DatabaseConnection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS account_data_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            customer_user_id INTEGER NOT NULL,
+            request_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            canceled_at TEXT,
+            reviewed_at TEXT,
+            reviewed_by_staff_id INTEGER,
+            review_note TEXT,
+            completed_at TEXT,
+            completed_by_staff_id INTEGER,
+            policy_version TEXT,
+            completion_note TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id),
+            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id),
+            FOREIGN KEY(reviewed_by_staff_id) REFERENCES staff_users(id),
+            FOREIGN KEY(completed_by_staff_id) REFERENCES staff_users(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_account_data_requests_status_time
+        ON account_data_requests (status, requested_at, id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_account_data_requests_open_customer
+        ON account_data_requests (account_id, customer_user_id, request_type)
+        WHERE status IN ('pending', 'approved')
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_legal_holds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            placed_by_staff_id INTEGER NOT NULL,
+            placed_at TEXT NOT NULL,
+            released_by_staff_id INTEGER,
+            released_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id),
+            FOREIGN KEY(placed_by_staff_id) REFERENCES staff_users(id),
+            FOREIGN KEY(released_by_staff_id) REFERENCES staff_users(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_account_legal_holds_account_status
+        ON account_legal_holds (account_id, status, placed_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_account_legal_holds_active_account
+        ON account_legal_holds (account_id)
+        WHERE status = 'active'
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS customer_auth_tokens (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             customer_user_id INTEGER NOT NULL,
@@ -1627,6 +1769,24 @@ def email_verification_required() -> bool:
     return email_delivery_backend() != "disabled"
 
 
+def data_deletion_policy_version() -> str:
+    return (os.getenv("POWER_DATA_DELETION_POLICY_VERSION") or "").strip()[:100]
+
+
+def data_deletion_execution_status() -> dict[str, object]:
+    requested = (os.getenv("POWER_DATA_DELETION_ENABLED") or "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    policy_version = data_deletion_policy_version()
+    return {
+        "enabled": bool(requested and policy_version),
+        "requested": requested,
+        "policy_version": policy_version,
+    }
+
+
 def get_email_sender() -> str:
     return (os.getenv("POWER_EMAIL_FROM") or "").strip()
 
@@ -1690,6 +1850,11 @@ def get_data_encryption_cipher() -> Fernet:
 
 
 def validate_runtime_security() -> None:
+    deletion_status = data_deletion_execution_status()
+    if deletion_status["requested"] and not deletion_status["policy_version"]:
+        raise RuntimeError(
+            "POWER_DATA_DELETION_POLICY_VERSION is required when account-data deletion is enabled."
+        )
     if not is_production_environment():
         return
     app_secret = get_app_secret()
@@ -3056,7 +3221,7 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
             (customer_id,),
         ).fetchall()
         manifest = {
-            "format_version": 2,
+            "format_version": 3,
             "generated_at": timestamp_now(),
             "customer": {} if user_row is None else dict(user_row),
             "billing": {} if billing_row is None else dict(billing_row),
@@ -3110,6 +3275,16 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
                 """,
                 (account_id, customer_id),
             ).fetchall()
+            request_rows = conn.execute(
+                """
+                SELECT request_type, status, requested_at, canceled_at,
+                       reviewed_at, completed_at, policy_version
+                FROM account_data_requests
+                WHERE account_id = ? AND customer_user_id = ?
+                ORDER BY created_at, id
+                """,
+                (account_id, customer_id),
+            ).fetchall()
             import_rows = conn.execute(
                 """
                 SELECT path, interval_count, imported_at, service_point_id
@@ -3142,6 +3317,7 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
                 "inventory": [dict(row) for row in inventory_rows],
                 "utility_connections": [dict(row) for row in connection_rows],
                 "data_authorizations": [dict(row) for row in authorization_rows],
+                "data_requests": [dict(row) for row in request_rows],
                 "imports": imports,
             }
             archive.writestr(f"{prefix}/profile.json", customer_export_json(profile))
@@ -4506,6 +4682,506 @@ def revoke_account_data_authorization(
     if authorization is None:
         raise RuntimeError("The data permission could not be updated.")
     return authorization
+
+
+DATA_REQUEST_STATUS_LABELS = {
+    "pending": "Waiting for review",
+    "approved": "Approved, awaiting deletion",
+    "denied": "Not approved",
+    "canceled": "Canceled",
+    "completed": "Completed",
+    "cleanup_required": "Completed with file cleanup required",
+    "superseded_deletion": "Closed by account deletion",
+}
+
+
+def serialize_account_data_request(row) -> dict[str, object] | None:
+    if row is None:
+        return None
+    mapping = dict(row)
+    status = str(mapping["status"])
+    return {
+        "id": int(mapping["id"]),
+        "account_id": int(mapping["account_id"]),
+        "account_number": mapping.get("account_number") or "",
+        "account_name": mapping.get("account_name") or "Deleted account",
+        "customer_user_id": int(mapping["customer_user_id"]),
+        "customer_email": mapping.get("customer_email") or "",
+        "customer_name": mapping.get("customer_name") or "",
+        "request_type": mapping["request_type"],
+        "status": status,
+        "status_label": DATA_REQUEST_STATUS_LABELS.get(status, status.replace("_", " ").title()),
+        "requested_at": mapping["requested_at"],
+        "canceled_at": mapping.get("canceled_at"),
+        "reviewed_at": mapping.get("reviewed_at"),
+        "reviewed_by_name": mapping.get("reviewed_by_name") or "",
+        "review_note": mapping.get("review_note") or "",
+        "completed_at": mapping.get("completed_at"),
+        "completed_by_name": mapping.get("completed_by_name") or "",
+        "policy_version": mapping.get("policy_version") or "",
+        "completion_note": mapping.get("completion_note") or "",
+        "legal_hold_active": mapping.get("legal_hold_id") is not None,
+        "legal_hold_id": int(mapping["legal_hold_id"]) if mapping.get("legal_hold_id") is not None else None,
+        "legal_hold_reason": mapping.get("legal_hold_reason") or "",
+        "can_cancel": status in {"pending", "approved"},
+        "can_review": status == "pending",
+        "can_execute": status == "approved" and mapping.get("legal_hold_id") is None,
+    }
+
+
+DATA_REQUEST_SELECT = """
+    SELECT account_data_requests.*,
+           accounts.account_number,
+           accounts.display_name AS account_name,
+           customer_users.email AS customer_email,
+           customer_users.full_name AS customer_name,
+           reviewer.full_name AS reviewed_by_name,
+           completer.full_name AS completed_by_name,
+           active_hold.id AS legal_hold_id,
+           active_hold.reason AS legal_hold_reason
+    FROM account_data_requests
+    JOIN accounts ON accounts.id = account_data_requests.account_id
+    JOIN customer_users ON customer_users.id = account_data_requests.customer_user_id
+    LEFT JOIN staff_users AS reviewer ON reviewer.id = account_data_requests.reviewed_by_staff_id
+    LEFT JOIN staff_users AS completer ON completer.id = account_data_requests.completed_by_staff_id
+    LEFT JOIN account_legal_holds AS active_hold
+      ON active_hold.account_id = account_data_requests.account_id
+     AND active_hold.status = 'active'
+"""
+
+
+def get_account_data_request(request_id: int) -> dict[str, object] | None:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            f"{DATA_REQUEST_SELECT} WHERE account_data_requests.id = ?",
+            (int(request_id),),
+        ).fetchone()
+    return serialize_account_data_request(row)
+
+
+def list_customer_data_requests(customer_user_id: int) -> list[dict[str, object]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"""
+            {DATA_REQUEST_SELECT}
+            WHERE account_data_requests.customer_user_id = ?
+            ORDER BY account_data_requests.id DESC
+            """,
+            (int(customer_user_id),),
+        ).fetchall()
+    return [item for row in rows if (item := serialize_account_data_request(row)) is not None]
+
+
+def list_account_data_requests(status: str | None = None) -> list[dict[str, object]]:
+    normalized_status = (status or "").strip().lower()
+    params: tuple[object, ...] = ()
+    where_clause = ""
+    if normalized_status:
+        if normalized_status not in DATA_REQUEST_STATUS_LABELS:
+            raise ValueError("Choose a valid data-request status.")
+        where_clause = "WHERE account_data_requests.status = ?"
+        params = (normalized_status,)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"""
+            {DATA_REQUEST_SELECT}
+            {where_clause}
+            ORDER BY
+                CASE account_data_requests.status
+                    WHEN 'pending' THEN 0
+                    WHEN 'approved' THEN 1
+                    WHEN 'cleanup_required' THEN 2
+                    ELSE 3
+                END,
+                account_data_requests.id DESC
+            """,
+            params,
+        ).fetchall()
+    return [item for row in rows if (item := serialize_account_data_request(row)) is not None]
+
+
+def create_account_deletion_request(account_number: str | None, customer_user_id: int) -> dict[str, object]:
+    requested_at = timestamp_now()
+    with get_db_connection() as conn:
+        account = conn.execute(
+            "SELECT id FROM accounts WHERE account_number = ?",
+            (normalize_account_number(account_number),),
+        ).fetchone()
+        if account is None:
+            raise ValueError("That electric account could not be found.")
+        account_id = int(account["id"])
+        ensure_customer_manages_account(
+            conn,
+            account_id=account_id,
+            customer_user_id=int(customer_user_id),
+        )
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM account_data_requests
+            WHERE account_id = ? AND customer_user_id = ?
+              AND request_type = 'delete_account_data'
+              AND status IN ('pending', 'approved')
+            """,
+            (account_id, int(customer_user_id)),
+        ).fetchone()
+        if existing is not None:
+            raise ValueError("A deletion request is already open for this account.")
+        insert_sql = """
+            INSERT INTO account_data_requests (
+                account_id, customer_user_id, request_type, status,
+                requested_at, created_at, updated_at
+            )
+            VALUES (?, ?, 'delete_account_data', 'pending', ?, ?, ?)
+        """
+        values = (account_id, int(customer_user_id), requested_at, requested_at, requested_at)
+        if conn.kind == "postgres":
+            row = conn.execute(f"{insert_sql} RETURNING id", values).fetchone()
+            request_id = int(row["id"])
+        else:
+            cursor = conn.execute(insert_sql, values)
+            request_id = int(cursor.lastrowid)
+    saved = get_account_data_request(request_id)
+    if saved is None:
+        raise RuntimeError("The deletion request could not be saved.")
+    return saved
+
+
+def cancel_account_deletion_request(request_id: int, customer_user_id: int) -> dict[str, object]:
+    canceled_at = timestamp_now()
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE account_data_requests
+            SET status = 'canceled', canceled_at = ?, updated_at = ?
+            WHERE id = ? AND customer_user_id = ? AND status IN ('pending', 'approved')
+            """,
+            (canceled_at, canceled_at, int(request_id), int(customer_user_id)),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("That deletion request can no longer be canceled.")
+    saved = get_account_data_request(request_id)
+    if saved is None:
+        raise RuntimeError("The deletion request could not be updated.")
+    return saved
+
+
+def review_account_deletion_request(
+    request_id: int,
+    staff_user_id: int,
+    decision: str,
+    review_note: str | None = None,
+) -> dict[str, object]:
+    normalized_decision = (decision or "").strip().lower()
+    if normalized_decision not in {"approve", "deny"}:
+        raise ValueError("Choose whether to approve or deny this request.")
+    normalized_note = (review_note or "").strip()[:1000]
+    if normalized_decision == "deny" and not normalized_note:
+        raise ValueError("Explain why this request is not being approved.")
+    reviewed_at = timestamp_now()
+    with get_db_connection() as conn:
+        request_row = conn.execute(
+            "SELECT account_id, status FROM account_data_requests WHERE id = ?",
+            (int(request_id),),
+        ).fetchone()
+        if request_row is None or request_row["status"] != "pending":
+            raise ValueError("That deletion request is no longer waiting for review.")
+        if normalized_decision == "approve":
+            hold = conn.execute(
+                "SELECT id FROM account_legal_holds WHERE account_id = ? AND status = 'active'",
+                (int(request_row["account_id"]),),
+            ).fetchone()
+            if hold is not None:
+                raise ValueError("Release the legal hold before approving deletion.")
+        status = "approved" if normalized_decision == "approve" else "denied"
+        conn.execute(
+            """
+            UPDATE account_data_requests
+            SET status = ?, reviewed_at = ?, reviewed_by_staff_id = ?,
+                review_note = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, reviewed_at, int(staff_user_id), normalized_note or None, reviewed_at, int(request_id)),
+        )
+    saved = get_account_data_request(request_id)
+    if saved is None:
+        raise RuntimeError("The deletion request could not be updated.")
+    return saved
+
+
+def serialize_account_legal_hold(row) -> dict[str, object] | None:
+    if row is None:
+        return None
+    mapping = dict(row)
+    return {
+        "id": int(mapping["id"]),
+        "account_id": int(mapping["account_id"]),
+        "account_number": mapping.get("account_number") or "",
+        "account_name": mapping.get("account_name") or "Deleted account",
+        "status": mapping["status"],
+        "reason": mapping["reason"],
+        "placed_by_name": mapping.get("placed_by_name") or "",
+        "placed_at": mapping["placed_at"],
+        "released_by_name": mapping.get("released_by_name") or "",
+        "released_at": mapping.get("released_at"),
+    }
+
+
+LEGAL_HOLD_SELECT = """
+    SELECT account_legal_holds.*,
+           accounts.account_number,
+           accounts.display_name AS account_name,
+           placer.full_name AS placed_by_name,
+           releaser.full_name AS released_by_name
+    FROM account_legal_holds
+    JOIN accounts ON accounts.id = account_legal_holds.account_id
+    JOIN staff_users AS placer ON placer.id = account_legal_holds.placed_by_staff_id
+    LEFT JOIN staff_users AS releaser ON releaser.id = account_legal_holds.released_by_staff_id
+"""
+
+
+def list_account_legal_holds(*, active_only: bool = False) -> list[dict[str, object]]:
+    where_clause = "WHERE account_legal_holds.status = 'active'" if active_only else ""
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            f"""
+            {LEGAL_HOLD_SELECT}
+            {where_clause}
+            ORDER BY account_legal_holds.id DESC
+            """
+        ).fetchall()
+    return [item for row in rows if (item := serialize_account_legal_hold(row)) is not None]
+
+
+def place_account_legal_hold(account_number: str | None, staff_user_id: int, reason: str | None) -> dict[str, object]:
+    normalized_reason = (reason or "").strip()[:1000]
+    if len(normalized_reason) < 10:
+        raise ValueError("Explain the legal or dispute reason for this hold.")
+    placed_at = timestamp_now()
+    with get_db_connection() as conn:
+        account = conn.execute(
+            "SELECT id FROM accounts WHERE account_number = ?",
+            (normalize_account_number(account_number),),
+        ).fetchone()
+        if account is None:
+            raise ValueError("That electric account could not be found.")
+        existing = conn.execute(
+            "SELECT id FROM account_legal_holds WHERE account_id = ? AND status = 'active'",
+            (int(account["id"]),),
+        ).fetchone()
+        if existing is not None:
+            raise ValueError("This account already has an active legal hold.")
+        insert_sql = """
+            INSERT INTO account_legal_holds (
+                account_id, status, reason, placed_by_staff_id,
+                placed_at, created_at, updated_at
+            )
+            VALUES (?, 'active', ?, ?, ?, ?, ?)
+        """
+        values = (int(account["id"]), normalized_reason, int(staff_user_id), placed_at, placed_at, placed_at)
+        if conn.kind == "postgres":
+            row = conn.execute(f"{insert_sql} RETURNING id", values).fetchone()
+            hold_id = int(row["id"])
+        else:
+            cursor = conn.execute(insert_sql, values)
+            hold_id = int(cursor.lastrowid)
+    return next(hold for hold in list_account_legal_holds() if int(hold["id"]) == hold_id)
+
+
+def release_account_legal_hold(hold_id: int, staff_user_id: int) -> dict[str, object]:
+    released_at = timestamp_now()
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE account_legal_holds
+            SET status = 'released', released_by_staff_id = ?, released_at = ?, updated_at = ?
+            WHERE id = ? AND status = 'active'
+            """,
+            (int(staff_user_id), released_at, released_at, int(hold_id)),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("That legal hold is no longer active.")
+    return next(hold for hold in list_account_legal_holds() if int(hold["id"]) == int(hold_id))
+
+
+def managed_account_file(base_dir: Path, raw_path: str | Path) -> Path | None:
+    base = base_dir.resolve()
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    resolved = candidate.resolve()
+    if resolved == base or not resolved.is_relative_to(base):
+        return None
+    return resolved
+
+
+def account_managed_files(conn: DatabaseConnection, account_id: int) -> list[Path]:
+    paths: set[Path] = set()
+    input_rows = conn.execute(
+        """
+        SELECT path AS managed_path FROM imported_files WHERE account_id = ?
+        UNION
+        SELECT source_path AS managed_path FROM interval_readings WHERE account_id = ?
+        """,
+        (int(account_id), int(account_id)),
+    ).fetchall()
+    for row in input_rows:
+        raw_path = str(row["managed_path"] or "")
+        if not raw_path:
+            continue
+        other_reference = conn.execute(
+            """
+            SELECT (
+                (SELECT COUNT(*) FROM imported_files WHERE account_id != ? AND path = ?)
+                +
+                (SELECT COUNT(*) FROM interval_readings WHERE account_id != ? AND source_path = ?)
+            ) AS count
+            """,
+            (int(account_id), raw_path, int(account_id), raw_path),
+        ).fetchone()
+        if int(other_reference["count"] if other_reference is not None else 0) == 0:
+            path = managed_account_file(INPUT_DIR, raw_path)
+            if path is not None:
+                paths.add(path)
+    report_rows = conn.execute(
+        "SELECT filename FROM report_artifacts WHERE account_id = ?",
+        (int(account_id),),
+    ).fetchall()
+    for row in report_rows:
+        path = managed_account_file(OUTPUT_DIR, normalize_report_filename(str(row["filename"])))
+        if path is not None:
+            paths.add(path)
+    return sorted(paths, key=lambda path: str(path))
+
+
+def execute_account_data_deletion(request_id: int, staff_user_id: int) -> dict[str, object]:
+    execution = data_deletion_execution_status()
+    if not execution["enabled"]:
+        raise ValueError("Data deletion remains paused until an approved retention policy is configured.")
+    completed_at = timestamp_now()
+    quarantined_files: list[tuple[Path, Path]] = []
+    account_id = 0
+    deleted_account_number = ""
+    deleted_counts: dict[str, int] = {}
+    try:
+        with get_db_connection() as conn:
+            request_row = conn.execute(
+                """
+                SELECT account_id, status
+                FROM account_data_requests
+                WHERE id = ?
+                """,
+                (int(request_id),),
+            ).fetchone()
+            if request_row is None or request_row["status"] != "approved":
+                raise ValueError("That deletion request is not approved for execution.")
+            account_id = int(request_row["account_id"])
+            hold = conn.execute(
+                "SELECT id FROM account_legal_holds WHERE account_id = ? AND status = 'active'",
+                (account_id,),
+            ).fetchone()
+            if hold is not None:
+                raise ValueError("This account cannot be deleted while a legal hold is active.")
+
+            for original_path in account_managed_files(conn, account_id):
+                if not original_path.is_file():
+                    continue
+                quarantine_path = original_path.with_name(
+                    f".{original_path.name}.deleting-{int(request_id)}-{uuid4().hex[:8]}"
+                )
+                original_path.replace(quarantine_path)
+                quarantined_files.append((original_path, quarantine_path))
+
+            tables = (
+                "imported_files",
+                "interval_readings",
+                "account_load_items",
+                "household_profiles",
+                "weather_daily_cache",
+                "account_access_emails",
+                "utility_connections",
+                "report_artifacts",
+            )
+            for table in tables:
+                cursor = conn.execute(f"DELETE FROM {table} WHERE account_id = ?", (account_id,))
+                deleted_counts[table] = int(cursor.rowcount or 0)
+            conn.execute(
+                """
+                UPDATE account_data_authorizations
+                SET status = CASE WHEN status = 'active' THEN 'revoked_deletion' ELSE status END,
+                    revoked_at = CASE WHEN status = 'active' THEN ? ELSE revoked_at END,
+                    remote_hash = NULL, user_agent_hash = NULL, updated_at = ?
+                WHERE account_id = ?
+                """,
+                (completed_at, completed_at, account_id),
+            )
+            conn.execute(
+                """
+                UPDATE account_data_requests
+                SET status = 'superseded_deletion', updated_at = ?
+                WHERE account_id = ? AND id != ? AND status IN ('pending', 'approved')
+                """,
+                (completed_at, account_id, int(request_id)),
+            )
+            deleted_account_number = f"deleted-{account_id}-{secrets.token_hex(6)}"
+            conn.execute(
+                """
+                UPDATE accounts
+                SET account_number = ?, display_name = 'Deleted account',
+                    energy_company = NULL, baseline_date = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (deleted_account_number, completed_at, account_id),
+            )
+            conn.execute(
+                """
+                UPDATE account_data_requests
+                SET status = 'completed', completed_at = ?, completed_by_staff_id = ?,
+                    policy_version = ?, completion_note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    completed_at,
+                    int(staff_user_id),
+                    str(execution["policy_version"]),
+                    "Account data was deleted and the retained compliance record was pseudonymized.",
+                    completed_at,
+                    int(request_id),
+                ),
+            )
+    except Exception:
+        for original_path, quarantine_path in reversed(quarantined_files):
+            if quarantine_path.exists() and not original_path.exists():
+                quarantine_path.replace(original_path)
+        raise
+
+    cleanup_failures = 0
+    for _, quarantine_path in quarantined_files:
+        try:
+            quarantine_path.unlink(missing_ok=True)
+        except OSError:
+            cleanup_failures += 1
+    if cleanup_failures:
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                UPDATE account_data_requests
+                SET status = 'cleanup_required', completion_note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    f"Account data was removed from the application; {cleanup_failures} quarantined file(s) need operator cleanup.",
+                    timestamp_now(),
+                    int(request_id),
+                ),
+            )
+    result = get_account_data_request(request_id)
+    if result is None:
+        raise RuntimeError("The completed deletion record could not be loaded.")
+    result["deleted_counts"] = deleted_counts
+    result["deleted_account_number"] = deleted_account_number
+    result["cleanup_failures"] = cleanup_failures
+    return result
 
 
 def build_secret_hash(value: str | None) -> str | None:
@@ -9654,6 +10330,78 @@ def create_web_app() -> Flask:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.get("/customer/data-requests")
+    def customer_data_requests_page():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        data_requests = list_customer_data_requests(int(customer_user["id"]))
+        open_by_account = {
+            int(item["account_id"]): item
+            for item in data_requests
+            if item["status"] in {"pending", "approved"}
+        }
+        customer_accounts: list[dict[str, object]] = []
+        for account in customer_export_accounts(str(customer_user["email"])):
+            account_copy = dict(account)
+            account_copy["open_data_request"] = open_by_account.get(int(account_copy["id"]))
+            customer_accounts.append(account_copy)
+        return render_template(
+            "customer_data_requests.html",
+            customer_accounts=customer_accounts,
+            data_requests=data_requests,
+            customer_mode=True,
+            page_title="My Data",
+        )
+
+    @app.post("/customer/data-requests")
+    def request_account_deletion():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        account_number = request.form.get("account_number")
+        if not form_checkbox_checked(request.form.get("confirm_deletion_request")):
+            flash("Confirm that you want this account's stored data reviewed for deletion.")
+            return redirect(url_for("customer_data_requests_page"))
+        try:
+            saved = create_account_deletion_request(account_number, int(customer_user["id"]))
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("customer_data_requests_page"))
+        record_audit_event(
+            "customer.data_deletion_requested",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=str(saved["account_number"]),
+            target_type="account_data_request",
+            target_id=saved["id"],
+            metadata={"request_type": saved["request_type"]},
+        )
+        flash("Your deletion request was submitted for review.")
+        return redirect(url_for("customer_data_requests_page"))
+
+    @app.post("/customer/data-requests/<int:request_id>/cancel")
+    def cancel_account_deletion(request_id: int):
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        before = get_account_data_request(request_id)
+        try:
+            saved = cancel_account_deletion_request(request_id, int(customer_user["id"]))
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("customer_data_requests_page"))
+        record_audit_event(
+            "customer.data_deletion_canceled",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=str((before or saved)["account_number"]),
+            target_type="account_data_request",
+            target_id=saved["id"],
+        )
+        flash("The deletion request was canceled.")
+        return redirect(url_for("customer_data_requests_page"))
+
     @app.get("/customer/utility")
     def customer_utility_page():
         customer_user = require_customer_user()
@@ -10353,6 +11101,134 @@ def create_web_app() -> Flask:
             audit_integrity=verify_audit_chain(),
             page_title="Audit Record",
         )
+
+    @app.get("/data-requests")
+    def data_requests_page():
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        selected_status = (request.args.get("status") or "").strip().lower()
+        try:
+            data_requests = list_account_data_requests(selected_status or None)
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("data_requests_page"))
+        return render_template(
+            "data_requests.html",
+            data_requests=data_requests,
+            data_request_statuses=DATA_REQUEST_STATUS_LABELS,
+            selected_status=selected_status,
+            legal_holds=list_account_legal_holds(active_only=True),
+            deletion_execution=data_deletion_execution_status(),
+            page_title="Data Requests",
+        )
+
+    @app.post("/data-requests/<int:request_id>/review")
+    def review_data_request(request_id: int):
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        before = get_account_data_request(request_id)
+        try:
+            saved = review_account_deletion_request(
+                request_id,
+                int(staff_user["id"]),
+                request.form.get("decision") or "",
+                request.form.get("review_note"),
+            )
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("data_requests_page"))
+        record_audit_event(
+            f"customer.data_deletion_{saved['status']}",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            account_number=str((before or saved)["account_number"]),
+            target_type="account_data_request",
+            target_id=saved["id"],
+            metadata={"status": saved["status"]},
+        )
+        flash(f"The deletion request is now {saved['status_label'].lower()}.")
+        return redirect(url_for("data_requests_page"))
+
+    @app.post("/data-requests/<int:request_id>/execute")
+    def execute_data_request(request_id: int):
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        if not verify_staff_password(int(staff_user["id"]), request.form.get("password")):
+            flash("That password did not work.")
+            return redirect(url_for("data_requests_page"))
+        try:
+            saved = execute_account_data_deletion(request_id, int(staff_user["id"]))
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("data_requests_page"))
+        record_audit_event(
+            "customer.data_deletion_completed",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            account_number=str(saved["deleted_account_number"]),
+            target_type="account_data_request",
+            target_id=saved["id"],
+            metadata={
+                "policy_version": saved["policy_version"],
+                "cleanup_failures": saved["cleanup_failures"],
+                "deleted_rows": sum(int(value) for value in saved["deleted_counts"].values()),
+            },
+        )
+        flash("The approved account data was deleted.")
+        return redirect(url_for("data_requests_page"))
+
+    @app.post("/data-holds")
+    def place_legal_hold():
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        try:
+            hold = place_account_legal_hold(
+                request.form.get("account_number"),
+                int(staff_user["id"]),
+                request.form.get("reason"),
+            )
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("data_requests_page"))
+        record_audit_event(
+            "account.legal_hold_placed",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            account_number=str(hold["account_number"]),
+            target_type="account_legal_hold",
+            target_id=hold["id"],
+        )
+        flash("The legal hold is active.")
+        return redirect(url_for("data_requests_page"))
+
+    @app.post("/data-holds/<int:hold_id>/release")
+    def release_legal_hold(hold_id: int):
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        before = next(
+            (item for item in list_account_legal_holds() if int(item["id"]) == int(hold_id)),
+            None,
+        )
+        try:
+            hold = release_account_legal_hold(hold_id, int(staff_user["id"]))
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect(url_for("data_requests_page"))
+        record_audit_event(
+            "account.legal_hold_released",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            account_number=str((before or hold)["account_number"]),
+            target_type="account_legal_hold",
+            target_id=hold["id"],
+        )
+        flash("The legal hold was released.")
+        return redirect(url_for("data_requests_page"))
 
     @app.get("/audit/export.csv")
     def audit_export():

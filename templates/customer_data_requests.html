@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout">
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Your information</p>
+          <h2>Download or delete your account data.</h2>
+          <p class="plain-note">Download a copy at any time. A deletion request is reviewed before anything is removed.</p>
+        </div>
+        <a class="button-link" href="{{ url_for('customer_data_export') }}">Download my data</a>
+      </div>
+
+      {% if customer_accounts %}
+        <div class="table-wrap data-request-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Electric account</th>
+                <th>Access</th>
+                <th>Deletion request</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for account in customer_accounts %}
+                <tr>
+                  <td data-label="Electric account">
+                    <strong>{{ account.display_name }}</strong>
+                    <div class="table-note">{{ account.account_number }}</div>
+                  </td>
+                  <td data-label="Access">{{ account.access_level }}</td>
+                  <td data-label="Deletion request">
+                    {% if account.open_data_request %}
+                      <span class="pill">{{ account.open_data_request.status_label }}</span>
+                      <div class="table-note">Requested {{ account.open_data_request.requested_at|replace("T", " ") }}</div>
+                      {% if account.open_data_request.legal_hold_active %}
+                        <div class="table-note">Deletion is paused under a retention requirement.</div>
+                      {% endif %}
+                    {% else %}
+                      No open request
+                    {% endif %}
+                  </td>
+                  <td class="action-cell" data-label="Action">
+                    {% if account.open_data_request and account.open_data_request.can_cancel %}
+                      <form action="{{ url_for('cancel_account_deletion', request_id=account.open_data_request.id) }}" method="post">
+                        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="button-secondary button-small">Cancel request</button>
+                      </form>
+                    {% elif account.access_level == "Manager" %}
+                      <form action="{{ url_for('request_account_deletion') }}" method="post">
+                        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="account_number" value="{{ account.account_number }}">
+                        <label class="checkbox-field compact-confirmation">
+                          <input type="checkbox" name="confirm_deletion_request" value="yes" required>
+                          <span>Ask to delete this account's stored data</span>
+                        </label>
+                        <button type="submit" class="button-secondary button-small">Submit request</button>
+                      </form>
+                    {% else %}
+                      <span class="table-note">A manager can submit this request.</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty-note">No electric accounts are connected to this sign-in.</p>
+      {% endif %}
+    </section>
+
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Request history</p>
+          <h2>What happened with each request.</h2>
+          <p class="plain-note">Security, billing, dispute, and legal records may be retained when required.</p>
+        </div>
+      </div>
+
+      {% if data_requests %}
+        <div class="table-wrap compact-table data-request-history">
+          <table>
+            <thead>
+              <tr>
+                <th>Account</th>
+                <th>Status</th>
+                <th>Requested</th>
+                <th>Reviewed</th>
+                <th>Completed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in data_requests %}
+                <tr>
+                  <td data-label="Account">{{ item.account_name }}<div class="table-note">{{ item.account_number }}</div></td>
+                  <td data-label="Status">{{ item.status_label }}</td>
+                  <td data-label="Requested">{{ item.requested_at|replace("T", " ") }}</td>
+                  <td data-label="Reviewed">{{ item.reviewed_at|replace("T", " ") if item.reviewed_at else "-" }}</td>
+                  <td data-label="Completed">{{ item.completed_at|replace("T", " ") if item.completed_at else "-" }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty-note">No deletion requests have been submitted.</p>
+      {% endif %}
+    </section>
+  </main>
+{% endblock %}

@@ -28,6 +28,11 @@ class OmenDeployContractTest(unittest.TestCase):
         self.assertIn("-e POWER_DATA_ENCRYPTION_KEY=$POWER_DATA_ENCRYPTION_KEY_Q", script_text)
         self.assertIn("-e POWER_TRUST_PROXY=$POWER_TRUST_PROXY_Q", script_text)
         self.assertIn("-e POWER_STAFF_MFA_REQUIRED=$POWER_STAFF_MFA_REQUIRED_Q", script_text)
+        self.assertIn("-e POWER_DATA_DELETION_ENABLED=$POWER_DATA_DELETION_ENABLED_Q", script_text)
+        self.assertIn(
+            "-e POWER_DATA_DELETION_POLICY_VERSION=$POWER_DATA_DELETION_POLICY_VERSION_Q",
+            script_text,
+        )
         self.assertIn("-e POWER_EMAIL_BACKEND=$POWER_EMAIL_BACKEND_Q", script_text)
         self.assertIn("-e POWER_EMAIL_FROM=$POWER_EMAIL_FROM_Q", script_text)
         self.assertIn("-e POWER_EMAIL_REGION=$POWER_EMAIL_REGION_Q", script_text)

@@ -79,6 +79,8 @@ The straight-to-production shape is:
 - `POWER_MARKETING_HOSTS`
 - `POWER_TRUST_PROXY`
 - `POWER_STAFF_MFA_REQUIRED`
+- `POWER_DATA_DELETION_ENABLED`
+- `POWER_DATA_DELETION_POLICY_VERSION`
 - `POWER_EMAIL_BACKEND`
 - `POWER_EMAIL_FROM`
 - `POWER_EMAIL_REPLY_TO`
@@ -109,6 +111,8 @@ For production, set:
 - `POWER_STAFF_MFA_REQUIRED=true` after commission users are ready to enroll an authenticator
 
 Production startup fails closed when the app secret, audit-signing key, HTTPS public URL, or data-encryption key is missing or unsafe. Keep every secret value in the runtime secret store or ignored production env file. The audit-signing key must remain stable across deploys so commissioners can verify the full activity record.
+
+Customer deletion requests and legal holds are available to commissioners, but account-data erasure defaults to paused. Keep `POWER_DATA_DELETION_ENABLED=false` until an approved retention policy exists. To allow execution, set it to `true` and set `POWER_DATA_DELETION_POLICY_VERSION` to the exact approved policy version; startup rejects an enabled switch without that version.
 
 Production also requires a Postgres URL with TLS enabled, such as `?sslmode=require`. The RDS instance should be private, encrypted at rest, protected from deletion, and backed up automatically.
 

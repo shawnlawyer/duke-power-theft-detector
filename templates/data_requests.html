@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout">
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Data lifecycle</p>
+          <h2>Customer deletion requests.</h2>
+          <p class="plain-note">Review each request, preserve required records, and stop deletion whenever a legal hold applies.</p>
+        </div>
+        <div>
+          {% if deletion_execution.enabled %}
+            <span class="pill">Deletion enabled</span>
+            <p class="table-note">Policy {{ deletion_execution.policy_version }}</p>
+          {% else %}
+            <span class="pill">Deletion paused</span>
+            <p class="table-note">An approved policy version and production switch are required.</p>
+          {% endif %}
+        </div>
+      </div>
+
+      <form class="account-search-form" action="{{ url_for('data_requests_page') }}" method="get">
+        <label>
+          <span>Status</span>
+          <select name="status">
+            <option value="">All requests</option>
+            {% for value, label in data_request_statuses.items() %}
+              <option value="{{ value }}" {% if selected_status == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit">Filter requests</button>
+      </form>
+
+      {% if data_requests %}
+        <div class="table-wrap lifecycle-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Customer</th>
+                <th>Account</th>
+                <th>Status</th>
+                <th>Dates</th>
+                <th>Review</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in data_requests %}
+                <tr>
+                  <td data-label="Customer">{{ item.customer_name }}<div class="table-note">{{ item.customer_email }}</div></td>
+                  <td data-label="Account">{{ item.account_name }}<div class="table-note">{{ item.account_number }}</div></td>
+                  <td data-label="Status">
+                    <span class="pill">{{ item.status_label }}</span>
+                    {% if item.legal_hold_active %}<div class="table-note">Legal hold active</div>{% endif %}
+                    {% if item.policy_version %}<div class="table-note">Policy {{ item.policy_version }}</div>{% endif %}
+                  </td>
+                  <td data-label="Dates">
+                    Requested {{ item.requested_at|replace("T", " ") }}
+                    {% if item.reviewed_at %}<div class="table-note">Reviewed {{ item.reviewed_at|replace("T", " ") }}</div>{% endif %}
+                    {% if item.completed_at %}<div class="table-note">Completed {{ item.completed_at|replace("T", " ") }}</div>{% endif %}
+                  </td>
+                  <td class="lifecycle-actions" data-label="Review">
+                    {% if item.can_review %}
+                      <form action="{{ url_for('review_data_request', request_id=item.id) }}" method="post">
+                        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="decision" value="approve">
+                        <label>
+                          <span>Review note</span>
+                          <input type="text" name="review_note" maxlength="1000" placeholder="Optional approval note">
+                        </label>
+                        <button type="submit" {% if item.legal_hold_active %}disabled{% endif %}>Approve</button>
+                      </form>
+                      <form action="{{ url_for('review_data_request', request_id=item.id) }}" method="post">
+                        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                        <input type="hidden" name="decision" value="deny">
+                        <label>
+                          <span>Reason</span>
+                          <input type="text" name="review_note" maxlength="1000" required>
+                        </label>
+                        <button type="submit" class="button-secondary">Deny</button>
+                      </form>
+                    {% elif item.can_execute %}
+                      {% if deletion_execution.enabled %}
+                        <form action="{{ url_for('execute_data_request', request_id=item.id) }}" method="post">
+                          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                          <label>
+                            <span>Confirm your password</span>
+                            <input type="password" name="password" autocomplete="current-password" required>
+                          </label>
+                          <button type="submit">Delete account data</button>
+                        </form>
+                      {% else %}
+                        <span class="table-note">Execution is paused until the approved policy is configured.</span>
+                      {% endif %}
+                    {% else %}
+                      {% if item.review_note %}<div>{{ item.review_note }}</div>{% endif %}
+                      {% if item.completion_note %}<div class="table-note">{{ item.completion_note }}</div>{% endif %}
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty-note">No deletion requests match this view.</p>
+      {% endif %}
+    </section>
+
+    <section class="section-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Preservation</p>
+          <h2>Legal holds.</h2>
+          <p class="plain-note">Use a hold when litigation, a dispute, an investigation, or another documented duty requires preservation.</p>
+        </div>
+      </div>
+
+      <form class="account-form" action="{{ url_for('place_legal_hold') }}" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <div class="field-grid">
+          <label>
+            <span>Electric account number</span>
+            <input type="text" name="account_number" required>
+          </label>
+          <label class="wide-field">
+            <span>Reason for preservation</span>
+            <input type="text" name="reason" minlength="10" maxlength="1000" required>
+          </label>
+        </div>
+        <button type="submit">Place legal hold</button>
+      </form>
+
+      {% if legal_holds %}
+        <div class="table-wrap compact-table legal-hold-table">
+          <table>
+            <thead><tr><th>Account</th><th>Reason</th><th>Placed</th><th></th></tr></thead>
+            <tbody>
+              {% for hold in legal_holds %}
+                <tr>
+                  <td data-label="Account">{{ hold.account_name }}<div class="table-note">{{ hold.account_number }}</div></td>
+                  <td data-label="Reason">{{ hold.reason }}</td>
+                  <td data-label="Placed">{{ hold.placed_at|replace("T", " ") }}<div class="table-note">{{ hold.placed_by_name }}</div></td>
+                  <td class="action-cell" data-label="Action">
+                    <form action="{{ url_for('release_legal_hold', hold_id=hold.id) }}" method="post">
+                      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                      <button type="submit" class="button-secondary button-small">Release hold</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty-note">No active legal holds.</p>
+      {% endif %}
+    </section>
+  </main>
+{% endblock %}
