@@ -10,15 +10,17 @@ This ledger separates implemented controls from production proof and approval-ga
 - Commission sign-in requires TOTP MFA. Secrets are encrypted, codes cannot be replayed, and one-time recovery codes are stored only as hashes.
 - Commissioners can invite, suspend, reactivate, and change access for other staff members. They can reset another staff member's authenticator after confirmation; the reset destroys recovery codes, revokes sessions, and requires fresh enrollment without changing the password, role, or active status. Self-reset and self-lockout are blocked.
 - Customer account reads and writes are checked against account access records.
-- Customers can download a ZIP archive of every authorized account, profile, inventory item, interval, weather record, and generated report. Credentials, password fields, Stripe internals, internal paths, and unauthorized accounts are excluded.
+- Customer signup records the accepted Terms and Privacy Notice versions, the utility-data authorization version and scope, and hashed request evidence. Authorization grants, withdrawals, superseded grants, and access-removal revocations are retained as an append-only account history.
+- History uploads, comparisons, saved utility connections, and utility sync require an active customer authorization. Withdrawal erases saved utility credentials when no active authorization remains.
+- Customers can download a ZIP archive of every authorized account, profile, inventory item, interval, weather record, generated report, policy acceptance, and utility-data authorization. Credentials, password fields, Stripe internals, technical request hashes, internal paths, and unauthorized accounts are excluded.
 - CSRF protection covers state-changing browser requests. Stripe webhooks require provider signatures instead.
 - Production sessions use secure, HTTP-only, same-site cookies and the app emits browser security headers.
 - Utility access secrets use authenticated encryption at rest.
 - Audit records form a keyed hash chain. Commissioners can verify and export the filtered record; export stops when integrity fails.
-- Direct Stripe operations remain backend-only. No live charge or refund is part of automated verification.
+- Direct Stripe operations remain backend-only. `POWER_BILLING_ENABLED=false` keeps checkout closed until Home Energy Watch prices and matching Stripe Price IDs are approved, even if stale Stripe configuration remains. No live charge or refund is part of automated verification.
 - The release image uses a digest-pinned Python base and a fully hashed dependency lock. Runtime packaging tools are removed after installation.
-- The release-security gate runs the complete test suite, `pip-audit`, and a digest-pinned Trivy scan that fails on fixed high or critical findings. The local gate passed all 107 tests with no known dependency vulnerabilities and zero high or critical container findings.
-- Local, Omen staging, and EC2 candidate images pass the complete 107-test automated suite.
+- The release-security gate runs the complete test suite, `pip-audit`, and a digest-pinned Trivy scan that fails on fixed high or critical findings. The local gate passed all 114 tests with no known dependency vulnerabilities and zero high or critical container findings.
+- Local, Omen staging, and EC2 candidate images pass the complete 114-test automated suite.
 
 ## Production proof verified on 2026-07-21
 
@@ -30,11 +32,16 @@ This ledger separates implemented controls from production proof and approval-ga
 - `POWER_STAFF_MFA_REQUIRED=true` is active. All three existing staff accounts are intact and will enroll on their next sign-in.
 - The commissioner authenticator-recovery route is live and redirects unauthenticated requests to commission sign-in.
 - The customer data archive is live and redirects anonymous requests to customer sign-in.
-- The hardened production image `sha256:926ec5877d6cd839bc5baad4b372e309d748b12d55bd7aa0337888c03b57773d` passed all 107 tests on EC2 before promotion. The running container is healthy, required MFA remains active, its audit chain is valid, and runtime packaging tools are absent.
+- Public Terms, Privacy Notice, and utility-data permission pages are live. Signup requires policy acceptance and confirmation that the customer controls the utility account.
+- RDS contains `customer_policy_acceptances`, `account_data_authorizations`, the account/status lookup index, and the partial unique active-authorization index.
+- The hardened production image `sha256:46a2e518c136409bf7a9bcc699fdd568b52098a848c5fd9f54bde34f67b5cbe2` passed all 114 tests on EC2 before promotion. The running container is healthy, required MFA remains active, its audit chain is valid, existing staff accounts are present, and runtime packaging tools are absent.
+- `POWER_BILLING_ENABLED=false` is active on Omen and production. The live pricing and signup pages contain no dollar amount, and the public pricing page exposes no checkout action while pricing is unapproved.
 - The architecture-matched x86 Omen image passed the high and critical Trivy gate with zero Debian or Python findings.
 - GitHub release-security run `29820086282` passed on pull request 1, and run `29820188538` passed after merge to `main`. Both executed the complete test, dependency-audit, and container-scan gate.
+- Customer-consent run `29822323048` passed on pull request 3, and run `29822409301` passed after merge to `main`.
+- Pricing-approval run `29823055500` passed on pull request 4. Main run `29823156913` passed on rerun after Docker Hub recovered from a transient 502 while pulling the separate audit helper image; application tests had passed on the initial attempt.
 - `main` requires pull requests and a current `verify` check. Enforcement applies to administrators; unresolved review conversations block merging, and force-pushes and branch deletion are disabled.
-- The immediately previous production image is retained as `home-energy-watch:rollback-20260721-mfa-recovery`.
+- The immediately previous production image is retained as `home-energy-watch:rollback-20260721-pricing-predeploy`.
 
 ## Last verified infrastructure state
 
@@ -55,7 +62,7 @@ Requires Shawn's approval for the maintenance window and the estimated increase 
 
 ### Live payment verification
 
-Requires explicit approval for the exact charge and refund. Automated tests use Stripe fakes and do not move money.
+Home Energy Watch pricing and matching Stripe Price IDs must be approved before enabling checkout. A later live test also requires explicit approval for the exact charge and refund. Automated tests use Stripe fakes and do not move money.
 
 ### Monitoring and durable storage
 
