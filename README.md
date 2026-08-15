@@ -4,6 +4,8 @@ Home Energy Watch is a home energy audit and review tool. It keeps customer hist
 
 Customers can download a tenant-bounded ZIP archive of their authorized account profile, inventory, interval history, weather context, and generated reports from the Account page.
 
+Future developers: start with the [Developer Guide](DEVELOPER_GUIDE.md) for the application map, data flow, auth boundaries, testing workflow, and EC2 deployment path.
+
 ## Supported utility feeds
 
 The app normalizes interval history into one internal model, then lets each utility feed plug into that model through a dedicated adapter.
