@@ -1,0 +1,18 @@
+[Unit]
+Description=Home Energy Watch
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/home-energy-watch
+ExecStart=/bin/bash /home/ubuntu/home-energy-watch/deploy/ec2/home-energy-watch-direct.sh
+ExecStop=/usr/bin/docker stop home-energy-watch
+ExecStopPost=/usr/bin/docker rm -f home-energy-watch
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

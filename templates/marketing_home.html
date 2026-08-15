@@ -1,336 +1,43 @@
 {% extends "marketing_base.html" %}
 
 {% block content %}
-  <main class="marketing-main">
-    <section class="hero-grid">
-      <div class="hero-copy">
-        <h1>See the pattern. Spot what matters.</h1>
-        <p class="hero-text">
-          Move through the utility export fast. Compare periods, switch metrics, and keep the nights that stand out
-          in view without losing the record behind them.
-        </p>
-        <div class="hero-actions">
-          <a class="button button-primary" href="{{ start_home_url }}">Start as a homeowner</a>
-          <a class="button button-secondary" href="{{ commission_login_url }}">Open commission workspace</a>
-        </div>
-        <p class="hero-note">
-          Built for households, advocates, and commissions that need a cleaner way to move from raw data to evidence.
-        </p>
-      </div>
-
-      <div class="hero-report">
-        <div class="report-card">
-          <p class="report-title">Comparison snapshot</p>
-          <div class="report-metrics">
-            <article>
-              <span>Total kWh</span>
-              <strong>1,842</strong>
-              <small>+14.8%</small>
-            </article>
-            <article>
-              <span>Overnight baseline</span>
-              <strong>1.22 kW</strong>
-              <small>+0.31 kW</small>
-            </article>
-            <article>
-              <span>Flagged nights</span>
-              <strong>11</strong>
-              <small>+5 nights</small>
-            </article>
-          </div>
-          <table class="report-table">
-            <thead>
-              <tr>
-                <th>Period</th>
-                <th>Total kWh</th>
-                <th>Night baseline</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Jan 2025</td>
-                <td>812</td>
-                <td>0.91 kW</td>
-              </tr>
-              <tr>
-                <td>Jan 2026</td>
-                <td>932</td>
-                <td>1.22 kW</td>
-              </tr>
-              <tr>
-                <td>Reviewer note</td>
-                <td colspan="2">Late-month overnight load stayed elevated after the baseline shift.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
+  <main class="marketing-main sharp-home">
+    <section class="sharp-context-strip" aria-label="Review context">
+      <div><span>Starts with</span><strong>Utility exports and usage history</strong></div>
+      <div><span>Checks against</span><strong>Weather and household load</strong></div>
+      <div><span>Keeps separate</span><strong>Findings, notes, and reports</strong></div>
+      <div><span>Supports</span><strong>Homeowners and review desks</strong></div>
     </section>
 
-    <section class="marketing-section explorer-section">
-      <div class="section-heading split-heading">
-        <div>
-          <h2>Watch the story change without losing context.</h2>
-          <p>Switch views, compare aligned periods, and keep the signal in front of you while the source file stays close.</p>
-        </div>
-        <div class="explorer-points">
-          <p>Month over month or year over year.</p>
-          <p>Total kWh, overnight baseline, and flagged nights side by side.</p>
-          <p>A short explanation that stays tied to the numbers.</p>
-        </div>
+    <section class="sharp-hero">
+      <div class="sharp-hero-copy">
+        <p class="sharp-eyebrow">Utility-data review with the record still attached</p>
+        <h1>Find the change in the data before deciding what it means.</h1>
+        <p class="sharp-lead">Home Energy Watch helps homeowners and review teams read utility-use records carefully. It shows the source, the coverage period, the measured change, and the context still needed before a finding is saved.</p>
+        <div class="sharp-actions"><a class="sharp-button sharp-button-primary" href="{{ start_home_url }}">Start with a utility export</a><a class="sharp-button sharp-button-secondary" href="{{ for_commissions_url }}">See review desk flow</a></div>
+        <div class="sharp-proof-list"><div><span>Careful by default</span><strong>Patterns are flagged for review. The page does not treat a chart as a conclusion.</strong></div><div><span>Designed to grow</span><strong>Scheduled utility and weather refreshes fit today; smart-meter and device feeds can be added later.</strong></div></div>
       </div>
-      <div class="pattern-explorer" id="pattern-explorer" data-default-view="total_kwh">
-        <div class="explorer-tabs" role="tablist" aria-label="Comparison views">
-          <button type="button" class="explorer-tab active" data-pattern-tab="total_kwh" role="tab" aria-selected="true">Total kWh</button>
-          <button type="button" class="explorer-tab" data-pattern-tab="baseline_kw" role="tab" aria-selected="false">Overnight baseline</button>
-          <button type="button" class="explorer-tab" data-pattern-tab="flagged_nights" role="tab" aria-selected="false">Flagged nights</button>
-        </div>
-
-        <div class="explorer-body">
-          <aside class="explorer-sidebar">
-            <div>
-              <p class="mini-label">Compare with context</p>
-              <h3 id="pattern-title">Total kWh</h3>
-              <p id="pattern-summary">Month over month comparison for the main usage story.</p>
-            </div>
-
-            <dl class="explorer-stat-list">
-              <div>
-                <dt id="pattern-stat-one-label">This month</dt>
-                <dd id="pattern-stat-one-value">1,198 kWh</dd>
-              </div>
-              <div>
-                <dt id="pattern-stat-two-label">3-month change</dt>
-                <dd id="pattern-stat-two-value">+7%</dd>
-              </div>
-              <div>
-                <dt id="pattern-stat-three-label">What it means</dt>
-                <dd id="pattern-stat-three-value">Usage stayed elevated through the end of the period.</dd>
-              </div>
-            </dl>
-          </aside>
-
-          <div class="explorer-chart-panel">
-            <div class="comparison-header">
-              <div>
-                <p class="mini-label">Aligned comparison</p>
-                <p class="comparison-subtitle" id="pattern-subtitle">Apr 2025 vs May 2025</p>
-              </div>
-              <div class="comparison-legend">
-                <span><i class="legend-swatch legend-light"></i> Earlier period</span>
-                <span><i class="legend-swatch legend-dark"></i> Later period</span>
-              </div>
-            </div>
-
-            <div class="mini-chart" aria-hidden="true">
-              {% for month in ["Dec", "Jan", "Feb", "Mar", "Apr", "May"] %}
-                <div class="chart-group">
-                  <div class="chart-bars">
-                    <span class="chart-bar chart-bar-light" data-bar-earlier="{{ loop.index0 }}"></span>
-                    <span class="chart-bar chart-bar-dark" data-bar-later="{{ loop.index0 }}"></span>
-                  </div>
-                  <span class="chart-label">{{ month }}</span>
-                  <span class="chart-delta" data-bar-delta="{{ loop.index0 }}"></span>
-                </div>
-              {% endfor %}
-            </div>
-
-            <div class="explainer-card">
-              <p class="mini-label">What this shows</p>
-              <p id="pattern-note">Total usage increased from April to May, and the rise stayed broad instead of isolated to one night.</p>
-            </div>
-          </div>
-        </div>
-      </div>
+      <aside class="sharp-review-packet" aria-label="Utility export evidence preview">
+        <div class="sharp-packet-top"><div><span>Review packet</span><strong>Duke Energy interval export</strong></div><div class="sharp-packet-status">Needs reviewer context</div></div>
+        <div class="sharp-packet-ledger"><div><span class="sharp-small-label">Source</span><strong>Green Button XML</strong><p>Uploaded by the homeowner and retained with the record.</p></div><div><span class="sharp-small-label">Coverage</span><strong>Mar 1 to Apr 30, 2026</strong><p>60 days. Two missing intervals remain visible.</p></div><div><span class="sharp-small-label">Top finding</span><strong>Overnight baseline rose after Mar 18</strong><p>Median quiet-hour load moved from 0.74 to 1.18 kW.</p></div><div><span class="sharp-small-label">Flagged nights</span><strong>7 nights</strong><p>All flagged nights fall between 12:10 a.m. and 4:50 a.m.</p></div></div>
+        <div class="sharp-packet-body"><div class="sharp-packet-chart"><div class="sharp-chart-title"><strong>Nightly baseline, kW</strong><span>Measured intervals only</span></div><svg class="sharp-line-chart" viewBox="0 0 610 286" role="img" aria-label="Nightly baseline chart showing a sustained rise after March 18"><line x1="48" y1="28" x2="48" y2="228"/><line x1="48" y1="228" x2="586" y2="228"/><line x1="48" y1="168" x2="586" y2="168"/><line x1="48" y1="108" x2="586" y2="108"/><line x1="48" y1="48" x2="586" y2="48"/><polyline points="48,170 80,172 112,166 144,169 176,164 208,160 240,162 272,98 304,94 336,96 368,88 400,92 432,84 464,91 496,87 528,83 560,90 586,82"/><line class="chart-marker" x1="256" y1="38" x2="256" y2="228"/><text x="8" y="232">0.4</text><text x="8" y="172">0.8</text><text x="8" y="112">1.2</text><text x="8" y="52">1.6</text><text x="48" y="264">Mar 1</text><text x="250" y="264">Mar 18</text><text x="532" y="264">Apr 30</text></svg><div class="sharp-chart-foot"><span>Gaps are not smoothed</span><span>Weather context added below</span></div></div><div class="sharp-packet-side"><div><h3>A sustained change, not a single spike.</h3><p>Mild nights do not fully explain the higher baseline. Confirm the household equipment schedule before saving a finding.</p></div><table><thead><tr><th>Night</th><th>Signal</th></tr></thead><tbody><tr><td>Mar 22</td><td>1.21 kW median</td></tr><tr><td>Apr 9</td><td>Similar weather</td></tr><tr><td>Apr 24</td><td>No note yet</td></tr></tbody></table></div></div>
+      </aside>
     </section>
 
-    <section class="marketing-section banded-section flow-section" id="review-flow" data-default-step="inspect">
-      <div class="section-heading split-heading">
-        <div>
-          <h2>Move from raw data to evidence in a few clear steps.</h2>
-          <p>The public front should show how fast the review moves, not just tell people the tool exists.</p>
-        </div>
-        <div class="explorer-points">
-          <p>Import once.</p>
-          <p>Align the periods.</p>
-          <p>Inspect the nights that matter.</p>
-          <p>Keep the artifact.</p>
-        </div>
-      </div>
+    <section class="sharp-section sharp-section-alt"><div class="sharp-section-head"><h2>Begin with the evidence, then decide what deserves review.</h2><p>The first review view shows the source, coverage, top finding, gaps, and next question before deeper analysis begins.</p></div><div class="sharp-evidence-lockup"><div class="sharp-evidence-rail"><div><span class="sharp-small-label">Source retained</span><strong>The file stays part of the finding.</strong><p>Source details remain attached so a reviewer can trace the record later.</p></div><div class="sharp-rail-note">The evidence stays traceable after the report is saved.</div></div><div class="sharp-evidence-grid"><div><span class="sharp-small-label">Source</span><strong>Utility usage-history CSV</strong><p>Uploaded Apr 28, 2026.</p></div><div><span class="sharp-small-label">Coverage</span><strong>Jan 1 to Apr 27</strong><p>117 days with 4 estimated readings.</p></div><div><span class="sharp-small-label">Finding</span><strong>Evening use rose in March</strong><p>Average 6 p.m. to 10 p.m. load rose 22%.</p></div><div><span class="sharp-small-label">Flagged nights</span><strong>5 nights</strong><p>Higher than nearby nights with similar weather.</p></div><div><span class="sharp-small-label">Open question</span><strong>What changed at home?</strong><p>Confirm equipment and schedule before saving a finding.</p></div><div class="sharp-evidence-chart"><div class="sharp-chart-title"><strong>Daily use with estimated readings marked</strong><span>kWh per day</span></div><div class="sharp-usage-bars"><i style="height:42%"></i><i style="height:48%"></i><i style="height:46%"></i><i style="height:58%"></i><i class="flag" style="height:76%"></i><i class="flag" style="height:82%"></i><i style="height:70%"></i><i class="flag" style="height:86%"></i><i style="height:74%"></i><i style="height:78%"></i></div></div></div></div></section>
 
-      <div class="flow-rail" role="tablist" aria-label="Review flow">
-        <button type="button" class="flow-step" data-flow-step="import" role="tab" aria-selected="false">
-          <span>1</span>
-          <strong>Import</strong>
-        </button>
-        <button type="button" class="flow-step" data-flow-step="align" role="tab" aria-selected="false">
-          <span>2</span>
-          <strong>Align periods</strong>
-        </button>
-        <button type="button" class="flow-step" data-flow-step="inspect" role="tab" aria-selected="true">
-          <span>3</span>
-          <strong>Inspect anomalies</strong>
-        </button>
-        <button type="button" class="flow-step" data-flow-step="report" role="tab" aria-selected="false">
-          <span>4</span>
-          <strong>Save artifact</strong>
-        </button>
-      </div>
+    <section class="sharp-section"><div class="sharp-trust-rules"><div class="sharp-trust-lead"><p class="sharp-eyebrow">Careful review rules</p><h2>Three rules stay visible before anyone acts.</h2><p>Home Energy Watch keeps the review grounded by showing where the record is strong, where it is limited, and what still needs human context.</p></div><div class="sharp-rules-grid"><div><span>01</span><h3>Source context stays attached.</h3><p>File type, upload time, account, meter, coverage period, and refresh source remain visible in the record.</p></div><div><span>02</span><h3>Gaps are shown honestly.</h3><p>Missing intervals, estimated readings, daylight-saving shifts, and partial windows are shown before interpretation.</p></div><div><span>03</span><h3>Notes do not become findings.</h3><p>Human context stays separate from measured patterns until the reviewer saves a supported finding.</p></div></div></div></section>
 
-      <div class="flow-stage-grid">
-        <aside class="flow-sidebar">
-          <div class="flow-card" data-flow-panel="import" hidden>
-            <p class="mini-label">Import</p>
-            <h3>Bring in the file you already have.</h3>
-            <p>Upload the Duke export or interval file first, without rebuilding the data by hand.</p>
-            <ul class="flow-list">
-              <li>Saved history stays tied to the account.</li>
-              <li>Source files remain part of the record.</li>
-            </ul>
-          </div>
-          <div class="flow-card" data-flow-panel="align" hidden>
-            <p class="mini-label">Align periods</p>
-            <h3>Match the months that can actually be compared.</h3>
-            <p>Equivalent periods line up first, and unmatched ranges are called out instead of being blended away.</p>
-            <ul class="flow-list">
-              <li>Month over month when the files are offset.</li>
-              <li>Year over year when calendar months line up.</li>
-            </ul>
-          </div>
-          <div class="flow-card active" data-flow-panel="inspect">
-            <p class="mini-label">Inspect anomalies</p>
-            <h3>Switch quickly to the metric that explains the change.</h3>
-            <p>Review total kWh, baseline shifts, and flagged nights without leaving the comparison flow.</p>
-            <ul class="flow-list">
-              <li>Overnight spikes stay visible.</li>
-              <li>The follow-up note stays short and specific.</li>
-            </ul>
-          </div>
-          <div class="flow-card" data-flow-panel="report" hidden>
-            <p class="mini-label">Save artifact</p>
-            <h3>Keep a concise record for the next conversation.</h3>
-            <p>The exported artifact holds the matched periods, major deltas, and the plain-language reason they matter.</p>
-            <ul class="flow-list">
-              <li>Useful for households.</li>
-              <li>Useful for commission follow-up.</li>
-            </ul>
-          </div>
-        </aside>
+    <section class="sharp-section sharp-section-alt"><div class="sharp-section-head"><h2>Move from export to saved record without losing the thread.</h2><p>Each step preserves the source while adding the context needed for a clear finding, note, or report.</p></div><div class="sharp-record-track"><div class="sharp-track-header"><div>Step 1<strong>Import</strong></div><div>Step 2<strong>Normalize</strong></div><div>Step 3<strong>Context</strong></div><div>Step 4<strong>Review</strong></div><div>Step 5<strong>Save</strong></div></div><div class="sharp-track-body"><div><h3>Upload the export.</h3><p>Add a Green Button file, interval CSV, usage-history download, or scheduled utility refresh.</p><span>Output: source record</span></div><div><h3>Clean the timeline.</h3><p>Convert timestamps, units, estimates, gaps, and coverage boundaries into one readable history.</p><span>Output: measured timeline</span></div><div><h3>Add real-world context.</h3><p>Bring in weather, household equipment, occupancy notes, and known load changes.</p><span>Output: review context</span></div><div><h3>Check the patterns.</h3><p>Review overnight use, unusual days, period comparisons, and current energy signals.</p><span>Output: supported questions</span></div><div><h3>Save the record.</h3><p>Keep findings, notes, reports, and activity history connected without blending them together.</p><span>Output: review record</span></div></div></div></section>
 
-        <div class="flow-canvas">
-          <div class="flow-visual" data-flow-visual="import" hidden>
-            <div class="file-stack">
-              <article>
-                <strong>duke_export_apr_2025.xml</strong>
-                <span>Imported and saved</span>
-              </article>
-              <article>
-                <strong>duke_export_may_2025.xml</strong>
-                <span>Ready to compare</span>
-              </article>
-            </div>
-          </div>
+    <section class="sharp-section"><div class="sharp-section-head"><h2>Open the parts of the record that need review.</h2><p>A reviewer can scan the index, then examine overnight use, unusual days, comparisons, weather, load, notes, and reports.</p></div><div class="sharp-analysis-bench"><div class="sharp-bench-index"><div>01<strong>Overnight use</strong></div><div>02<strong>Unusual days</strong></div><div>03<strong>Period comparisons</strong></div><div>04<strong>Weather and load</strong></div><div>05<strong>Notes</strong></div><div>06<strong>Reports</strong></div></div><div class="sharp-bench-grid"><div class="sharp-bench-primary"><h3>Overnight baseline review</h3><p>Quiet-hour load is compared across similar nights, with flagged ranges kept separate from saved findings.</p><div class="sharp-baseline-chart"><i></i><i></i><i></i><i></i><i></i><i></i><i class="flag"></i><i class="flag"></i><i class="flag"></i><i class="flag"></i><i class="flag"></i></div><div class="sharp-comparison-strip"><div><strong>0.74</strong><span>Prior median kW</span></div><div><strong>1.18</strong><span>Current median kW</span></div><div><strong>7</strong><span>Flagged nights</span></div><div><strong>2</strong><span>Open gaps</span></div></div></div><div><h3>Unusual days</h3><p>Days are checked against nearby usage, estimated readings, and similar weather before review.</p><div class="sharp-mini-bars"><i style="width:54%"></i><i class="flag" style="width:76%"></i></div></div><div><h3>Comparisons</h3><p>Billing periods, before-and-after windows, and similar weather weeks stay coverage-aware.</p></div><div><h3>Weather and load</h3><p>Degree days, equipment schedule, and other loads sit beside usage.</p></div><div><h3>Notes and reports</h3><p>Homeowner context, saved findings, and report history remain connected but distinct.</p></div></div></div></section>
 
-          <div class="flow-visual" data-flow-visual="align" hidden>
-            <div class="alignment-board">
-              <div>
-                <span>Apr 2025</span>
-                <span>May 2025</span>
-                <span>Jun 2025</span>
-              </div>
-              <div>
-                <span>Apr 2026</span>
-                <span>May 2026</span>
-                <span class="muted">Jul 2026 only</span>
-              </div>
-            </div>
-          </div>
+    <section class="sharp-section sharp-section-alt"><div class="sharp-section-head"><h2>Use it for one household or a full review queue.</h2><p>Homeowners need a readable household record. Review desks need queue discipline across several accounts. Home Energy Watch keeps those jobs separate.</p></div><div class="sharp-audience-view"><div><p class="sharp-eyebrow">Homeowner record</p><h3>One household, one utility history, one place for notes.</h3><p class="sharp-lead">A homeowner can sign in, upload exports, keep account and meter records, schedule refreshes, and save reports over time.</p><div class="sharp-home-card"><div><span>Account</span><strong>Duke Energy account ending 0184</strong></div><div><span>Household load</span><strong>Heat pump, electric water heater, crawl-space dehumidifier</strong></div><div><span>Open question</span><strong>Did the equipment schedule explain the overnight change?</strong></div><div><span>Saved output</span><strong>Draft report with finding, evidence, and note separated</strong></div></div></div><div><p class="sharp-eyebrow">Review desk</p><h3>Several accounts, visible status, clean handoff.</h3><p class="sharp-lead">A review desk can sort accounts by fresh data, open findings, missing context, and reports ready for follow-up.</p><div class="sharp-desk-table"><div class="head">Account <span>Status</span><span>Next action</span></div><div><strong>Household 0184</strong><span>Open</span><span>Ask for schedule</span></div><div><strong>Household 0227</strong><span>Watching</span><span>Save note</span></div><div><strong>Household 0412</strong><span>Ready</span><span>Send report</span></div></div></div></div></section>
 
-          <div class="flow-visual active" data-flow-visual="inspect">
-            <div class="signal-strip">
-              <div class="signal-header">
-                <span>May 2025 vs Apr 2025</span>
-                <span>Flagged nights</span>
-              </div>
-              <div class="signal-line">
-                {% for value in [12, 14, 13, 15, 18, 12, 16, 28, 17, 14, 19, 15, 11, 13, 24, 12] %}
-                  <span class="signal-dot{% if value >= 24 %} signal-dot-alert{% endif %}" style="--dot-level: {{ value }};"></span>
-                {% endfor %}
-              </div>
-              <div class="signal-note">
-                Two late-month nights stand out above the baseline and stay visible when the view changes.
-              </div>
-            </div>
-          </div>
+    <section class="sharp-section"><div class="sharp-section-head"><h2>Keep every data source in its own lane.</h2><p>Scheduled utility and weather refreshes can support the record now. Smart-meter and home-device feeds can be added later without blending sources together.</p></div><div class="sharp-feed-lane"><div><span class="sharp-small-label">Available now</span><h3>Utility export upload</h3><p>Green Button XML, interval CSV, and usage-history files provide the starting evidence record.</p><strong>Uploaded file retained</strong></div><div><span class="sharp-small-label">Ongoing record</span><h3>Scheduled utility and weather refreshes</h3><p>Refresh status, weather context, and import activity are shown alongside the review history.</p><strong>Last refresh visible</strong></div><div><span class="sharp-small-label">Future support</span><h3>Smart-meter and home-device feeds</h3><p>The layout has room for live intervals and device context without blending those sources into utility exports.</p><strong>Planned feed type</strong></div></div></section>
 
-          <div class="flow-visual" data-flow-visual="report" hidden>
-            <div class="artifact-card">
-              <p class="mini-label">Report preview</p>
-              <h3>Power review report</h3>
-              <p>Matched periods, baseline shifts, flagged nights, and major deltas ready for follow-up.</p>
-              <div class="artifact-bars">
-                <span style="height: 34%;"></span>
-                <span style="height: 46%;"></span>
-                <span style="height: 54%;"></span>
-                <span style="height: 48%;"></span>
-                <span style="height: 72%;"></span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
+    <section class="sharp-section sharp-section-alt"><div class="sharp-section-head"><h2>Simple pricing in a clear rate sheet.</h2><p>Subscribe once, then create as many reports as you need while your plan is active.</p></div><div class="sharp-rate-sheet"><div class="sharp-rate-row sharp-rate-head"><div>Plan</div><div>Price</div><div>Best for</div><div>Includes</div></div>{% for plan in billing_plans %}<div class="sharp-rate-row"><div><h3>{{ plan.name }}</h3><p>{{ plan.summary }}</p></div><div><strong>{{ plan.monthly_price_label }}</strong></div><div><p>{% if plan.id == 'home' %}A household that wants saved account records, notes, comparisons, and reports.{% elif plan.id == 'review' %}A review team handling several households, saved findings, report handoffs, and account history.{% else %}A commission or agency workspace built around the review team and accounts involved.{% endif %}</p></div><div><ul><li>Source and coverage check</li><li>Overnight baselines and flagged-night review</li><li>Comparison artifacts and saved notes</li><li>Unlimited reports while subscribed</li></ul></div></div>{% endfor %}</div></section>
 
-    <section class="marketing-section split-section">
-      <div class="split-copy">
-        <h2>Useful at home. Useful in a docket.</h2>
-        <p>
-          Homeowners need a grounded way to check whether the meter story fits the house. Commissions need a cleaner
-          record when a night-load question is not going away.
-        </p>
-      </div>
-      <div class="audience-cards">
-        <article class="audience-card">
-          <h3>For homeowners</h3>
-          <p>Keep your account history, compare export files, and bring a sharper record into a billing dispute or service call.</p>
-          <a href="{{ for_homeowners_url }}">See the homeowner path</a>
-        </article>
-        <article class="audience-card">
-          <h3>For commissions</h3>
-          <p>Review one account or a small group of accounts and keep the comparison notes in a form that staff can revisit later.</p>
-          <a href="{{ for_commissions_url }}">See the commission path</a>
-        </article>
-      </div>
-    </section>
-
-    <section class="marketing-section">
-      <div class="section-heading">
-        <h2>Choose the right workspace</h2>
-        <p>Start with one household, then move up when the review reaches more accounts. Pricing is still being finalized.</p>
-      </div>
-      <div class="plan-grid">
-        {% for plan in billing_plans %}
-          <article class="marketing-plan">
-            <p class="plan-price">{{ plan.monthly_price_label }}</p>
-            <h3>{{ plan.name }}</h3>
-            <p>{{ plan.summary }}</p>
-          </article>
-        {% endfor %}
-      </div>
-      <div class="section-actions">
-        <a class="button button-secondary" href="{{ pricing_url }}">See plan details</a>
-      </div>
-    </section>
-
-    <section class="marketing-section final-call">
-      <div>
-        <h2>Start with the export you already have.</h2>
-        <p>Keep the public site simple, keep the app on its own subdomain, and keep the evidence in one place.</p>
-      </div>
-      <div class="hero-actions">
-        <a class="button button-primary" href="{{ start_home_url }}">Create a homeowner account</a>
-        <a class="button button-secondary" href="{{ commission_login_url }}">Open the review workspace</a>
-      </div>
-    </section>
+    <section class="sharp-final-intake"><div class="sharp-intake-panel"><div class="sharp-drop-zone"><div><span class="sharp-small-label">Start point</span><strong>Bring the utility export into the record.</strong><p>The first step is a source file, a coverage period, a measured timeline, and a few review questions.</p></div><div class="sharp-file-line"><span>Green Button XML, interval CSV, or usage-history file</span><strong>Ready</strong></div></div><div class="sharp-intake-copy"><h2>Start a careful review with the data you already have.</h2><p>Upload a utility export, keep the source details attached, and build a record that shows what changed, when it changed, what supports the finding, and what still needs review.</p><div class="sharp-actions"><a class="sharp-button sharp-button-primary" href="{{ start_home_url }}">Start a review</a><a class="sharp-button sharp-button-secondary" href="{{ home_login_url }}">Sign in</a></div></div></div></section>
   </main>
 {% endblock %}

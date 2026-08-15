@@ -28,7 +28,7 @@
                 value="{{ plan.id }}"
                 {% if plan.id == selected_plan_id %}checked{% endif %}
               >
-              <span>{{ plan.monthly_price_label }}</span>
+          <span>{{ plan.monthly_price_label }} · Unlimited reports while subscribed</span>
               <strong>{{ plan.name }}</strong>
               <small>{{ plan.summary }}</small>
             </label>
@@ -53,6 +53,15 @@
             <input type="text" name="account_number" value="{{ signup_form.account_number }}" required>
           </label>
           <label>
+            <span>Utility / provider name</span>
+            <input type="text" name="energy_company" value="{{ signup_form.energy_company }}" maxlength="100" placeholder="Duke Energy, Entergy, or your local utility">
+            <small>Leave this blank if you want the ZIP code to suggest the provider.</small>
+          </label>
+          <label>
+            <span>Meter value</span>
+            <input type="text" name="meter_value" value="{{ signup_form.meter_value }}" maxlength="100" placeholder="Meter number or label from the bill">
+          </label>
+          <label>
             <span>Service ZIP code</span>
             <input type="text" name="zip_code" value="{{ signup_form.zip_code }}" inputmode="numeric" autocomplete="postal-code" pattern="[0-9]{5}(-[0-9]{4})?" maxlength="10" data-utility-zip required>
           </label>
@@ -61,11 +70,11 @@
             <input type="text" name="address" value="{{ signup_form.address }}" placeholder="Street, city, state" autocomplete="street-address" data-utility-address required>
           </label>
           <label>
-            <span>Your electric company</span>
+            <span>Matched electric company</span>
             <output class="utility-match" data-utility-match aria-live="polite">
-              Enter the service ZIP code and address.
+              Enter the service ZIP code and address to match the service territory.
             </output>
-            <small>We match it to the service area for this address.</small>
+            <small>We match it from the service address, not from a provider list.</small>
           </label>
           <div class="consent-row wide-field">
             <input
@@ -101,7 +110,7 @@
       </form>
 
       <p class="plain-note auth-note">
-        Already started? <a class="inline-link" href="{{ url_for('customer_login') }}">Sign in</a>.
+        Already started? <a class="inline-link" href="{{ url_for('login') }}">Sign in</a>.
       </p>
     </section>
   </main>

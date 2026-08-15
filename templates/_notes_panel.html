@@ -1,0 +1,71 @@
+{% set is_customer_history = customer_mode|default(false) %}
+{% set can_manage_notes = is_customer_history and customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager" %}
+<section class="section-block notes-block">
+  <div class="section-header">
+    <div>
+      <h2>Notes</h2>
+      <p class="plain-note">
+        Keep a dated note for a spike, outage, repair, or anything that helps explain what changed in the home.
+      </p>
+    </div>
+  </div>
+
+  {% if can_manage_notes %}
+    <form class="notes-form" action="{{ url_for('create_account_note') }}" method="post">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="account_number" value="{{ account.account_number }}">
+      <input type="hidden" name="return_to" value="{{ request.full_path if request.query_string else request.path }}">
+      <div class="notes-grid">
+        <label>
+          <span>Note date</span>
+          <input type="date" name="note_date" value="{{ today_iso }}" required>
+        </label>
+        <label class="notes-body-field">
+          <span>Note</span>
+          <textarea name="body" rows="4" maxlength="2000" placeholder="Example: Upstairs lights were on after the storm, then usage returned to normal." required></textarea>
+        </label>
+      </div>
+      <div class="note-template-row">
+        <span class="label">Quick entries</span>
+        <div class="note-template-buttons">
+          <button type="button" class="button-secondary button-small" data-note-template-button data-note-template="Turned off breakers:\nWhat changed on the meter:\nWhat else was on:">Breaker test</button>
+          <button type="button" class="button-secondary button-small" data-note-template-button data-note-template="Lights left on or tested:\nApproximate number of lights:\nWhat changed on the meter:">Lighting check</button>
+          <button type="button" class="button-secondary button-small" data-note-template-button data-note-template="Large appliance or load tested:\nWhat time:\nWhat changed on the meter:">Load test</button>
+          <button type="button" class="button-secondary button-small" data-note-template-button data-note-template="Weather or outage notes:\nWhat was happening outside:\nWhat changed on the meter:">Weather or outage</button>
+        </div>
+      </div>
+      <button type="submit">Save note</button>
+    </form>
+  {% endif %}
+
+  <div class="notes-list" aria-label="Account notes">
+    {% if account_notes %}
+      {% for note in account_notes %}
+        <article class="note-entry">
+          <div class="note-header">
+            <div>
+              <strong>{{ note.note_date }}</strong>
+              <div class="note-meta">
+                {{ note.author_label }}
+                {% if note.created_at %}
+                  · {{ note.created_at|replace("T", " ") }}
+                {% endif %}
+              </div>
+            </div>
+            {% if note.can_delete %}
+              <form action="{{ url_for('delete_account_note', note_id=note.id) }}" method="post">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="account_number" value="{{ account.account_number }}">
+                <input type="hidden" name="return_to" value="{{ request.full_path if request.query_string else request.path }}">
+                <button type="submit" class="button-secondary button-small">Delete</button>
+              </form>
+            {% endif %}
+          </div>
+          <div class="note-body">{{ note.body }}</div>
+        </article>
+      {% endfor %}
+    {% else %}
+      <p class="plain-note">No notes have been added for this account yet.</p>
+    {% endif %}
+  </div>
+</section>

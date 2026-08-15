@@ -8,7 +8,7 @@
       {% if current_billing %}
         <p class="plain-note">{{ current_billing.monthly_price_label }} · {{ current_billing.status_label }}</p>
       {% else %}
-        <p class="plain-note">Pick the plan that matches how many accounts you want to review.</p>
+        <p class="plain-note">Choose a subscription and create as many reports as you need while it is active.</p>
       {% endif %}
     </div>
     <a class="button-link" href="{{ url_for('pricing_page') }}">See plans</a>
@@ -25,8 +25,8 @@
       <input type="hidden" name="plan_id" value="{{ current_billing.plan_id }}">
       <button type="submit">Continue to secure payment</button>
     </form>
-    <p class="plain-note">Card details are entered on Stripe's secure checkout page.</p>
+    <p class="plain-note">Your subscription includes unlimited reports while it is active. Card details are entered on the secure checkout page.</p>
   {% else %}
-    <p class="plain-note">Online billing is not open yet. Your account remains available while pricing is finalized.</p>
+    <p class="plain-note">Online billing is not open yet. Your account remains available until the Stripe price IDs are connected.</p>
   {% endif %}
 </section>

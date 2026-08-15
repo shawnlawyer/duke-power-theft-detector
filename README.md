@@ -4,6 +4,8 @@ Home Energy Watch is a home energy audit and review tool. It keeps customer hist
 
 Customers can download a tenant-bounded ZIP archive of their authorized account profile, inventory, interval history, weather context, and generated reports from the Account page.
 
+Future developers: start with the [Developer Guide](DEVELOPER_GUIDE.md) for the application map, data flow, auth boundaries, testing workflow, and EC2 deployment path.
+
 ## Supported utility feeds
 
 The app normalizes interval history into one internal model, then lets each utility feed plug into that model through a dedicated adapter.
@@ -57,14 +59,16 @@ The app now supports either:
 - local SQLite for one-machine use
 - Postgres through `POWER_DATABASE_URL` for RDS-backed production
 
-Production deployment files live in `deploy/ec2/README.md`, `deploy/ec2/docker-compose.prod.yml`, and `deploy/ec2/.env.production.example`.
+Production deployment files live in `deploy/ec2/README.md`, `deploy/ec2/home-energy-watch.service`, `deploy/ec2/home-energy-watch-direct.sh`, and `deploy/ec2/.env.production.example`.
 
-The straight-to-production shape is:
+Production uses a single EC2 instance, direct Docker execution, and a `systemd` service:
 
 - one EC2 instance running Docker
 - one RDS Postgres database
 - `homeenergywatch.com` for the public marketing pages
 - `app.homeenergywatch.com` for the working app
+- `deploy/ec2/home-energy-watch.service` for the production supervisor
+- `deploy/ec2/home-energy-watch-direct.sh` for the direct Docker launch script
 
 ## Key environment settings
 
@@ -150,7 +154,7 @@ Current workspace options:
 - Review Desk for up to 20 electric accounts
 - Agency Pilot for a commission or agency review workspace
 
-Pricing has not been approved yet. Keep `POWER_BILLING_ENABLED=false` until the plan prices and matching Stripe Price IDs have been reviewed for Home Energy Watch. The checkout route stays closed even if an old Price ID remains in the environment.
+Home Watch is $19.99 a month and Review Desk is $99 a month. Keep `POWER_BILLING_ENABLED=false` until the matching Stripe Price IDs have been installed in the backend environment. The checkout route stays closed even if stale Price IDs remain in the environment.
 
 Set these values in the ignored local env file or production secret store:
 
@@ -171,6 +175,16 @@ https://app.homeenergywatch.com/stripe/webhook
 ```
 
 The app adds Home Energy Watch metadata to Stripe Checkout Sessions and subscriptions. Do not run live charges or refunds without Shawn's explicit approval.
+
+To reuse or create the bounded owner free-play code from the backend only:
+
+```bash
+python3 app.py --ensure-owner-free-play-code
+```
+
+The command checks Stripe for an existing active code before creating anything new. By default it manages `HEW-OWNER-100` as a one-time 100%-off code capped at 3 redemptions and expiring 30 days after creation. Override the safe defaults with `--promotion-code`, `--promotion-max-redemptions`, or `--promotion-valid-days` when you need a different owner test window.
+
+Zero-dollar Stripe Checkouts stay on the normal fulfillment path. The billing refresh stores Stripe's actual `amount_total`, treats `payment_status=no_payment_required` as active, and falls back to the Checkout Session ID when Stripe does not create a PaymentIntent.
 
 ## CLI
 

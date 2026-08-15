@@ -1,11 +1,19 @@
 {% set is_customer_history = customer_mode|default(false) %}
 {% set can_manage_history = not is_customer_history or (customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager") %}
+{% set customer_can_upload_own_history = is_customer_history and customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager" %}
 {% set data_permission_active = has_active_data_authorization|default(false) %}
-<section class="section-block upload-block">
+{% set history_permission_required = not customer_can_upload_own_history and not data_permission_active %}
+<section class="section-block upload-block" id="history-import">
   <div class="section-header">
     <div>
-      <h2>Add history</h2>
-      <p class="plain-note">Upload the next file for this account and it will become part of the same history.</p>
+      <h2>Upload the export.</h2>
+      <p class="plain-note">
+        Bring in the file you already have. The source stays attached while the timeline is added to this account's saved record.
+        If your utility is not listed here, set the utility name in Account first and upload the export you already downloaded.
+        {% if customer_can_upload_own_history and not data_permission_active %}
+          You can upload your own Duke or Green Button export right away.
+        {% endif %}
+      </p>
     </div>
   </div>
 
@@ -23,7 +31,7 @@
   </div>
 
   <div class="compatibility-list" aria-labelledby="get-history-heading">
-    <h3 id="get-history-heading">Get your Duke history</h3>
+    <h3 id="get-history-heading">Get your utility history</h3>
     {% for guide in utility_access_guides %}
       {% if guide.id == "duke_download" %}
         <div class="compatibility-row guide-row">
@@ -47,10 +55,9 @@
     <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="account_number" value="{{ (analysis.account.account_number if analysis else account.account_number) }}">
     <input type="hidden" name="display_name" value="{{ (analysis.account.display_name if analysis else account.display_name) }}">
-    <input type="hidden" name="energy_company" value="{{ (analysis.account.energy_company if analysis else account.energy_company) }}">
     <input type="hidden" name="baseline_date" value="{{ (analysis.account.baseline_date if analysis and analysis.account.baseline_date else account.baseline_date or '') }}">
 
-    <fieldset class="form-fieldset" {% if not data_permission_active %}disabled{% endif %}>
+    <fieldset class="form-fieldset" {% if history_permission_required %}disabled{% endif %}>
     <label class="upload-field">
       <span>History file</span>
       <input type="file" name="xml_file" accept=".xml,.csv,application/xml,text/xml,text/csv" required>
@@ -82,10 +89,10 @@
       </div>
     </details>
 
-    <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Add history</button>
+    <button type="submit" {% if history_permission_required %}disabled{% endif %}>Save to history</button>
     </fieldset>
     </form>
-    {% if not data_permission_active %}
+    {% if history_permission_required %}
       <p class="plain-note">Customer data permission must be active before new history can be added.</p>
     {% endif %}
   {% else %}
