@@ -65,7 +65,7 @@ aws rds describe-db-instances \
 
 ```bash
 ssh -i ~/.ssh/shawnlawyer-ec2-key-20260309.pem ubuntu@54.243.191.43 \
-  'cd /home/ubuntu/home-energy-watch && sudo docker compose --env-file deploy/ec2/.env.production -f deploy/ec2/docker-compose.prod.yml stop power-detector'
+  'sudo systemctl stop home-energy-watch'
 ```
 
 3. Create a final snapshot and wait for it.
@@ -134,7 +134,7 @@ ssh -i ~/.ssh/shawnlawyer-ec2-key-20260309.pem ubuntu@54.243.191.43 \
   "sudo sed -i 's|${CURRENT_ENDPOINT}|${TARGET_ENDPOINT}|g' /home/ubuntu/home-energy-watch/deploy/ec2/.env.production"
 
 ssh -i ~/.ssh/shawnlawyer-ec2-key-20260309.pem ubuntu@54.243.191.43 \
-  'cd /home/ubuntu/home-energy-watch && sudo docker compose --env-file deploy/ec2/.env.production -f deploy/ec2/docker-compose.prod.yml up -d --force-recreate --no-build'
+  'sudo systemctl start home-energy-watch'
 ```
 
 8. Verify the critical path.
@@ -144,7 +144,7 @@ curl -fsS --retry 20 --retry-delay 2 --retry-all-errors \
   https://app.homeenergywatch.com/health
 
 ssh -i ~/.ssh/shawnlawyer-ec2-key-20260309.pem ubuntu@54.243.191.43 \
-  "docker exec ec2-power-detector-1 python -c \"import app; app.ensure_database(); print('database_ready=true')\""
+  "docker exec home-energy-watch python -c \"import app; app.ensure_database(); print('database_ready=true')\""
 ```
 
 Check customer sign-in, commissioner sign-in, one saved account, one history report, the Audit page, and the billing page without starting a live charge.
@@ -158,7 +158,7 @@ ssh -i ~/.ssh/shawnlawyer-ec2-key-20260309.pem ubuntu@54.243.191.43 \
   "sudo sed -i 's|${TARGET_ENDPOINT}|${CURRENT_ENDPOINT}|g' /home/ubuntu/home-energy-watch/deploy/ec2/.env.production"
 
 ssh -i ~/.ssh/shawnlawyer-ec2-key-20260309.pem ubuntu@54.243.191.43 \
-  'cd /home/ubuntu/home-energy-watch && sudo docker compose --env-file deploy/ec2/.env.production -f deploy/ec2/docker-compose.prod.yml up -d --force-recreate --no-build'
+  'sudo systemctl start home-energy-watch'
 
 curl -fsS --retry 20 --retry-delay 2 --retry-all-errors \
   https://app.homeenergywatch.com/health

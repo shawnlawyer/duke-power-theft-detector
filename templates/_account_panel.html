@@ -9,6 +9,7 @@
 {% set current_utility_connections = utility_connections if utility_connections is defined else [] %}
 {% set current_data_authorizations = data_authorizations if data_authorizations is defined else [] %}
 {% set current_customer_data_authorization = customer_data_authorization if customer_data_authorization is defined else none %}
+{% set current_customer_passkeys = customer_passkeys if customer_passkeys is defined else [] %}
 {% set data_permission_active = has_active_data_authorization|default(false) %}
 {% set is_customer = customer_mode|default(false) %}
 {% set can_manage_account = not is_customer or (customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager") %}
@@ -22,7 +23,7 @@
 <section class="section-block">
   <div class="section-header">
     <div>
-      <p class="section-kicker">{{ "Home account" if is_customer else "Customer" }}</p>
+      <p class="section-kicker">{{ "Homeowner record" if is_customer else "Household record" }}</p>
       <h2>{{ selected_energy_company or "Electric account" }}</h2>
       <p class="plain-note">Account {{ current_account.account_number }}</p>
     </div>
@@ -85,6 +86,7 @@
   >
     <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="return_to" value="{{ return_path }}">
+    <input type="hidden" name="original_account_number" value="{{ current_account.account_number }}">
     {% if not can_manage_account %}
       <p class="plain-note">You have view-only access to this account.</p>
     {% endif %}
@@ -92,7 +94,16 @@
     <div class="field-grid">
       <label>
         <span>Account number</span>
-        <input type="text" name="account_number" value="{{ current_account.account_number }}" {% if is_customer %}readonly{% endif %} required>
+        <input type="text" name="account_number" value="{{ current_account.account_number }}" maxlength="100" required>
+      </label>
+      <label>
+        <span>Utility / provider name</span>
+        <input type="text" name="energy_company" value="{{ current_account.energy_company }}" maxlength="100" placeholder="Duke Energy, Xcel Energy, or your local utility">
+        <small>Leave this blank if you want the ZIP code to suggest the provider.</small>
+      </label>
+      <label>
+        <span>Meter value</span>
+        <input type="text" name="meter_value" value="{{ current_account.meter_value }}" maxlength="100" placeholder="Meter number or label from the bill">
       </label>
       <label>
         <span>Service ZIP code</span>
@@ -103,11 +114,11 @@
         <input type="text" name="address" value="{{ current_profile.address }}" autocomplete="street-address" data-utility-address required>
       </label>
       <label>
-        <span>Your electric company</span>
+        <span>Matched electric company</span>
         <output class="utility-match" data-utility-match aria-live="polite">
-          {{ selected_energy_company or "Enter the service address and ZIP code." }}
+          {{ selected_energy_company or "Enter the service ZIP code and address to match the service territory." }}
         </output>
-        <small>We match it to the service area for this address.</small>
+        <small>We match it from the service address, not from a provider list.</small>
       </label>
       <label>
         <span>Reference day</span>
@@ -151,6 +162,66 @@
     <button type="submit">Save account</button>
     </fieldset>
   </form>
+</section>
+{% endif %}
+
+{% if is_customer and current_section in ["all", "account"] %}
+<section class="section-block">
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">Passkeys</p>
+      <h2>Sign in without a password</h2>
+      <p class="plain-note">Add a passkey on this device or a security key. Passkeys stay on your device.</p>
+    </div>
+  </div>
+
+  <form
+    class="account-form"
+    action="{{ url_for('customer_passkey_enrollment_start') }}"
+    method="post"
+    data-passkey-enroll
+    data-passkey-finish-url="{{ url_for('customer_passkey_enrollment_finish') }}"
+  >
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    <div class="field-grid">
+      <label class="wide-field">
+        <span>Passkey label</span>
+        <input type="text" name="nickname" placeholder="MacBook, iPhone, security key">
+      </label>
+    </div>
+    <button type="button" class="button-secondary" data-passkey-enroll-button>Add passkey</button>
+    <p class="plain-note" data-passkey-status></p>
+  </form>
+
+  {% if current_customer_passkeys %}
+    <div class="table-wrap compact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Label</th>
+            <th>Last used</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for passkey in current_customer_passkeys %}
+            <tr>
+              <td>{{ passkey.nickname or "Unnamed passkey" }}</td>
+              <td>{{ passkey.last_used_at or "Not used yet" }}</td>
+              <td class="action-cell">
+                <form action="{{ url_for('customer_passkey_delete', credential_id=passkey.id) }}" method="post">
+                  <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                  <button type="submit" class="button-secondary button-small">Remove</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="plain-note">No passkeys are saved for this account yet.</p>
+  {% endif %}
 </section>
 {% endif %}
 
@@ -230,8 +301,8 @@
   <div class="section-header">
     <div>
       <p class="section-kicker">Utility connection</p>
-      <h2>Utility data connection</h2>
-      <p class="plain-note">Use the file download today. Save a customer-approved utility connection when the utility provides one.</p>
+      <h2>Keep the data source clear.</h2>
+      <p class="plain-note">Use the utility export today. Save a customer-approved connection only when the utility provides an official refresh path.</p>
     </div>
   </div>
 
@@ -412,7 +483,7 @@
 <section class="section-block">
   <div class="section-header">
     <div>
-      <p class="section-kicker">House load list</p>
+      <p class="section-kicker">Household load record</p>
       <h2>What should your meter be able to draw?</h2>
       <p class="plain-note">Add each appliance, circuit, or always-on load with the wattage you expect.</p>
     </div>

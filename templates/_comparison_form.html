@@ -1,11 +1,18 @@
 {% set is_customer_history = customer_mode|default(false) %}
 {% set can_manage_history = not is_customer_history or (customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager") %}
+{% set customer_can_upload_own_history = is_customer_history and customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager" %}
 {% set data_permission_active = has_active_data_authorization|default(false) %}
-<section class="section-block upload-block">
+{% set history_permission_required = not customer_can_upload_own_history and not data_permission_active %}
+<section class="section-block upload-block" id="history-comparison">
   <div class="section-header">
     <div>
-      <h2>Compare two exports</h2>
-      <p class="plain-note">Download a packet with matched months, total kWh changes, overnight baseline shifts, flagged-night changes, and the follow-up points worth checking first.</p>
+      <h2>Align two exports.</h2>
+      <p class="plain-note">
+        Match the periods that can actually be compared, then review total kWh changes, overnight baseline shifts, flagged-night changes, and the follow-up points worth checking first.
+        {% if customer_can_upload_own_history and not data_permission_active %}
+          You can compare your own Duke or Green Button exports right away.
+        {% endif %}
+      </p>
     </div>
   </div>
 
@@ -14,10 +21,9 @@
     <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="account_number" value="{{ (analysis.account.account_number if analysis else account.account_number) }}">
     <input type="hidden" name="display_name" value="{{ (analysis.account.display_name if analysis else account.display_name) }}">
-    <input type="hidden" name="energy_company" value="{{ (analysis.account.energy_company if analysis else account.energy_company) }}">
     <input type="hidden" name="baseline_date" value="{{ (analysis.account.baseline_date if analysis and analysis.account.baseline_date else account.baseline_date or '') }}">
 
-    <fieldset class="form-fieldset" {% if not data_permission_active %}disabled{% endif %}>
+    <fieldset class="form-fieldset" {% if history_permission_required %}disabled{% endif %}>
     <div class="comparison-file-grid">
       <label class="upload-field">
         <span>Earlier export</span>
@@ -55,10 +61,10 @@
       </div>
     </details>
 
-    <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Compare exports</button>
+    <button type="submit" {% if history_permission_required %}disabled{% endif %}>Build comparison packet</button>
     </fieldset>
     </form>
-    {% if not data_permission_active %}
+    {% if history_permission_required %}
       <p class="plain-note">Customer data permission must be active before exports can be compared.</p>
     {% endif %}
   {% else %}

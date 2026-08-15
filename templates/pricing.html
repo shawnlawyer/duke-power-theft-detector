@@ -7,7 +7,7 @@
         <div>
           <p class="section-kicker">Pricing</p>
           <h2>Choose the level that fits the review.</h2>
-          <p class="plain-note">Start with one home, then move up when you need to review more accounts. Pricing is still being finalized.</p>
+          <p class="plain-note">Subscribe once, then create as many reports as you need while your plan is active. Home Watch is $19.99 a month and Review Desk is $99 a month.</p>
         </div>
       </div>
 
@@ -26,6 +26,7 @@
                 Built around the review team and the number of accounts involved.
               {% endif %}
             </p>
+            <p class="plain-note">Unlimited reports while your subscription is active.</p>
             {% if customer_user and plan.payment_ready %}
               <form action="{{ url_for('billing_checkout') }}" method="post">
                 <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">

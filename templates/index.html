@@ -7,10 +7,10 @@
     {% else %}
       <section class="section-block empty-state">
         <div>
-          <h2>Add history to start the review.</h2>
-          <p class="plain-note">Use History when you are ready to upload usage data for this account.</p>
+          <h2>Bring the utility export into the record.</h2>
+          <p class="plain-note">The first step is a source file, a coverage period, a measured timeline, and a few review questions.</p>
         </div>
-        <a class="button-link" href="{{ url_for('customer_history_page' if customer_mode|default(false) else 'history_page', account_number=account.account_number) }}">Add history</a>
+        <a class="button-link" href="{{ url_for('customer_history_page' if customer_mode|default(false) else 'history_page', account_number=account.account_number) }}">Upload the export</a>
       </section>
     {% endif %}
   </main>

@@ -7,75 +7,124 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
     <script defer src="{{ url_for('static', filename='app.js') }}"></script>
   </head>
-  <body>
-    <div class="shell">
-      {% set active_user = staff_user if staff_user else customer_user %}
-      <header class="site-header">
-        <div class="header-row">
-          <div>
-            <p class="eyebrow">Home Energy Watch</p>
-            <h1>{{ page_title or ("Usage findings" if analysis else "Customer history") }}</h1>
+  {% set active_user = staff_user if staff_user else customer_user %}
+  <body class="{{ 'app-body' if active_user else 'auth-body' }}">
+    {% if active_user %}
+      {% set nav_account = active_account_number if active_account_number is defined else request.args.get('account_number', '') %}
+      <div class="app-shell">
+        <aside class="app-sidebar">
+          <div class="app-brand">
+            <a class="brand-lockup" href="{{ url_for('customer_dashboard' if customer_user and not staff_user else 'index', account_number=nav_account) }}">
+              <span class="brand-mark">HEW</span>
+              <div>
+                <p class="eyebrow">Home Energy Watch</p>
+                <strong>{{ "Review desk" if staff_user else "Home record" }}</strong>
+              </div>
+            </a>
+            <p class="plain-note">Keep the source, the coverage, the measured change, and the next question together.</p>
           </div>
-          {% if active_user %}
-            <div class="header-session">
-              <span>{{ active_user.full_name }}</span>
-              <span>{{ staff_user.role if staff_user else "Customer" }}</span>
-              <form action="{{ url_for('logout') }}" method="post">
-                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
-                <button type="submit" class="button-secondary button-small">Sign out</button>
-              </form>
-            </div>
-          {% endif %}
-        </div>
-        {% if active_user %}
-          {% set nav_account = active_account_number if active_account_number is defined else request.args.get('account_number', '') %}
-          <nav class="site-nav" aria-label="Main menu">
+
+          <div class="sidebar-account">
+            <span class="label">Active account</span>
+            <strong>{{ nav_account or "Select an account" }}</strong>
+            {% if analysis and analysis.account.energy_company %}
+              <p>{{ analysis.account.energy_company }}</p>
+            {% elif account is defined and account and account.energy_company %}
+              <p>{{ account.energy_company }}</p>
+            {% endif %}
+          </div>
+
+          <nav class="app-nav" aria-label="Main menu">
             {% if staff_user %}
-              <a class="{% if request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('index', account_number=nav_account) }}">Review</a>
-              <a class="{% if request.endpoint == 'account_page' %}active{% endif %}" href="{{ url_for('account_page', account_number=nav_account) }}">Customer</a>
-              <a class="{% if request.endpoint == 'people_page' %}active{% endif %}" href="{{ url_for('people_page', account_number=nav_account) }}">People</a>
-              <a class="{% if request.endpoint == 'utility_page' %}active{% endif %}" href="{{ url_for('utility_page', account_number=nav_account) }}">Utility</a>
-              <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}">Inventory</a>
-              <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}">History</a>
-              <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}">Staff</a>
-              <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}">Security</a>
+              <a class="{% if request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('index', account_number=nav_account) }}"><span>Review</span><small>Dashboard</small></a>
+              <a class="{% if request.endpoint == 'account_page' %}active{% endif %}" href="{{ url_for('account_page', account_number=nav_account) }}"><span>Customer</span><small>Profile</small></a>
+              <a class="{% if request.endpoint == 'people_page' %}active{% endif %}" href="{{ url_for('people_page', account_number=nav_account) }}"><span>People</span><small>Access</small></a>
+              <a class="{% if request.endpoint == 'utility_page' %}active{% endif %}" href="{{ url_for('utility_page', account_number=nav_account) }}"><span>Utility</span><small>Connection</small></a>
+              <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}"><span>Inventory</span><small>Loads</small></a>
+              <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}"><span>History</span><small>Uploads</small></a>
+              <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}"><span>Staff</span><small>Team</small></a>
+              <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}"><span>Security</span><small>Access</small></a>
               {% if staff_user.role == "Commissioner" %}
-                <a class="{% if request.endpoint in ['data_requests_page', 'review_data_request', 'execute_data_request', 'place_legal_hold', 'release_legal_hold'] %}active{% endif %}" href="{{ url_for('data_requests_page') }}">Data requests</a>
-                <a class="{% if request.endpoint == 'audit_page' %}active{% endif %}" href="{{ url_for('audit_page') }}">Audit</a>
+                <a class="{% if request.endpoint in ['data_requests_page', 'review_data_request', 'execute_data_request', 'place_legal_hold', 'release_legal_hold'] %}active{% endif %}" href="{{ url_for('data_requests_page') }}"><span>Data requests</span><small>Records</small></a>
+                <a class="{% if request.endpoint == 'audit_page' %}active{% endif %}" href="{{ url_for('audit_page') }}"><span>Audit</span><small>History</small></a>
               {% endif %}
             {% else %}
-              <a class="{% if request.endpoint == 'customer_dashboard' %}active{% endif %}" href="{{ url_for('customer_dashboard', account_number=nav_account) }}">Review</a>
-              <a class="{% if request.endpoint == 'customer_account_page' %}active{% endif %}" href="{{ url_for('customer_account_page', account_number=nav_account) }}">Account</a>
-              <a class="{% if request.endpoint == 'customer_utility_page' %}active{% endif %}" href="{{ url_for('customer_utility_page', account_number=nav_account) }}">Utility</a>
-              <a class="{% if request.endpoint == 'customer_inventory_page' %}active{% endif %}" href="{{ url_for('customer_inventory_page', account_number=nav_account) }}">Inventory</a>
-              <a class="{% if request.endpoint == 'customer_history_page' %}active{% endif %}" href="{{ url_for('customer_history_page', account_number=nav_account) }}">History</a>
-              <a class="{% if request.endpoint in ['customer_data_requests_page', 'request_account_deletion', 'cancel_account_deletion'] %}active{% endif %}" href="{{ url_for('customer_data_requests_page') }}">My data</a>
-              <a class="{% if request.endpoint == 'customer_billing_page' %}active{% endif %}" href="{{ url_for('customer_billing_page', account_number=nav_account) }}">Billing</a>
+              <a class="{% if request.endpoint == 'customer_dashboard' %}active{% endif %}" href="{{ url_for('customer_dashboard', account_number=nav_account) }}"><span>Review</span><small>Dashboard</small></a>
+              <a class="{% if request.endpoint == 'customer_account_page' %}active{% endif %}" href="{{ url_for('customer_account_page', account_number=nav_account) }}"><span>Account</span><small>Profile</small></a>
+              <a class="{% if request.endpoint == 'customer_utility_page' %}active{% endif %}" href="{{ url_for('customer_utility_page', account_number=nav_account) }}"><span>Utility</span><small>Connection</small></a>
+              <a class="{% if request.endpoint == 'customer_inventory_page' %}active{% endif %}" href="{{ url_for('customer_inventory_page', account_number=nav_account) }}"><span>Inventory</span><small>Loads</small></a>
+              <a class="{% if request.endpoint == 'customer_history_page' %}active{% endif %}" href="{{ url_for('customer_history_page', account_number=nav_account) }}"><span>History</span><small>Uploads</small></a>
+              <a class="{% if request.endpoint in ['customer_data_requests_page', 'request_account_deletion', 'cancel_account_deletion'] %}active{% endif %}" href="{{ url_for('customer_data_requests_page') }}"><span>My data</span><small>Exports</small></a>
+              <a class="{% if request.endpoint == 'customer_billing_page' %}active{% endif %}" href="{{ url_for('customer_billing_page', account_number=nav_account) }}"><span>Billing</span><small>Plan</small></a>
             {% endif %}
           </nav>
-        {% endif %}
-      </header>
 
-      {% with messages = get_flashed_messages() %}
-        {% if messages %}
-          <section class="flash-list" aria-label="Messages">
-            {% for message in messages %}
-              <div class="flash">{{ message }}</div>
-            {% endfor %}
-          </section>
-        {% endif %}
-      {% endwith %}
+          <div class="sidebar-session">
+            <div>
+              <span class="label">Signed in</span>
+              <strong>{{ active_user.full_name }}</strong>
+              <p>{{ staff_user.role if staff_user else "Customer account" }}</p>
+            </div>
+            <form action="{{ url_for('logout') }}" method="post">
+              <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="button-secondary button-small">Sign out</button>
+            </form>
+          </div>
+        </aside>
 
-      {% block content %}{% endblock %}
+        <div class="app-main-shell">
+          <header class="app-topbar">
+            <div>
+              <p class="eyebrow">{{ "Review desk" if staff_user else "Homeowner record" }}</p>
+              <h1>{{ page_title or ("Usage findings" if analysis else "Customer history") }}</h1>
+            </div>
+            <div class="topbar-meta">
+              {% if nav_account %}
+                <span class="topbar-chip">Account {{ nav_account }}</span>
+              {% endif %}
+              {% if analysis and analysis.coverage_start and analysis.coverage_end %}
+                <span class="topbar-chip">{{ analysis.coverage_start }} to {{ analysis.coverage_end }}</span>
+              {% endif %}
+            </div>
+          </header>
+    {% else %}
+      <div class="shell">
+        <header class="site-header">
+          <div class="header-row">
+            <div>
+              <p class="eyebrow">Home Energy Watch</p>
+              <h1>{{ page_title or ("Usage findings" if analysis else "Customer history") }}</h1>
+            </div>
+          </div>
+        </header>
+    {% endif %}
 
-      <footer class="app-footer">
-        <span>Home Energy Watch</span>
-        <nav aria-label="Legal">
-          <a href="{{ url_for('terms_page') }}">Terms</a>
-          <a href="{{ url_for('privacy_page') }}">Privacy</a>
-          <a href="{{ url_for('utility_data_authorization_page') }}">Data permission</a>
-        </nav>
-      </footer>
-    </div>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <section class="flash-list" aria-label="Messages">
+          {% for message in messages %}
+            <div class="flash">{{ message }}</div>
+          {% endfor %}
+        </section>
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+
+    <footer class="app-footer">
+      <span>Home Energy Watch</span>
+      <nav aria-label="Legal">
+        <a href="{{ url_for('terms_page') }}">Terms</a>
+        <a href="{{ url_for('privacy_page') }}">Privacy</a>
+        <a href="{{ url_for('utility_data_authorization_page') }}">Data permission</a>
+      </nav>
+    </footer>
+
+    {% if active_user %}
+        </div>
+      </div>
+    {% else %}
+      </div>
+    {% endif %}
   </body>
 </html>

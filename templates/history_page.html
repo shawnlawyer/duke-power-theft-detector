@@ -1,8 +1,42 @@
 {% extends "base.html" %}
 
 {% block content %}
-  <main class="app-layout">
-    {% include "_upload_form.html" %}
-    {% include "_comparison_form.html" %}
+  <main class="app-layout history-layout">
+    <section class="section-block source-lane" aria-labelledby="source-lane-title">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Data sources</p>
+          <h2 id="source-lane-title">Keep each source in its own lane.</h2>
+          <p class="plain-note">Start with the export you already have. Utility refreshes, weather context, and household notes are kept alongside it rather than blended together.</p>
+        </div>
+      </div>
+      <div class="source-lane-grid">
+        <article>
+          <span class="label">Available now</span>
+          <h3>Utility export upload</h3>
+          <p>Green Button XML, interval CSV, and usage-history files can be added incrementally to this account.</p>
+          <strong>Source record retained</strong>
+        </article>
+        <article>
+          <span class="label">Ongoing record</span>
+          <h3>Utility and weather context</h3>
+          <p>Refresh status and weather for selected days appear beside the readings when the account has a service location.</p>
+          <a class="inline-link" href="{{ url_for('customer_utility_page' if customer_mode|default(false) else 'utility_page', account_number=account.account_number) }}">Open utility connection</a>
+        </article>
+        <article>
+          <span class="label">Household context</span>
+          <h3>Inventory and dated notes</h3>
+          <p>Track expected loads, breaker changes, appliance tests, and observations without changing the meter record.</p>
+          <a class="inline-link" href="{{ url_for('customer_inventory_page' if customer_mode|default(false) else 'inventory_page', account_number=account.account_number) }}">Open household inventory</a>
+        </article>
+      </div>
+    </section>
+    <div class="history-grid">
+      {% include "_upload_form.html" %}
+      {% include "_comparison_form.html" %}
+    </div>
+    <div id="notes">
+      {% include "_notes_panel.html" %}
+    </div>
   </main>
 {% endblock %}

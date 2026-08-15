@@ -16,13 +16,13 @@
         <a class="brand-mark" href="{{ home_url }}">Home Energy Watch</a>
         <nav class="marketing-nav" aria-label="Main">
           <a href="{{ how_it_works_url }}" class="{% if active_page == 'how-it-works' %}active{% endif %}">How it works</a>
-          <a href="{{ for_homeowners_url }}" class="{% if active_page == 'for-homeowners' %}active{% endif %}">For homeowners</a>
-          <a href="{{ for_commissions_url }}" class="{% if active_page == 'for-commissions' %}active{% endif %}">For commissions</a>
+          <a href="{{ for_homeowners_url }}" class="{% if active_page == 'for-homeowners' %}active{% endif %}">Homeowners</a>
+          <a href="{{ for_commissions_url }}" class="{% if active_page == 'for-commissions' %}active{% endif %}">Review desk</a>
           <a href="{{ pricing_url }}" class="{% if active_page == 'pricing' %}active{% endif %}">Pricing</a>
         </nav>
         <div class="marketing-actions">
-          <a class="text-link" href="{{ home_login_url }}">Home sign in</a>
-          <a class="button button-primary" href="{{ commission_login_url }}">Open the app</a>
+          <a class="text-link" href="{{ home_login_url }}">Sign in</a>
+          <a class="button button-primary" href="{{ start_home_url }}">Start a review</a>
         </div>
       </header>
 
