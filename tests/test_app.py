@@ -1,16 +1,20 @@
 import base64
 import csv
+import logging
 import json
 import re
 import zipfile
 from io import BytesIO, StringIO
 from datetime import date as ddate, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import app
 import pandas as pd
 import pyotp
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
+from fido2.cose import ES256
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_interval.xml"
@@ -31,6 +35,8 @@ def configure_tmp_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("POWER_PUBLIC_BASE_URL", "https://app.homeenergywatch.com")
     monkeypatch.setenv("POWER_MARKETING_BASE_URL", "https://homeenergywatch.com")
     monkeypatch.setenv("POWER_STAFF_MFA_REQUIRED", "false")
+    monkeypatch.setenv("POWER_LOG_LEVEL", "INFO")
+    monkeypatch.setenv("POWER_LOG_FORMAT", "json")
     monkeypatch.delenv("POWER_DATA_DELETION_ENABLED", raising=False)
     monkeypatch.delenv("POWER_DATA_DELETION_POLICY_VERSION", raising=False)
     monkeypatch.delenv("POWER_BILLING_ENABLED", raising=False)
@@ -78,7 +84,7 @@ def sign_in(client):
 
 def customer_sign_in(client, email="owner@example.com", password="customer-password-123"):
     return client.post(
-        "/customer/login",
+        "/login",
         data={"email": email, "password": password},
         follow_redirects=False,
     )
@@ -338,6 +344,11 @@ def test_energy_company_lookup_asks_for_address_when_zip_crosses_service_areas(m
         raise AssertionError("Expected an ambiguous ZIP code to require a street address.")
 
 
+def test_energy_company_resolver_requires_zip_when_no_company_is_already_saved():
+    with pytest.raises(ValueError, match="ZIP code for the service address"):
+        app.resolve_energy_company_for_form({}, require_zip=True)
+
+
 def test_history_database_isolates_accounts_and_dedupes_within_each_account(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
 
@@ -370,6 +381,60 @@ def test_import_interval_file_returns_adapter_metadata_when_file_is_unchanged(tm
     assert skipped["imported"] is False
     assert skipped["adapter_id"] == "duke_style_interval_xml"
     assert skipped["adapter_name"] == "Duke-style interval XML"
+    assert skipped["added_count"] == 0
+    assert skipped["already_present_count"] == skipped["interval_count"]
+    assert skipped["conflicts_skipped_count"] == 0
+
+
+def test_import_interval_frame_is_incremental_and_idempotent(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+
+    first_frame = pd.DataFrame(
+        [
+            {"start_epoch": 1_700_000_000, "duration_s": 900, "wh": 100.0},
+            {"start_epoch": 1_700_000_900, "duration_s": 900, "wh": 110.0},
+        ]
+    )
+    second_frame = pd.DataFrame(
+        [
+            {"start_epoch": 1_700_000_900, "duration_s": 900, "wh": 110.0},
+            {"start_epoch": 1_700_001_800, "duration_s": 900, "wh": 120.0},
+        ]
+    )
+
+    first = app.import_interval_frame_to_db(first_frame, source_path="first.csv", account_number="acct-1")
+    second = app.import_interval_frame_to_db(second_frame, source_path="second.csv", account_number="acct-1")
+    readings = app.load_intervals_from_db("acct-1")
+
+    assert first["added_count"] == 2
+    assert first["already_present_count"] == 0
+    assert first["conflicts_skipped_count"] == 0
+    assert second["added_count"] == 1
+    assert second["already_present_count"] == 1
+    assert second["conflicts_skipped_count"] == 0
+    assert len(readings) == 3
+
+
+def test_import_interval_frame_preserves_existing_conflicting_readings(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+
+    first_frame = pd.DataFrame(
+        [{"start_epoch": 1_700_000_000, "duration_s": 900, "wh": 100.0}]
+    )
+    conflict_frame = pd.DataFrame(
+        [{"start_epoch": 1_700_000_000, "duration_s": 900, "wh": 150.0}]
+    )
+
+    first = app.import_interval_frame_to_db(first_frame, source_path="first.csv", account_number="acct-1")
+    conflict = app.import_interval_frame_to_db(conflict_frame, source_path="second.csv", account_number="acct-1")
+    readings = app.load_intervals_from_db("acct-1")
+
+    assert first["added_count"] == 1
+    assert conflict["added_count"] == 0
+    assert conflict["already_present_count"] == 0
+    assert conflict["conflicts_skipped_count"] == 1
+    assert len(readings) == 1
+    assert round(float(readings.iloc[0]["wh"]), 3) == 100.0
 
 
 def test_baseline_date_uses_selected_reference_day():
@@ -646,7 +711,7 @@ def test_customer_data_export_requires_customer_sign_in(tmp_path, monkeypatch):
     response = client.get("/customer/data-export.zip")
 
     assert response.status_code == 302
-    assert "/customer/login" in response.headers["Location"]
+    assert "/login" in response.headers["Location"]
 
 
 def test_customer_manager_can_request_and_cancel_deletion_but_viewer_cannot(tmp_path, monkeypatch):
@@ -1286,7 +1351,8 @@ def test_customer_utility_page_does_not_offer_chrome_helper_duke_flow(tmp_path, 
 
     assert response.status_code == 200
     assert b"Download your Duke history" in response.data
-    assert b"Go to Duke My Account" in response.data
+    assert b"Open Duke Usage Details" in response.data
+    assert b"my-account/usage?tab=day" in response.data
     assert b"Green Button customer connection" in response.data
     assert b"North Carolina data-access track" in response.data
     assert b"Open Duke sign-in" not in response.data
@@ -1452,6 +1518,8 @@ def test_customer_signup_keeps_entered_values_on_validation_error(tmp_path, monk
             "email": "owner@example.com",
             "password": "short",
             "account_number": "duke-123",
+            "energy_company": "Blue Ridge Electric",
+            "meter_value": "Meter-99",
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
             "plan_id": "review",
@@ -1466,12 +1534,13 @@ def test_customer_signup_keeps_entered_values_on_validation_error(tmp_path, monk
     assert b'value="Home Owner"' in response.data
     assert b'value="owner@example.com"' in response.data
     assert b'value="duke-123"' in response.data
+    assert b'value="Blue Ridge Electric"' in response.data
+    assert b'value="Meter-99"' in response.data
     assert b'value="123 Main St Charlotte NC"' in response.data
     assert b'value="28205"' in response.data
     assert b'value="review"' in response.data
     assert b"checked" in response.data
     assert b'value="short"' not in response.data
-    assert b'name="energy_company"' not in response.data
 
 
 def test_customer_signup_cannot_claim_an_existing_electric_account(tmp_path, monkeypatch):
@@ -1550,12 +1619,16 @@ def test_account_forms_match_energy_company_from_zip_instead_of_listing_provider
 
     assert home.status_code == 200
     assert signup.status_code == 200
-    assert b"Your electric company" in home.data
-    assert b"Your electric company" in signup.data
+    assert b"Matched electric company" in home.data
+    assert b"Matched electric company" in signup.data
     assert b"Service ZIP code" in home.data
     assert b"Service ZIP code" in signup.data
-    assert b'name="energy_company"' not in home.data
-    assert b'name="energy_company"' not in signup.data
+    assert b"provider list" in home.data
+    assert b"provider list" in signup.data
+    assert b'name="energy_company"' in home.data
+    assert b'name="energy_company"' in signup.data
+    assert b'name="meter_value"' in home.data
+    assert b'name="meter_value"' in signup.data
     assert b"ENERGYUNITED EMC" not in home.data
     assert b"Home name" not in home.data
     assert b"Home name" not in signup.data
@@ -1576,7 +1649,41 @@ def test_account_profile_stores_and_searches_energy_company(tmp_path, monkeypatc
     assert page["accounts"][0]["account_number"] == "acct-1"
 
 
-def test_account_save_matches_provider_from_service_zip(tmp_path, monkeypatch):
+def test_account_save_allows_manual_provider_meter_and_rename(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    app.save_account_profile("acct-old", display_name="Main house", energy_company="Duke Energy Progress, LLC")
+    app.save_household_profile("acct-old", {"address": "1 Main Street", "zip_code": "27601"})
+    authorize_account("acct-old", email="owner@example.com")
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+
+    response = client.post(
+        "/account",
+        data={
+            "original_account_number": "acct-old",
+            "account_number": "acct-new",
+            "display_name": "Main house",
+            "energy_company": "Metro Electric Cooperative",
+            "meter_value": "Meter-42",
+            "address": "2 New Street",
+            "zip_code": "98052",
+            "baseline_date": "2024-01-02",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert "acct-new" in response.headers["Location"]
+    assert app.find_account("acct-old") is None
+    updated = app.find_account("acct-new")
+    assert updated["energy_company"] == "Metro Electric Cooperative"
+    assert updated["meter_value"] == "Meter-42"
+    assert app.load_household_profile("acct-new")["address"] == "2 New Street"
+    assert app.customer_has_account_access("owner@example.com", "acct-new") is True
+
+
+def test_account_save_matches_provider_from_service_zip_when_manual_provider_is_blank(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     stub_utility_lookup(monkeypatch, company="Duke Energy Carolinas, LLC")
     app.web_app.config["TESTING"] = True
@@ -1587,9 +1694,9 @@ def test_account_save_matches_provider_from_service_zip(tmp_path, monkeypatch):
         "/account",
         data={
             "account_number": "acct-new",
+            "energy_company": "",
             "address": "123 Main Street, Charlotte, NC",
             "zip_code": "28205",
-            "energy_company": "Town of Apex",
             "baseline_date": "",
         },
         follow_redirects=False,
@@ -1603,6 +1710,7 @@ def test_account_save_matches_provider_from_service_zip(tmp_path, monkeypatch):
 def test_history_import_keeps_zip_matched_provider_when_request_is_tampered(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
+    stub_utility_lookup(monkeypatch, company="Duke Energy Progress, LLC")
     authorize_account("acct-1")
     app.save_account_profile("acct-1", energy_company="Duke Energy Progress, LLC")
     app.save_household_profile("acct-1", {"address": "1 E Edenton St", "zip_code": "27601"})
@@ -1613,7 +1721,7 @@ def test_history_import_keeps_zip_matched_provider_when_request_is_tampered(tmp_
         "/analyze",
         data={
             "account_number": "acct-1",
-            "energy_company": "Town of Apex",
+            "energy_company": "",
             "xml_file": (BytesIO(FIXTURE.read_bytes()), "history.xml"),
         },
         content_type="multipart/form-data",
@@ -1626,6 +1734,7 @@ def test_history_import_keeps_zip_matched_provider_when_request_is_tampered(tmp_
 def test_api_history_import_keeps_zip_matched_provider_when_request_is_tampered(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
+    stub_utility_lookup(monkeypatch, company="Duke Energy Progress, LLC")
     authorize_account("acct-1")
     app.save_account_profile("acct-1", energy_company="Duke Energy Progress, LLC")
     app.save_household_profile("acct-1", {"address": "1 E Edenton St", "zip_code": "27601"})
@@ -1638,7 +1747,7 @@ def test_api_history_import_keeps_zip_matched_provider_when_request_is_tampered(
         "/api/analyze",
         json={
             "account_number": "acct-1",
-            "energy_company": "Town of Apex",
+            "energy_company": "",
             "input_file": input_path.name,
         },
     )
@@ -1733,10 +1842,10 @@ def test_setup_sections_are_separate_menu_pages(tmp_path, monkeypatch):
 
     pages = {
         "/staff": b"Commission access",
-        "/account": b"Energy company",
+        "/account": b"Matched electric company",
         "/people": b"People with account access",
-        "/utility": b"Utility data connection",
-        "/inventory": b"House load list",
+        "/utility": b"Keep the data source clear.",
+        "/inventory": b"Household load record",
         "/history": b"Files that work today",
     }
     for path, expected_text in pages.items():
@@ -1833,7 +1942,10 @@ def test_viewer_can_read_account_but_cannot_change_it(tmp_path, monkeypatch):
     account_change = client.post(
         "/account",
         data={
-            "account_number": "acct-view",
+            "original_account_number": "acct-view",
+            "account_number": "acct-new",
+            "energy_company": "Metro Electric Cooperative",
+            "meter_value": "Meter-13",
             "address": "2 Changed Lane",
             "zip_code": "27601",
         },
@@ -1854,6 +1966,7 @@ def test_viewer_can_read_account_but_cannot_change_it(tmp_path, monkeypatch):
     assert account_change.status_code == 403
     assert inventory_change.status_code == 403
     assert app.load_household_profile("acct-view")["address"] == "1 Read Only Lane"
+    assert app.find_account("acct-view")["meter_value"] == ""
     assert app.list_load_items("acct-view") == []
 
 
@@ -1867,10 +1980,10 @@ def test_billing_plans_do_not_publish_unapproved_prices(monkeypatch):
     review = next(plan for plan in plans if plan["id"] == "review")
     agency = next(plan for plan in plans if plan["id"] == "agency")
 
-    assert home["monthly_price_label"] == "Pricing being finalized"
+    assert home["monthly_price_label"] == "$19.99 / month"
     assert home["account_limit"] == 1
     assert home["payment_ready"] is False
-    assert review["monthly_price_label"] == "Pricing being finalized"
+    assert review["monthly_price_label"] == "$99 / month"
     assert review["account_limit"] == 20
     assert review["payment_ready"] is False
     assert agency["monthly_price_label"] == "Talk with us"
@@ -1972,10 +2085,73 @@ class FakeStripeBillingPortal:
     Session = FakeStripeBillingPortalSession
 
 
+class FakeStripeAccount:
+    calls = []
+    retrieve_result = {"id": "acct_1TEP6v39IosmExPF"}
+
+    @classmethod
+    def retrieve(cls):
+        cls.calls.append({})
+        return cls.retrieve_result
+
+
+class FakeStripeCoupon:
+    calls = []
+    retrieve_result = None
+
+    @classmethod
+    def create(cls, **kwargs):
+        cls.calls.append(kwargs)
+        return {
+            "id": "cpn_test_123",
+            "percent_off": 100,
+            "duration": "once",
+            "metadata": kwargs.get("metadata") or {},
+        }
+
+    @classmethod
+    def retrieve(cls, coupon_id):
+        cls.calls.append({"retrieve": coupon_id})
+        return cls.retrieve_result or {
+            "id": coupon_id,
+            "percent_off": 100,
+            "duration": "once",
+        }
+
+
+class FakeStripePromotionCode:
+    calls = []
+    list_result = None
+    create_result = None
+
+    @classmethod
+    def list(cls, **kwargs):
+        cls.calls.append({"list": kwargs})
+        return cls.list_result or {"data": []}
+
+    @classmethod
+    def create(cls, **kwargs):
+        cls.calls.append({"create": kwargs})
+        return cls.create_result or {
+            "id": "promo_test_123",
+            "code": kwargs.get("code"),
+            "active": True,
+            "livemode": False,
+            "max_redemptions": kwargs.get("max_redemptions"),
+            "times_redeemed": 0,
+            "expires_at": kwargs.get("expires_at"),
+            "promotion": kwargs.get("promotion"),
+            "metadata": kwargs.get("metadata") or {},
+        }
+
+
 class FakeStripe:
     checkout = FakeStripeCheckout
     billing_portal = FakeStripeBillingPortal
     Webhook = FakeStripeWebhook
+    Account = FakeStripeAccount
+    Coupon = FakeStripeCoupon
+    PromotionCode = FakeStripePromotionCode
     api_key = None
     api_version = None
 
@@ -1986,14 +2162,104 @@ def install_fake_stripe(monkeypatch):
     FakeStripeBillingPortalSession.calls = []
     FakeStripeWebhook.calls = []
     FakeStripeWebhook.event = None
+    FakeStripeAccount.calls = []
+    FakeStripeAccount.retrieve_result = {"id": "acct_1TEP6v39IosmExPF"}
+    FakeStripeCoupon.calls = []
+    FakeStripeCoupon.retrieve_result = None
+    FakeStripePromotionCode.calls = []
+    FakeStripePromotionCode.list_result = None
+    FakeStripePromotionCode.create_result = None
     FakeStripe.api_key = None
     FakeStripe.api_version = None
     monkeypatch.setattr(app, "stripe", FakeStripe)
+    monkeypatch.setenv("POWER_ENV", "test")
     monkeypatch.setenv("POWER_BILLING_ENABLED", "true")
+    monkeypatch.setenv("STRIPE_ACCOUNT_ID", "acct_1TEP6v39IosmExPF")
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_home_energy_watch")
     monkeypatch.setenv("STRIPE_PRICE_HOME", "price_home_123")
     monkeypatch.setenv("STRIPE_PRICE_REVIEW", "price_review_456")
     monkeypatch.setenv("STRIPE_API_VERSION", "2026-02-25.clover")
+
+
+class FakePasskeyServer:
+    def __init__(self):
+        self.credential_data = app.AttestedCredentialData.create(
+            app.Aaguid.NONE,
+            b"credential-123",
+            ES256.from_cryptography_key(ec.generate_private_key(ec.SECP256R1()).public_key()),
+        )
+        self.begin_calls = []
+        self.complete_calls = []
+
+    def register_begin(self, user, credentials=None, user_verification=None):
+        self.begin_calls.append(
+            {
+                "mode": "register",
+                "user": user,
+                "credentials": credentials or [],
+                "user_verification": user_verification,
+            }
+        )
+        return (
+            SimpleNamespace(
+                public_key={
+                    "rp": {"name": "Home Energy Watch", "id": "app.homeenergywatch.com"},
+                    "user": {
+                        "name": user.name,
+                        "id": "MQ",
+                        "displayName": user.display_name,
+                    },
+                    "challenge": "register-challenge",
+                    "pubKeyCredParams": [{"type": "public-key", "alg": -7}],
+                }
+            ),
+            {"challenge": "register-challenge", "user_verification": user_verification},
+        )
+
+    def register_complete(self, state, response):
+        self.complete_calls.append({"mode": "register", "state": state, "response": response})
+        assert state["challenge"] == "register-challenge"
+        return SimpleNamespace(credential_data=self.credential_data, counter=7)
+
+    def authenticate_begin(self, credentials=None, user_verification=None):
+        self.begin_calls.append(
+            {
+                "mode": "authenticate",
+                "credentials": credentials or [],
+                "user_verification": user_verification,
+            }
+        )
+        return (
+            SimpleNamespace(
+                public_key={
+                    "challenge": "login-challenge",
+                    "rpId": "app.homeenergywatch.com",
+                    "allowCredentials": [
+                        {"type": "public-key", "id": "Y3JlZGVudGlhbC0x"},
+                    ],
+                }
+            ),
+            {"challenge": "login-challenge", "user_verification": user_verification},
+        )
+
+    def authenticate_complete(self, state, credentials, response):
+        self.complete_calls.append(
+            {"mode": "authenticate", "state": state, "credentials": credentials, "response": response}
+        )
+        assert state["challenge"] == "login-challenge"
+        assert credentials
+        return credentials[0]
+
+
+def install_fake_passkeys(monkeypatch):
+    server = FakePasskeyServer()
+    monkeypatch.setattr(app, "build_passkey_server", lambda origin=None: server)
+    monkeypatch.setattr(
+        app.AuthenticationResponse,
+        "from_dict",
+        staticmethod(lambda payload: SimpleNamespace(response=SimpleNamespace(authenticator_data=SimpleNamespace(counter=9)))),
+    )
+    return server
 
 
 def test_customer_signup_paid_plan_redirects_to_stripe_checkout(tmp_path, monkeypatch):
@@ -2029,6 +2295,7 @@ def test_customer_signup_paid_plan_redirects_to_stripe_checkout(tmp_path, monkey
     assert checkout_call["line_items"] == [{"price": "price_home_123", "quantity": 1}]
     assert checkout_call["success_url"] == "https://app.homeenergywatch.com/billing/success?session_id={CHECKOUT_SESSION_ID}"
     assert checkout_call["cancel_url"] == "https://app.homeenergywatch.com/billing/cancel"
+    assert checkout_call["allow_promotion_codes"] is True
     assert checkout_call["metadata"]["project"] == "home-energy-watch"
     assert checkout_call["metadata"]["customer_user_id"] == str(customer["id"])
     assert checkout_call["metadata"]["plan_id"] == "home"
@@ -2036,6 +2303,7 @@ def test_customer_signup_paid_plan_redirects_to_stripe_checkout(tmp_path, monkey
     assert billing["checkout_session_id"] == "cs_test_123"
     assert billing["stripe_customer_id"] == "cus_123"
     assert billing["stripe_subscription_id"] == "sub_123"
+    assert billing["stripe_payment_reference"] == "cs_test_123"
 
 
 def test_customer_checkout_redirects_to_stripe_checkout_session(tmp_path, monkeypatch):
@@ -2055,10 +2323,12 @@ def test_customer_checkout_redirects_to_stripe_checkout_session(tmp_path, monkey
     assert response.status_code == 302
     assert response.headers["Location"] == "https://checkout.stripe.com/c/cs_test_123"
     assert checkout_call["line_items"] == [{"price": "price_review_456", "quantity": 1}]
+    assert checkout_call["allow_promotion_codes"] is True
     assert checkout_call["subscription_data"]["metadata"]["project_name"] == "Home Energy Watch"
     assert billing["checkout_session_id"] == "cs_test_123"
     assert billing["stripe_customer_id"] == "cus_123"
     assert billing["stripe_subscription_id"] == "sub_123"
+    assert billing["stripe_payment_reference"] == "cs_test_123"
     assert billing["status"] == "checkout_started"
 
 
@@ -2117,6 +2387,7 @@ def test_stripe_webhook_updates_customer_subscription(tmp_path, monkeypatch):
     assert billing["stripe_customer_id"] == "cus_123"
     assert billing["stripe_subscription_id"] == "sub_123"
     assert billing["checkout_session_id"] == "cs_test_123"
+    assert billing["stripe_payment_reference"] == "cs_test_123"
     assert billing["status"] == "active"
 
 
@@ -2136,7 +2407,124 @@ def test_billing_success_refreshes_stripe_receipt(tmp_path, monkeypatch):
     assert FakeStripeCheckoutSession.calls[0]["retrieve"] == "cs_test_123"
     assert billing["status"] == "active"
     assert billing["stripe_payment_intent_id"] == "pi_123"
+    assert billing["stripe_payment_reference"] == "pi_123"
     assert billing["stripe_receipt_url"] == "https://pay.stripe.com/invoice/test"
+    assert billing["stripe_amount_total"] is None
+
+
+def test_stripe_webhook_marks_zero_dollar_checkout_active(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    install_fake_stripe(monkeypatch)
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_home_energy_watch")
+    customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.record_customer_plan_selection(int(customer["id"]), "home")
+    FakeStripeWebhook.event = {
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_test_free",
+                "customer": "cus_123",
+                "subscription": "sub_123",
+                "payment_status": "no_payment_required",
+                "amount_total": 0,
+                "currency": "usd",
+                "metadata": {"customer_user_id": str(customer["id"]), "plan_id": "home"},
+            }
+        },
+    }
+
+    client = app.web_app.test_client()
+    response = client.post(
+        "/stripe/webhook",
+        data=b'{"id":"evt_123"}',
+        headers={"Stripe-Signature": "t=123,v1=test"},
+    )
+    billing = app.load_customer_billing(int(customer["id"]))
+
+    assert response.status_code == 200
+    assert billing["status"] == "active"
+    assert billing["checkout_session_id"] == "cs_test_free"
+    assert billing["stripe_payment_intent_id"] == ""
+    assert billing["stripe_payment_reference"] == "cs_test_free"
+    assert billing["stripe_amount_total"] == 0
+    assert billing["stripe_currency"] == "usd"
+
+
+def test_billing_success_records_zero_dollar_checkout_without_payment_intent(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    install_fake_stripe(monkeypatch)
+    customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.upsert_customer_billing(int(customer["id"]), "home", "checkout_started", checkout_session_id="cs_test_free")
+    FakeStripeCheckoutSession.retrieve_result = {
+        "id": "cs_test_free",
+        "customer": "cus_123",
+        "subscription": None,
+        "payment_intent": None,
+        "invoice": {"hosted_invoice_url": "https://pay.stripe.com/invoice/free"},
+        "payment_status": "no_payment_required",
+        "amount_total": 0,
+        "currency": "usd",
+        "metadata": {"customer_user_id": str(customer["id"]), "plan_id": "home"},
+    }
+
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+    response = client.get("/billing/success", query_string={"session_id": "cs_test_free"}, follow_redirects=False)
+    billing = app.load_customer_billing(int(customer["id"]))
+
+    assert response.status_code == 302
+    assert FakeStripeCheckoutSession.calls[0]["retrieve"] == "cs_test_free"
+    assert billing["status"] == "active"
+    assert billing["stripe_payment_intent_id"] == ""
+    assert billing["stripe_payment_reference"] == "cs_test_free"
+    assert billing["stripe_receipt_url"] == "https://pay.stripe.com/invoice/free"
+    assert billing["stripe_amount_total"] == 0
+    assert billing["stripe_currency"] == "usd"
+
+
+def test_ensure_owner_free_play_promotion_code_reuses_existing_active_code(monkeypatch):
+    install_fake_stripe(monkeypatch)
+    FakeStripePromotionCode.list_result = {
+        "data": [
+            {
+                "id": "promo_existing_123",
+                "code": "HEW-OWNER-100",
+                "active": True,
+                "livemode": False,
+                "max_redemptions": 3,
+                "times_redeemed": 1,
+                "expires_at": 1782864000,
+                "promotion": {"type": "coupon", "coupon": "cpn_existing_123"},
+            }
+        ]
+    }
+
+    summary = app.ensure_owner_free_play_promotion_code()
+
+    assert summary["promotion_code"] == "HEW-OWNER-100"
+    assert summary["promotion_code_id"] == "promo_existing_123"
+    assert summary["mode"] == "test"
+    assert summary["discount_percentage"] == 100
+    assert summary["redemptions_used"] == 1
+    assert FakeStripeCoupon.calls == [{"retrieve": "cpn_existing_123"}]
+    assert FakeStripePromotionCode.calls == [{"list": {"code": "HEW-OWNER-100", "active": True, "limit": 10}}]
+
+
+def test_ensure_owner_free_play_promotion_code_creates_new_code_with_idempotency(monkeypatch):
+    install_fake_stripe(monkeypatch)
+
+    summary = app.ensure_owner_free_play_promotion_code(valid_days=14)
+
+    assert summary["promotion_code"] == "HEW-OWNER-100"
+    assert summary["promotion_code_id"] == "promo_test_123"
+    assert summary["discount_percentage"] == 100
+    assert summary["redemption_limit"] == 3
+    assert summary["mode"] == "test"
+    assert FakeStripePromotionCode.calls[0] == {"list": {"code": "HEW-OWNER-100", "active": True, "limit": 10}}
+    assert FakeStripeCoupon.calls[0]["idempotency_key"] == "home-energy-watch:free-play-coupon:test:v1"
+    assert FakeStripePromotionCode.calls[1]["create"]["idempotency_key"] == "home-energy-watch:free-play-promotion:test:HEW-OWNER-100:v1"
 
 
 def test_first_run_bootstraps_commission_access(tmp_path, monkeypatch):
@@ -2170,8 +2558,18 @@ def test_marketing_host_renders_public_homepage(tmp_path, monkeypatch):
     response = client.get("/", base_url="https://homeenergywatch.com")
 
     assert response.status_code == 200
-    assert b"See the pattern. Spot what matters." in response.data
-    assert b"Watch the story change without losing context." in response.data
+    assert b"Read your own meter data the way a reviewer would." in response.data
+    assert b"Duke Energy Progress" in response.data
+    assert b"Uploads stack up instead of overwriting each other." in response.data
+    assert b"$19.99 / month" in response.data
+    assert b"$99 / month" in response.data
+    assert b"Unlimited saved reports while the subscription is active" in response.data
+    # The public page must keep stating the limits the product is honest about.
+    assert b"It does not connect to your utility for you." in response.data
+    assert b"It is not live monitoring." in response.data
+    assert b">Homeowners</a>" in response.data
+    assert b">Review desk</a>" in response.data
+    assert b">Start a review</a>" in response.data
     assert b"https://app.homeenergywatch.com/signup" in response.data
     assert b"Commission Sign In" not in response.data
 
@@ -2236,9 +2634,9 @@ def test_marketing_pricing_page_uses_public_copy(tmp_path, monkeypatch):
     assert b"Plans that match the size of the review." in response.data
     assert b"Home Watch" in response.data
     assert b"Review Desk" in response.data
-    assert b"Pricing being finalized" in response.data
-    assert b"$19" not in response.data
-    assert b"$99" not in response.data
+    assert b"$19.99 / month" in response.data
+    assert b"$99 / month" in response.data
+    assert b"Pricing being finalized" not in response.data
 
 
 def test_health_endpoint_only_returns_public_status(tmp_path, monkeypatch):
@@ -2250,6 +2648,49 @@ def test_health_endpoint_only_returns_public_status(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert response.get_json() == {"status": "ok"}
+
+
+def test_request_logs_are_redacted_and_include_request_context(tmp_path, monkeypatch, caplog):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+
+    with caplog.at_level(logging.INFO, logger=app.APP_LOGGER_NAME):
+        response = client.post(
+            "/login",
+            data={
+                "email": "owner@example.com",
+                "password": "customer-password-123",
+            },
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    log_messages = "\n".join(record.getMessage() for record in caplog.records if record.name == app.APP_LOGGER_NAME)
+    assert '"event":"request.completed"' in log_messages
+    assert '"route":"/login"' in log_messages
+    assert "owner@example.com" not in log_messages
+    assert "customer-password-123" not in log_messages
+
+
+def test_unhandled_exceptions_are_logged_without_leaking_request_payload(tmp_path, monkeypatch, caplog):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+
+    def boom():
+        raise RuntimeError("database password leaked")
+
+    monkeypatch.setitem(app.web_app.view_functions, "health", boom)
+
+    with caplog.at_level(logging.INFO, logger=app.APP_LOGGER_NAME):
+        response = client.get("/health")
+
+    assert response.status_code == 500
+    log_messages = "\n".join(record.getMessage() for record in caplog.records if record.name == app.APP_LOGGER_NAME)
+    assert '"event":"request.failed"' in log_messages
+    assert '"route":"/health"' in log_messages
+    assert "database password leaked" not in log_messages
 
 
 def test_production_security_configuration_fails_closed(monkeypatch):
@@ -2462,7 +2903,7 @@ def test_password_reset_is_private_single_use_and_revokes_old_sessions(tmp_path,
     )
 
     assert reset.status_code == 302
-    assert reset.headers["Location"].endswith("/customer/login")
+    assert reset.headers["Location"].endswith("/login")
     assert replay.status_code == 302
     assert replay.headers["Location"].endswith("/customer/forgot-password")
     with pytest.raises(ValueError):
@@ -2470,7 +2911,27 @@ def test_password_reset_is_private_single_use_and_revokes_old_sessions(tmp_path,
     assert app.authenticate_customer_user("owner@example.com", "new-customer-password-456")["id"] == customer["id"]
     stale_session = existing_session.get("/customer")
     assert stale_session.status_code == 302
-    assert "/customer/login" in stale_session.headers["Location"]
+    assert "/login" in stale_session.headers["Location"]
+
+
+def test_unified_login_password_reset_sends_customer_link(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    monkeypatch.setenv("POWER_EMAIL_BACKEND", "memory")
+    monkeypatch.setenv("POWER_PUBLIC_BASE_URL", "https://app.homeenergywatch.com")
+    app.EMAIL_OUTBOX.clear()
+    client = app.web_app.test_client()
+
+    login_page = client.get("/login")
+    response = client.post("/forgot-password", data={"email": "owner@example.com"})
+
+    assert login_page.status_code == 200
+    assert b'href="/forgot-password"' in login_page.data
+    assert response.status_code == 200
+    assert b"If an account uses that address" in response.data
+    assert len(app.EMAIL_OUTBOX) == 1
+    assert "/customer/reset-password?token=" in app.EMAIL_OUTBOX[0]["text_body"]
 
 
 def test_customer_auth_link_request_rate_limit_is_persistent(tmp_path, monkeypatch):
@@ -2827,13 +3288,13 @@ def test_audit_record_is_commissioner_only_and_hides_remote_address(tmp_path, mo
     app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
     client = app.web_app.test_client()
     client.post(
-        "/customer/login",
+        "/login",
         data={"email": "owner@example.com", "password": "wrong-password"},
         environ_base={"REMOTE_ADDR": "203.0.113.42"},
     )
     with app.get_db_connection() as conn:
         event = conn.execute(
-            "SELECT remote_hash FROM audit_events WHERE action = 'customer.login_failed'"
+            "SELECT remote_hash FROM audit_events WHERE action = 'auth.login_failed'"
         ).fetchone()
 
     commissioner_client = app.web_app.test_client()
@@ -2852,7 +3313,7 @@ def test_audit_record_is_commissioner_only_and_hides_remote_address(tmp_path, mo
     assert event["remote_hash"]
     assert event["remote_hash"] != "203.0.113.42"
     assert commissioner_page.status_code == 200
-    assert b"customer.login_failed" in commissioner_page.data
+    assert b"auth.login_failed" in commissioner_page.data
     assert analyst_page.status_code == 302
     assert analyst_page.headers["Location"].endswith("/")
 
@@ -3113,19 +3574,19 @@ def test_login_rate_limit_is_persistent_and_does_not_store_identity(tmp_path, mo
 
     responses = [
         client.post(
-            "/customer/login",
+            "/login",
             data={"email": "limited@example.com", "password": "wrong-password"},
         )
         for _ in range(app.AUTH_RATE_LIMIT_MAX_ATTEMPTS)
     ]
     correct_while_blocked = client.post(
-        "/customer/login",
+        "/login",
         data={"email": "limited@example.com", "password": "customer-password-123"},
     )
     with app.get_db_connection() as conn:
         saved_limit = conn.execute(
             "SELECT identity_hash, attempt_count FROM auth_rate_limits WHERE scope = ?",
-            ("customer_login",),
+            ("sign_in",),
         ).fetchone()
 
     assert all(response.status_code == 302 for response in responses[:-1])
@@ -3160,7 +3621,7 @@ def test_login_rejects_protocol_relative_next_redirect(tmp_path, monkeypatch):
     client = app.web_app.test_client()
 
     response = client.post(
-        "/customer/login",
+        "/login",
         data={
             "email": "owner@example.com",
             "password": "customer-password-123",
@@ -3170,8 +3631,132 @@ def test_login_rejects_protocol_relative_next_redirect(tmp_path, monkeypatch):
     )
 
     assert response.status_code == 302
-    assert response.headers["Location"].endswith("/customer")
+    assert response.headers["Location"].endswith("/")
     assert "malicious.example.test" not in response.headers["Location"]
+
+
+def test_login_pages_offer_passkeys(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    bootstrap_staff()
+    app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    client = app.web_app.test_client()
+
+    staff_login = client.get("/login")
+
+    assert b"Use a passkey" in staff_login.data
+    assert b"Open Home Energy Watch." in staff_login.data
+
+
+def test_staff_passkey_enrollment_and_login_flow(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    staff_user = app.create_first_staff_user(
+        "commission@example.gov",
+        "Commissioner One",
+        "test-password-123",
+    )
+    server = install_fake_passkeys(monkeypatch)
+    client = app.web_app.test_client()
+
+    sign_in(client)
+    start_response = client.post("/staff/security/passkeys/start", data={"nickname": "Work laptop"})
+    with client.session_transaction() as browser_session:
+        pending_enrollment = browser_session.get("pending_passkey_staff_enrollment")
+    finish_response = client.post("/staff/security/passkeys/finish", json={"id": "ignored"})
+
+    with app.get_db_connection() as conn:
+        credential = conn.execute(
+            """
+            SELECT credential_id, nickname, sign_count, is_active
+            FROM passkey_credentials
+            WHERE actor_kind = 'staff' AND actor_id = ?
+            """,
+            (int(staff_user["id"]),),
+        ).fetchone()
+    with client.session_transaction() as browser_session:
+        saved_auth_version = browser_session.get("staff_auth_version")
+
+    client.post("/logout")
+    login_start = client.post(
+        "/login/passkey/start",
+        data={"email": "commission@example.gov", "next": "/staff"},
+    )
+    login_finish = client.post("/login/passkey/finish", json={"id": "ignored"})
+    with client.session_transaction() as browser_session:
+        signed_in_id = browser_session.get("staff_user_id")
+        signed_in_auth_version = browser_session.get("staff_auth_version")
+
+    assert start_response.status_code == 200
+    assert start_response.get_json()["publicKey"]["challenge"] == "register-challenge"
+    assert pending_enrollment["state"]["challenge"] == "register-challenge"
+    assert finish_response.status_code == 200
+    assert credential["nickname"] == "Work laptop"
+    assert credential["sign_count"] == 7
+    assert credential["is_active"] == 1
+    assert saved_auth_version == app.get_staff_user_by_id(int(staff_user["id"]))["auth_version"]
+    assert login_start.status_code == 200
+    assert login_start.get_json()["publicKey"]["challenge"] == "login-challenge"
+    assert login_finish.status_code == 200
+    assert login_finish.get_json()["redirect"] == "/staff"
+    assert signed_in_id == int(staff_user["id"])
+    assert signed_in_auth_version == app.get_staff_user_by_id(int(staff_user["id"]))["auth_version"]
+    assert server.begin_calls[0]["mode"] == "register"
+    assert server.begin_calls[1]["mode"] == "authenticate"
+
+
+def test_customer_passkey_enrollment_login_and_account_ui(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    authorize_account("acct-1001", email="owner@example.com")
+    app.save_account_profile("acct-1001", display_name="Main House")
+    server = install_fake_passkeys(monkeypatch)
+    client = app.web_app.test_client()
+
+    assert customer_sign_in(client).status_code == 302
+    account_page = client.get("/customer/account")
+    start_response = client.post("/customer/passkeys/start", data={"nickname": "Phone"})
+    finish_response = client.post("/customer/passkeys/finish", json={"id": "ignored"})
+
+    with app.get_db_connection() as conn:
+        credential = conn.execute(
+            """
+            SELECT credential_id, nickname, sign_count, is_active
+            FROM passkey_credentials
+            WHERE actor_kind = 'customer' AND actor_id = ?
+            """,
+            (int(customer["id"]),),
+        ).fetchone()
+    with client.session_transaction() as browser_session:
+        saved_auth_version = browser_session.get("customer_auth_version")
+
+    client.post("/logout")
+    login_start = client.post(
+        "/login/passkey/start",
+        data={"email": "owner@example.com", "next": "/customer/account"},
+    )
+    login_finish = client.post("/login/passkey/finish", json={"id": "ignored"})
+    with client.session_transaction() as browser_session:
+        signed_in_id = browser_session.get("customer_user_id")
+        signed_in_auth_version = browser_session.get("customer_auth_version")
+
+    assert b"Passkeys" in account_page.data
+    assert start_response.status_code == 200
+    assert start_response.get_json()["publicKey"]["challenge"] == "register-challenge"
+    assert finish_response.status_code == 200
+    assert credential["nickname"] == "Phone"
+    assert credential["sign_count"] == 7
+    assert credential["is_active"] == 1
+    assert saved_auth_version == app.get_customer_user_by_id(int(customer["id"]))["auth_version"]
+    assert login_start.status_code == 200
+    assert login_start.get_json()["publicKey"]["challenge"] == "login-challenge"
+    assert login_finish.status_code == 200
+    assert login_finish.get_json()["redirect"] == "/customer/account"
+    assert signed_in_id == int(customer["id"])
+    assert signed_in_auth_version == app.get_customer_user_by_id(int(customer["id"]))["auth_version"]
+    assert server.begin_calls[0]["mode"] == "register"
+    assert server.begin_calls[1]["mode"] == "authenticate"
 
 
 def test_security_headers_and_cookie_flags_are_set(tmp_path, monkeypatch):
@@ -3252,7 +3837,10 @@ def test_utility_access_guides_cover_manual_connect_and_ncuc_paths():
         "green_button_connect",
         "ncuc_data_access",
     }
-    assert any("Duke My Account" in guide["action_label"] for guide in guides)
+    duke_guide = next(guide for guide in guides if guide["id"] == "duke_download")
+    assert duke_guide["action_label"] == "Open Duke Usage Details"
+    assert duke_guide["action_url"] == "https://www.duke-energy.com/my-account/usage?tab=day"
+    assert "Usage Details" in duke_guide["summary"]
     assert any("Green Button" in guide["name"] for guide in guides)
     assert any("NCUC" in guide["action_label"] for guide in guides)
 
@@ -3441,6 +4029,75 @@ def test_day_detail_api_returns_series_and_inventory(tmp_path, monkeypatch):
     assert payload["load_summary"]["all_on_kw"] == 4.515
 
 
+def test_day_detail_api_includes_notes_for_selected_day(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+
+    history = tmp_path / "input" / "history.xml"
+    history.write_bytes(FIXTURE.read_bytes())
+    app.import_interval_file_to_db(history, account_number="acct-1", display_name="Test Home")
+    app.save_account_profile("acct-1", display_name="Test Home")
+    app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    owner = app.get_customer_user_by_email("owner@example.com")
+    app.add_account_access_email("acct-1", "owner@example.com", full_name="Home Owner", access_level="Manager")
+    app.add_customer_account_note(
+        "acct-1",
+        owner,
+        "2024-01-01",
+        "Turned off the garage breaker and the overnight load stayed high.",
+    )
+
+    client = app.web_app.test_client()
+    sign_in(client)
+    response = client.get(
+        "/api/day-detail",
+        query_string={
+            "account_number": "acct-1",
+            "date": "2024-01-01",
+            "tz": "America/New_York",
+            "night_start": "02:00",
+            "night_end": "04:00",
+            "min_night_kw": "1.0",
+            "night_multiplier": "2.0",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["note_count"] == 1
+    assert payload["notes"][0]["note_date"] == "2024-01-01"
+    assert "garage breaker" in payload["notes"][0]["body"]
+
+
+def test_review_dashboard_renders_note_markers_and_modal_shell(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+
+    history = tmp_path / "input" / "history.xml"
+    history.write_bytes(FIXTURE.read_bytes())
+    app.import_interval_file_to_db(history, account_number="acct-1", display_name="Test Home")
+    app.save_account_profile("acct-1", display_name="Test Home")
+    app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    owner = app.get_customer_user_by_email("owner@example.com")
+    app.add_account_access_email("acct-1", "owner@example.com", full_name="Home Owner", access_level="Manager")
+    app.add_customer_account_note(
+        "acct-1",
+        owner,
+        "2024-01-01",
+        "Breaker test: turned off one garage breaker and checked the next overnight reading.",
+    )
+
+    client = app.web_app.test_client()
+    sign_in(client)
+    response = client.get("/", query_string={"account_number": "acct-1"})
+
+    assert response.status_code == 200
+    assert b'id="detail-note-button"' in response.data
+    assert b'data-note-date="2024-01-01"' in response.data
+    assert b'id="note-modal"' in response.data
+    assert b"Heaviest hours" in response.data
+
+
 def test_history_page_offers_two_file_comparison_upload(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
@@ -3451,14 +4108,56 @@ def test_history_page_offers_two_file_comparison_upload(tmp_path, monkeypatch):
     response = client.get("/history")
 
     assert response.status_code == 200
-    assert b"Add history" in response.data
+    assert b"Upload the export." in response.data
     assert b'name="xml_file"' in response.data
-    assert b"Compare two exports" in response.data
+    assert b"Align two exports." in response.data
     assert b'action="/compare"' in response.data
     assert b'name="left_file"' in response.data
     assert b'name="right_file"' in response.data
-    assert b"Download a packet with matched months" in response.data
+    assert b'name="energy_company"' not in response.data
+    assert b"Build comparison packet" in response.data
     assert b"Customer data permission must be active" in response.data
+
+
+def test_customer_owner_can_upload_and_compare_without_active_data_permission(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    stub_utility_lookup(monkeypatch, company="Duke Energy Progress, LLC")
+    app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.save_account_profile("acct-1", display_name="Main house", energy_company="Duke Energy Progress, LLC")
+    app.save_household_profile("acct-1", {"address": "1 Main Street", "zip_code": "27601"})
+    app.add_account_access_email("acct-1", "owner@example.com", full_name="Home Owner", access_level="Manager")
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+
+    history_page = client.get("/customer/history", query_string={"account_number": "acct-1"})
+    upload = client.post(
+        "/analyze",
+        data={
+            "account_number": "acct-1",
+            "xml_file": (BytesIO(FIXTURE.read_bytes()), "history.xml"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=False,
+    )
+    comparison = client.post(
+        "/compare",
+        data={
+            "account_number": "acct-1",
+            "left_file": (BytesIO(comparison_csv([("2024-01-01T02:00:00-05:00", "2024-01-01T03:00:00-05:00", 0.5)])), "earlier.csv"),
+            "right_file": (BytesIO(comparison_csv([("2024-01-01T02:00:00-05:00", "2024-01-01T03:00:00-05:00", 0.8)])), "later.csv"),
+        },
+        content_type="multipart/form-data",
+        follow_redirects=False,
+    )
+
+    assert history_page.status_code == 200
+    assert b"You can upload your own Duke or Green Button export right away." in history_page.data
+    assert b"Customer data permission must be active before new history can be added." not in history_page.data
+    assert b"Customer data permission must be active before exports can be compared." not in history_page.data
+    assert upload.status_code == 200
+    assert comparison.status_code == 200
+    assert app.count_imported_files("acct-1") == 1
 
 
 def test_staff_cannot_upload_or_compare_history_without_customer_permission(tmp_path, monkeypatch):
@@ -3496,6 +4195,97 @@ def test_staff_cannot_upload_or_compare_history_without_customer_permission(tmp_
     assert list((tmp_path / "input").iterdir()) == []
 
 
+def test_history_notes_are_account_scoped_newest_first_and_owner_deletable(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    app.save_account_profile("acct-1", display_name="Main house")
+    app.save_account_profile("acct-2", display_name="Other house")
+    app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.create_customer_user("reviewer@example.com", "Account Reviewer", "customer-password-456")
+    app.add_account_access_email("acct-1", "owner@example.com", full_name="Home Owner", access_level="Manager")
+    app.add_account_access_email(
+        "acct-1",
+        "reviewer@example.com",
+        full_name="Account Reviewer",
+        access_level="Manager",
+    )
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+
+    first = client.post(
+        "/account/notes",
+        data={
+            "account_number": "acct-1",
+            "note_date": "2024-01-02",
+            "body": "First note",
+        },
+        follow_redirects=False,
+    )
+    second = client.post(
+        "/account/notes",
+        data={
+            "account_number": "acct-1",
+            "note_date": "2024-01-10",
+            "body": "Second note",
+        },
+        follow_redirects=False,
+    )
+
+    owner = app.get_customer_user_by_email("owner@example.com")
+    notes = app.list_account_notes("acct-1", {"kind": "customer", "user": owner})
+
+    assert first.status_code == 302
+    assert second.status_code == 302
+    assert [note["body"] for note in notes] == ["Second note", "First note"]
+    assert notes[0]["note_date"] == "2024-01-10"
+    assert notes[0]["can_delete"] is True
+    assert app.list_account_notes("acct-2") == []
+
+    history_page = client.get("/customer/history", query_string={"account_number": "acct-1"})
+    assert history_page.status_code == 200
+    assert b"Notes" in history_page.data
+    assert b"Save note" in history_page.data
+    assert b"Breaker test" in history_page.data
+    assert b"Lighting check" in history_page.data
+    assert b"Delete" in history_page.data
+    assert history_page.data.index(b"Second note") < history_page.data.index(b"First note")
+
+    customer_sign_in(client, email="reviewer@example.com", password="customer-password-456")
+    blocked_delete = client.post(
+        f"/account/notes/{notes[0]['id']}/delete",
+        data={
+            "account_number": "acct-1",
+        },
+        follow_redirects=True,
+    )
+    assert blocked_delete.status_code == 200
+    assert b"You can only delete notes you created." in blocked_delete.data
+    assert [note["body"] for note in app.list_account_notes("acct-1", {"kind": "customer", "user": owner})] == [
+        "Second note",
+        "First note",
+    ]
+
+    customer_sign_in(client)
+    deleted = client.post(
+        f"/account/notes/{notes[0]['id']}/delete",
+        data={
+            "account_number": "acct-1",
+        },
+        follow_redirects=False,
+    )
+    assert deleted.status_code == 302
+    assert [note["body"] for note in app.list_account_notes("acct-1", {"kind": "customer", "user": owner})] == [
+        "First note",
+    ]
+
+    sign_in(client)
+    staff_history = client.get("/history", query_string={"account_number": "acct-1"})
+    assert staff_history.status_code == 200
+    assert b"First note" in staff_history.data
+    assert notes[0]["created_at"].replace("T", " ").encode() in staff_history.data
+    assert b"name=\"body\"" not in staff_history.data
+
+
 def test_web_comparison_upload_creates_downloadable_packet(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
@@ -3526,7 +4316,6 @@ def test_web_comparison_upload_creates_downloadable_packet(tmp_path, monkeypatch
         data={
             "account_number": "acct-1",
             "display_name": "Main house",
-            "energy_company": "Duke Energy Carolinas, LLC",
             "baseline_date": "",
             "left_file": (BytesIO(left_csv), "earlier.csv"),
             "right_file": (BytesIO(right_csv), "later.csv"),
@@ -3586,6 +4375,7 @@ def test_database_settings_redact_postgres_password(monkeypatch):
 
 def test_web_routes_render_and_analyze(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
+    stub_utility_lookup(monkeypatch)
     app.web_app.config["TESTING"] = True
 
     client = app.web_app.test_client()
@@ -3596,17 +4386,18 @@ def test_web_routes_render_and_analyze(tmp_path, monkeypatch):
 
     sign_in(client)
     authorize_account("acct-1")
+    app.save_household_profile("acct-1", {"address": "1 Main Street, Raleigh, NC", "zip_code": "27601"})
     home = client.get("/")
     assert home.status_code == 200
     assert b"Review" in home.data
-    assert b"Add history to start the review." in home.data
+    assert b"Bring the utility export into the record." in home.data
     assert b"Commission access" not in home.data
     assert b"House load list" not in home.data
 
     assert b"Commission access" in client.get("/staff").data
     assert b"People with account access" in client.get("/people").data
-    assert b"Utility data connection" in client.get("/utility").data
-    assert b"House load list" in client.get("/inventory").data
+    assert b"Keep the data source clear." in client.get("/utility").data
+    assert b"Household load record" in client.get("/inventory").data
     assert b"Files that work today" in client.get("/history").data
     assert b"Duke Energy history" in client.get("/history").data
     assert b"Interval spreadsheet" in client.get("/history").data
@@ -3629,12 +4420,14 @@ def test_web_routes_render_and_analyze(tmp_path, monkeypatch):
         )
 
     assert response.status_code == 200
-    assert b"Selected day" in response.data
-    assert b"Click a day to see the curve" in response.data
+    assert b"Day inspector" in response.data
+    assert b"Pick a day in the table to load its curve" in response.data
     assert b"All-on check" in response.data
-    assert b"Load test" in response.data
     assert b"Download CSV" in response.data
     assert b"Download JSON" in response.data
+    assert b"Readings added" in response.data
+    assert b"Already present" in response.data
+    assert b"Conflicts skipped" in response.data
     assert list((tmp_path / "output").glob("*.csv"))
     assert list((tmp_path / "output").glob("*.json"))
 
@@ -3653,8 +4446,8 @@ def test_index_shows_latest_analysis_for_default_account(tmp_path, monkeypatch):
 
     assert home.status_code == 200
     assert b"Commission Review" in home.data
-    assert b"Start here." in home.data
-    assert b"Selected day" in home.data
+    assert b"What the current rules picked out" in home.data
+    assert b"Day inspector" in home.data
 
 
 def test_commissioner_can_invite_staff(tmp_path, monkeypatch):

@@ -97,8 +97,295 @@
     });
   }
 
+  function bufferToBase64Url(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    bytes.forEach((byte) => {
+      binary += String.fromCharCode(byte);
+    });
+    return window.btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
+
+  function base64UrlToBuffer(value) {
+    const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const binary = window.atob(padded);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes.buffer;
+  }
+
+  function normalizeWebAuthnRequest(value) {
+    if (Array.isArray(value)) {
+      return value.map((item) => normalizeWebAuthnRequest(item));
+    }
+    if (value && typeof value === "object") {
+      const normalized = {};
+      Object.entries(value).forEach(([key, item]) => {
+        if (key === "challenge") {
+          normalized[key] = base64UrlToBuffer(item);
+          return;
+        }
+        if ((key === "allowCredentials" || key === "excludeCredentials") && Array.isArray(item)) {
+          normalized[key] = item.map((credential) => ({
+            ...credential,
+            id: base64UrlToBuffer(credential.id),
+          }));
+          return;
+        }
+        if (key === "user" && item && typeof item === "object") {
+          normalized[key] = {
+            ...item,
+            id: base64UrlToBuffer(item.id),
+          };
+          return;
+        }
+        normalized[key] = normalizeWebAuthnRequest(item);
+      });
+      return normalized;
+    }
+    return value;
+  }
+
+  function credentialToJSON(credential) {
+    const response = credential.response || {};
+    const payload = {
+      id: credential.id,
+      rawId: bufferToBase64Url(credential.rawId),
+      type: credential.type,
+      response: {},
+      clientExtensionResults: credential.getClientExtensionResults ? credential.getClientExtensionResults() : {},
+    };
+
+    if (response.clientDataJSON) {
+      payload.response.clientDataJSON = bufferToBase64Url(response.clientDataJSON);
+    }
+    if (response.attestationObject) {
+      payload.response.attestationObject = bufferToBase64Url(response.attestationObject);
+    }
+    if (response.authenticatorData) {
+      payload.response.authenticatorData = bufferToBase64Url(response.authenticatorData);
+    }
+    if (response.signature) {
+      payload.response.signature = bufferToBase64Url(response.signature);
+    }
+    if (response.userHandle) {
+      payload.response.userHandle = bufferToBase64Url(response.userHandle);
+    }
+
+    return payload;
+  }
+
+  function csrfTokenForForm(form) {
+    return form.querySelector('input[name="_csrf_token"]')?.value || "";
+  }
+
+  function passkeyStatus(form) {
+    return form.querySelector("[data-passkey-status]");
+  }
+
+  async function handlePasskeyLogin(form) {
+    if (!window.PublicKeyCredential || !navigator.credentials) {
+      throw new Error("This browser does not support passkeys.");
+    }
+
+    const startUrl = form.dataset.passkeyStartUrl;
+    const finishUrl = form.dataset.passkeyFinishUrl;
+    const status = passkeyStatus(form);
+    const emailInput = form.querySelector('input[name="email"]');
+    const nextInput = form.querySelector('input[name="next"]');
+    const csrfToken = csrfTokenForForm(form);
+    const email = emailInput ? emailInput.value.trim() : "";
+    const next = nextInput ? nextInput.value : "";
+
+    if (!email) {
+      throw new Error("Enter your email first.");
+    }
+
+    if (status) {
+      status.textContent = "Waiting for your passkey...";
+    }
+
+    const startResponse = await fetch(startUrl, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "X-CSRF-Token": csrfToken,
+      },
+      body: new URLSearchParams({ email, next }),
+    });
+    const startPayload = await startResponse.json();
+    if (!startResponse.ok) {
+      throw new Error(startPayload.error || "Passkey sign-in could not start.");
+    }
+
+    const publicKey = normalizeWebAuthnRequest(startPayload.publicKey || {});
+    const credential = await navigator.credentials.get({ publicKey });
+    if (!credential) {
+      throw new Error("Passkey sign-in was cancelled.");
+    }
+
+    const finishResponse = await fetch(finishUrl, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-CSRF-Token": csrfToken,
+      },
+      body: JSON.stringify(credentialToJSON(credential)),
+    });
+    const finishPayload = await finishResponse.json();
+    if (!finishResponse.ok) {
+      throw new Error(finishPayload.error || "Passkey sign-in could not finish.");
+    }
+
+    window.location.assign(finishPayload.redirect || "/");
+  }
+
+  async function handlePasskeyEnrollment(form) {
+    if (!window.PublicKeyCredential || !navigator.credentials) {
+      throw new Error("This browser does not support passkeys.");
+    }
+
+    const startUrl = form.action;
+    const finishUrl = form.dataset.passkeyFinishUrl;
+    const status = passkeyStatus(form);
+    const nicknameInput = form.querySelector('input[name="nickname"]');
+    const csrfToken = csrfTokenForForm(form);
+    const nickname = nicknameInput ? nicknameInput.value.trim() : "";
+
+    if (status) {
+      status.textContent = "Creating your passkey...";
+    }
+
+    const startResponse = await fetch(startUrl, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "X-CSRF-Token": csrfToken,
+      },
+      body: new URLSearchParams({ nickname }),
+    });
+    const startPayload = await startResponse.json();
+    if (!startResponse.ok) {
+      throw new Error(startPayload.error || "Passkey setup could not start.");
+    }
+
+    const publicKey = normalizeWebAuthnRequest(startPayload.publicKey || {});
+    const credential = await navigator.credentials.create({ publicKey });
+    if (!credential) {
+      throw new Error("Passkey setup was cancelled.");
+    }
+
+    const finishResponse = await fetch(finishUrl, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-CSRF-Token": csrfToken,
+      },
+      body: JSON.stringify(credentialToJSON(credential)),
+    });
+    const finishPayload = await finishResponse.json();
+    if (!finishResponse.ok) {
+      throw new Error(finishPayload.error || "Passkey setup could not finish.");
+    }
+
+    if (status) {
+      status.textContent = "Passkey saved.";
+    }
+    window.location.reload();
+  }
+
+  function setupPasskeys() {
+    document.querySelectorAll("[data-passkey-login]").forEach((form) => {
+      if (form.dataset.passkeyReady === "true") {
+        return;
+      }
+      form.dataset.passkeyReady = "true";
+      const button = form.querySelector("[data-passkey-login-button]");
+      const status = passkeyStatus(form);
+      if (!button) {
+        return;
+      }
+      button.addEventListener("click", async () => {
+        const original = button.textContent;
+        button.disabled = true;
+        if (status) {
+          status.textContent = "Waiting for your passkey...";
+        }
+        try {
+          await handlePasskeyLogin(form);
+        } catch (error) {
+          if (status) {
+            status.textContent = error.message;
+          }
+        } finally {
+          button.disabled = false;
+          button.textContent = original;
+        }
+      });
+    });
+
+    document.querySelectorAll("[data-passkey-enroll]").forEach((form) => {
+      if (form.dataset.passkeyReady === "true") {
+        return;
+      }
+      form.dataset.passkeyReady = "true";
+      const button = form.querySelector("[data-passkey-enroll-button]");
+      const status = passkeyStatus(form);
+      if (!button) {
+        return;
+      }
+      button.addEventListener("click", async () => {
+        const original = button.textContent;
+        button.disabled = true;
+        if (status) {
+          status.textContent = "Creating your passkey...";
+        }
+        try {
+          await handlePasskeyEnrollment(form);
+        } catch (error) {
+          if (status) {
+            status.textContent = error.message;
+          }
+        } finally {
+          button.disabled = false;
+          button.textContent = original;
+        }
+      });
+    });
+  }
+
+  function setupNoteTemplates() {
+    document.querySelectorAll("[data-note-template-button]").forEach((button) => {
+      if (button.dataset.noteTemplateReady === "true") {
+        return;
+      }
+      button.dataset.noteTemplateReady = "true";
+      button.addEventListener("click", () => {
+        const form = button.closest("form");
+        const textarea = form ? form.querySelector('textarea[name="body"]') : null;
+        const template = button.dataset.noteTemplate || "";
+        if (!textarea || !template) {
+          return;
+        }
+        textarea.value = textarea.value.trim() ? `${textarea.value.trim()}\n\n${template}` : template;
+        textarea.focus();
+        const end = textarea.value.length;
+        textarea.setSelectionRange(end, end);
+      });
+    });
+  }
+
   setupUtilityLookups();
   setupPasswordToggles();
+  setupPasskeys();
+  setupNoteTemplates();
 
   const root = document.getElementById("day-detail-root");
   if (!root) {
@@ -114,7 +401,19 @@
   const headingTarget = document.getElementById("detail-heading");
   const subheadingTarget = document.getElementById("detail-subheading");
   const dayButtons = Array.from(document.querySelectorAll(".day-select"));
+  const dayRows = Array.from(document.querySelectorAll(".day-row"));
+  const dayTableBody = document.querySelector("[data-day-table-body]");
+  const dayFilterButtons = Array.from(document.querySelectorAll("[data-day-filter]"));
+  const daySortSelect = document.getElementById("day-sort");
   const initialEl = document.getElementById("initial-day-detail");
+  const notesEl = document.getElementById("analysis-notes-data");
+  const noteModal = document.getElementById("note-modal");
+  const noteModalTitle = document.getElementById("note-modal-title");
+  const noteModalSubtitle = document.getElementById("note-modal-subtitle");
+  const noteModalContent = document.getElementById("note-modal-content");
+  const noteModalClose = document.getElementById("note-modal-close");
+  const detailNoteButton = document.getElementById("detail-note-button");
+  const detailNoteIndicator = document.getElementById("detail-note-indicator");
   const loadTestInterval = document.getElementById("load-test-interval");
   const loadTestExpected = document.getElementById("load-test-expected");
   const loadTestActual = document.getElementById("load-test-actual");
@@ -124,6 +423,7 @@
   const loadTestClear = document.getElementById("load-test-clear");
   const loadTestInputs = Array.from(document.querySelectorAll(".load-test-count"));
   let currentDetail = null;
+  let activeDayFilter = "all";
 
   const settings = {
     account_number: root.dataset.accountNumber,
@@ -133,6 +433,14 @@
     min_night_kw: root.dataset.minNightKw,
     night_multiplier: root.dataset.nightMultiplier,
   };
+  let accountNotes = [];
+  if (notesEl?.textContent) {
+    try {
+      accountNotes = JSON.parse(notesEl.textContent);
+    } catch (error) {
+      accountNotes = [];
+    }
+  }
 
   function escapeHtml(value) {
     return String(value)
@@ -157,6 +465,132 @@
     const numeric = Number(value);
     const prefix = numeric > 0 ? "+" : "";
     return `${prefix}${numeric.toFixed(3).replace(/\.?0+$/, "")}${suffix || ""}`;
+  }
+
+  function notesForDate(date) {
+    return accountNotes.filter((note) => note.note_date === date);
+  }
+
+  function closeNotesModal() {
+    if (!noteModal) {
+      return;
+    }
+    noteModal.hidden = true;
+    document.body.classList.remove("modal-open");
+  }
+
+  function openNotesModal(date) {
+    if (!noteModal || !noteModalTitle || !noteModalSubtitle || !noteModalContent) {
+      return;
+    }
+    const notes = notesForDate(date);
+    noteModalTitle.textContent = `Notes for ${date}`;
+    noteModalSubtitle.textContent = notes.length
+      ? `${notes.length} note${notes.length === 1 ? "" : "s"} recorded for this day.`
+      : "No saved notes for this day yet.";
+    noteModalContent.innerHTML = notes.length
+      ? notes
+          .map(
+            (note) => `
+              <article class="modal-note-card">
+                <div class="modal-note-meta">
+                  <strong>${escapeHtml(note.note_date)}</strong>
+                  <span>${escapeHtml(note.author_label || "Homeowner")}${note.created_at ? ` · ${escapeHtml(String(note.created_at).replace("T", " "))}` : ""}</span>
+                </div>
+                <div class="modal-note-body">${escapeHtml(note.body || "").replace(/\n/g, "<br>")}</div>
+              </article>
+            `
+          )
+          .join("")
+      : '<div class="empty-note">No dated note is saved for this day yet.</div>';
+    noteModal.hidden = false;
+    document.body.classList.add("modal-open");
+  }
+
+  function updateDetailNoteState(detail) {
+    if (!detailNoteButton || !detailNoteIndicator) {
+      return;
+    }
+    const noteCount = Number(detail?.note_count || 0);
+    if (!detail || !detail.date || noteCount <= 0) {
+      detailNoteButton.hidden = true;
+      detailNoteButton.removeAttribute("data-note-date");
+      detailNoteIndicator.hidden = true;
+      detailNoteIndicator.textContent = "";
+      return;
+    }
+    detailNoteButton.hidden = false;
+    detailNoteButton.dataset.noteDate = detail.date;
+    detailNoteIndicator.hidden = false;
+    detailNoteIndicator.textContent = `${noteCount} note${noteCount === 1 ? "" : "s"}`;
+  }
+
+  function sortRows(rows, mode) {
+    const byNumber = (row, key, fallback = -1) => {
+      const raw = row.dataset[key];
+      const numeric = Number(raw);
+      return Number.isFinite(numeric) ? numeric : fallback;
+    };
+
+    const sorted = [...rows];
+    sorted.sort((left, right) => {
+      switch (mode) {
+        case "date_asc":
+          return String(left.dataset.date).localeCompare(String(right.dataset.date));
+        case "date_desc":
+          return String(right.dataset.date).localeCompare(String(left.dataset.date));
+        case "total_desc":
+          return byNumber(right, "total") - byNumber(left, "total");
+        case "night_desc":
+          return byNumber(right, "night") - byNumber(left, "night");
+        case "peak_desc":
+          return byNumber(right, "peak") - byNumber(left, "peak");
+        case "alerts_desc":
+          return byNumber(right, "alerts") - byNumber(left, "alerts");
+        case "notes_desc":
+          return byNumber(right, "noteCount") - byNumber(left, "noteCount");
+        case "severity_desc":
+        default: {
+          const severity = byNumber(right, "severity") - byNumber(left, "severity");
+          if (severity !== 0) {
+            return severity;
+          }
+          const suspicious = byNumber(right, "suspicious") - byNumber(left, "suspicious");
+          if (suspicious !== 0) {
+            return suspicious;
+          }
+          return String(right.dataset.date).localeCompare(String(left.dataset.date));
+        }
+      }
+    });
+    return sorted;
+  }
+
+  function applyDayExplorerState() {
+    if (!dayTableBody || !dayRows.length) {
+      return;
+    }
+    const filteredRows = dayRows.filter((row) => {
+      if (activeDayFilter === "flagged") {
+        return row.dataset.suspicious === "1";
+      }
+      if (activeDayFilter === "notes") {
+        return Number(row.dataset.noteCount || 0) > 0;
+      }
+      if (activeDayFilter === "quiet") {
+        return row.dataset.suspicious === "0";
+      }
+      return true;
+    });
+
+    dayRows.forEach((row) => {
+      row.hidden = !filteredRows.includes(row);
+    });
+
+    const sortedRows = sortRows(filteredRows, daySortSelect?.value || "severity_desc");
+    sortedRows.forEach((row) => {
+      dayTableBody.appendChild(row);
+    });
   }
 
   function setActiveRow(date) {
@@ -334,9 +768,10 @@
   function renderMetrics(detail) {
     const cards = [
       {
-        label: "Total use that day",
+        label: "Total use",
         value: formatNumber(detail.current_day.total_kwh, " kWh"),
-        note: detail.current_day.reasons || "No alert rule fired.",
+        // The full rule text is already shown once, in the subheading above.
+        note: detail.current_day.suspicious ? "Flagged for review." : "No rule fired.",
       },
       {
         label: "Night average",
@@ -522,7 +957,7 @@
     currentDetail = detail;
     if (!detail || !detail.current_day) {
       headingTarget.textContent = "Choose a flagged day";
-      subheadingTarget.textContent = "Click any day below to load the curve and the comparisons.";
+      subheadingTarget.textContent = "Click a day to see the curve, comparisons, weather, notes, and load checks.";
       metricsTarget.innerHTML = "";
       comparisonTarget.innerHTML = "";
       spikesTarget.innerHTML = "";
@@ -531,6 +966,7 @@
       }
       chartTarget.innerHTML = '<div class="chart-empty">Pick a day to see the meter curve.</div>';
       legendTarget.innerHTML = "";
+      updateDetailNoteState(null);
       populateLoadTestIntervals(null);
       return;
     }
@@ -543,6 +979,7 @@
     renderComparison(detail);
     renderSpikes(detail);
     renderWeather(detail);
+    updateDetailNoteState(detail);
     populateLoadTestIntervals(detail);
     setActiveRow(detail.date);
   }
@@ -574,6 +1011,54 @@
       }
     });
   });
+
+  document.querySelectorAll(".note-marker[data-note-date]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openNotesModal(button.dataset.noteDate);
+    });
+  });
+
+  if (detailNoteButton) {
+    detailNoteButton.addEventListener("click", () => {
+      if (detailNoteButton.dataset.noteDate) {
+        openNotesModal(detailNoteButton.dataset.noteDate);
+      }
+    });
+  }
+
+  if (noteModalClose) {
+    noteModalClose.addEventListener("click", closeNotesModal);
+  }
+
+  if (noteModal) {
+    noteModal.addEventListener("click", (event) => {
+      if (event.target === noteModal) {
+        closeNotesModal();
+      }
+    });
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && noteModal && !noteModal.hidden) {
+      closeNotesModal();
+    }
+  });
+
+  dayFilterButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      activeDayFilter = button.dataset.dayFilter || "all";
+      dayFilterButtons.forEach((candidate) => {
+        candidate.classList.toggle("active", candidate === button);
+      });
+      applyDayExplorerState();
+    });
+  });
+
+  if (daySortSelect) {
+    daySortSelect.addEventListener("change", applyDayExplorerState);
+  }
 
   if (loadTestInterval) {
     loadTestInterval.addEventListener("change", updateLoadTest);
@@ -611,5 +1096,6 @@
   }
 
   renderDetail(initialDetail);
+  applyDayExplorerState();
   updateLoadTest();
 })();
