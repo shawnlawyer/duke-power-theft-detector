@@ -4429,6 +4429,43 @@ def test_web_routes_render_and_analyze(tmp_path, monkeypatch):
     assert list((tmp_path / "output").glob("*.json"))
 
 
+def test_web_analyze_does_not_fetch_weather_during_upload(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    stub_utility_lookup(monkeypatch)
+    app.web_app.config["TESTING"] = True
+    authorize_account("acct-1")
+    app.save_household_profile(
+        "acct-1",
+        {"address": "1 Main Street, Raleigh, NC", "zip_code": "27601"},
+    )
+
+    def fail_weather(*args, **kwargs):
+        raise AssertionError("weather must not block an upload")
+
+    monkeypatch.setattr(app, "load_weather_contexts_for_suspicious_days", fail_weather)
+    monkeypatch.setattr(app, "load_day_weather", fail_weather)
+
+    client = app.web_app.test_client()
+    sign_in(client)
+    with FIXTURE.open("rb") as handle:
+        response = client.post(
+            "/analyze",
+            data={
+                "account_number": "acct-1",
+                "xml_file": (handle, "sample_interval.xml"),
+                "tz": "America/New_York",
+                "night_start": "02:00",
+                "night_end": "04:00",
+                "min_night_kw": "1.0",
+                "night_multiplier": "2.0",
+            },
+            content_type="multipart/form-data",
+        )
+
+    assert response.status_code == 200
+    assert b"Weather loads when you open a day." in response.data
+
+
 def test_index_shows_latest_analysis_for_default_account(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True

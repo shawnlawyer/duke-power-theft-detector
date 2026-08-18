@@ -8172,13 +8172,13 @@ class GreenButtonESPIAdapter(UtilityFeedAdapter):
             return 0
         if not isinstance(source, etree._ElementTree):
             return 0
-        has_espi = bool(source.xpath("//*[namespace-uri()='http://naesb.org/espi']"))
+        has_espi = any(xml_namespace(element.tag) == "http://naesb.org/espi" for element in source.iter())
         if not has_espi:
             return 0
-        has_atom_root = bool(
-            source.xpath(
-                "/*[local-name()='feed' or local-name()='entry'][namespace-uri()='http://www.w3.org/2005/Atom']"
-            )
+        root = source.getroot()
+        has_atom_root = (
+            xml_local_name(root.tag) in {"feed", "entry"}
+            and xml_namespace(root.tag) == "http://www.w3.org/2005/Atom"
         )
         return 120 if has_atom_root else 100
 
@@ -8200,14 +8200,22 @@ class DukeStyleIntervalXmlAdapter(UtilityFeedAdapter):
             return 0
         if not isinstance(source, etree._ElementTree):
             return 0
-        if bool(source.xpath("//*[namespace-uri()='http://naesb.org/espi']")):
+        if any(xml_namespace(element.tag) == "http://naesb.org/espi" for element in source.iter()):
             return 0
-        has_interval_reading = bool(source.xpath("//*[local-name()='IntervalReading']"))
+        root = source.getroot()
+        has_interval_reading = False
+        has_interval_block = False
+        for element in source.iter():
+            name = xml_local_name(element.tag)
+            if name == "IntervalReading":
+                has_interval_reading = True
+            elif name == "IntervalBlock":
+                has_interval_block = True
         if not has_interval_reading:
             return 0
-        if bool(source.xpath("/*[local-name()='UsagePoint']")):
+        if xml_local_name(root.tag) == "UsagePoint":
             return 80
-        if bool(source.xpath("//*[local-name()='IntervalBlock']")):
+        if has_interval_block:
             return 60
         return 40
 
@@ -8368,36 +8376,72 @@ def detect_utility_feed_adapter(path: str | Path) -> dict[str, object]:
     }
 
 
+def xml_local_name(tag: object) -> str:
+    if not isinstance(tag, str):
+        return ""
+    return tag.rsplit("}", 1)[-1]
+
+
+def xml_namespace(tag: object) -> str:
+    if not isinstance(tag, str) or not tag.startswith("{"):
+        return ""
+    return tag[1:].split("}", 1)[0]
+
+
+def xml_child_text(element: etree._Element, child_name: str) -> str | None:
+    for child in element:
+        if xml_local_name(child.tag) == child_name:
+            return child.text
+    return None
+
+
+def interval_reading_values(
+    interval_reading: etree._Element,
+) -> tuple[str | None, str | None, str | None]:
+    start_text = None
+    duration_text = None
+    value_text = None
+    for child in interval_reading:
+        child_name = xml_local_name(child.tag)
+        if child_name == "timePeriod":
+            start_text = xml_child_text(child, "start")
+            duration_text = xml_child_text(child, "duration")
+        elif child_name == "value":
+            value_text = child.text
+    return start_text, duration_text, value_text
+
+
 def build_interval_rows_from_tree(tree: etree._ElementTree, local_tz) -> list[dict[str, object]]:
     intervals: list[dict[str, object]] = []
-    interval_blocks = tree.xpath("//*[local-name()='IntervalBlock']")
+    interval_blocks = [element for element in tree.iter() if xml_local_name(element.tag) == "IntervalBlock"]
 
     for block in interval_blocks:
-        metadata = block.xpath("./*[local-name()='interval'][1]")
         default_duration = None
         unit_of_measure = None
-        if metadata:
-            seconds_per_interval = metadata[0].xpath("./*[local-name()='secondsPerInterval']/text()")
-            unit_text = metadata[0].xpath("./*[local-name()='unitOfMeasure']/text()")
-            if seconds_per_interval:
-                try:
-                    default_duration = int(seconds_per_interval[0].strip())
-                except (TypeError, ValueError):
-                    default_duration = None
-            if unit_text:
-                unit_of_measure = unit_text[0].strip()
+        metadata = next(
+            (child for child in block if xml_local_name(child.tag) == "interval"),
+            None,
+        )
+        if metadata is not None:
+            seconds_per_interval = xml_child_text(metadata, "secondsPerInterval")
+            unit_text = xml_child_text(metadata, "unitOfMeasure")
+            try:
+                default_duration = int(seconds_per_interval.strip()) if seconds_per_interval else None
+            except (AttributeError, TypeError, ValueError):
+                default_duration = None
+            unit_of_measure = unit_text.strip() if unit_text else None
 
-        for interval_reading in block.xpath("./*[local-name()='IntervalReading']"):
-            start_elem = interval_reading.xpath("./*[local-name()='timePeriod']/*[local-name()='start']/text()")
-            duration_elem = interval_reading.xpath("./*[local-name()='timePeriod']/*[local-name()='duration']/text()")
-            value_elem = interval_reading.xpath("./*[local-name()='value']/text()")
-            if not (start_elem and value_elem):
+        for interval_reading in block:
+            if xml_local_name(interval_reading.tag) != "IntervalReading":
+                continue
+            start_text, duration_text, value_text = interval_reading_values(interval_reading)
+            if not (start_text and value_text):
                 continue
 
             try:
-                start_epoch = int(start_elem[0].strip())
-                duration_seconds = int(duration_elem[0].strip()) if duration_elem else default_duration
-                raw_value = float(value_elem[0].strip())
+                start_epoch = int(start_text.strip())
+                duration_seconds = int(duration_text.strip()) if duration_text else default_duration
+                raw_value = float(value_text.strip())
             except (AttributeError, TypeError, ValueError):
                 continue
 
@@ -8421,17 +8465,17 @@ def build_interval_rows_from_tree(tree: etree._ElementTree, local_tz) -> list[di
             )
     if not intervals:
         # Fallback for simpler XML variants that may not use IntervalBlock metadata.
-        for interval_reading in tree.xpath("//*[local-name()='IntervalReading']"):
-            start_elem = interval_reading.xpath("./*[local-name()='timePeriod']/*[local-name()='start']/text()")
-            duration_elem = interval_reading.xpath("./*[local-name()='timePeriod']/*[local-name()='duration']/text()")
-            value_elem = interval_reading.xpath("./*[local-name()='value']/text()")
-            if not (start_elem and duration_elem and value_elem):
+        for interval_reading in tree.iter():
+            if xml_local_name(interval_reading.tag) != "IntervalReading":
+                continue
+            start_text, duration_text, value_text = interval_reading_values(interval_reading)
+            if not (start_text and duration_text and value_text):
                 continue
 
             try:
-                start_epoch = int(start_elem[0].strip())
-                duration_seconds = int(duration_elem[0].strip())
-                raw_value = float(value_elem[0].strip())
+                start_epoch = int(start_text.strip())
+                duration_seconds = int(duration_text.strip())
+                raw_value = float(value_text.strip())
             except (AttributeError, TypeError, ValueError):
                 continue
 
@@ -10260,7 +10304,12 @@ def build_report_context(
                 3,
             ),
         }
-        initial_day_detail["weather"] = load_day_weather(account["account_number"], focus_date, settings["tz"])
+        # Weather is deliberately loaded by /api/day-detail after the user
+        # chooses a day. Do not make an upload wait on external weather APIs.
+        initial_day_detail["weather"] = {
+            "available": False,
+            "reason": "Weather loads when you open a day.",
+        }
     return {
         **snapshot,
         "baseline_date": account.get("baseline_date"),
@@ -13152,11 +13201,9 @@ def create_web_app() -> Flask:
             baseline_date=account.get("baseline_date"),
         )
         report_path = build_output_path(Path("combined-history.xml"))
-        weather_contexts = load_weather_contexts_for_suspicious_days(
-            summary,
-            account["account_number"],
-            settings["tz"],
-        )
+        # Keep upload/import synchronous only for local meter data. Historical
+        # weather is fetched on demand by the selected-day detail endpoint.
+        weather_contexts = {}
         report_summary = attach_weather_context_to_summary(summary, weather_contexts)
         report_summary.to_csv(report_path, index=True)
         visible_accounts = list_accounts()
@@ -13531,11 +13578,9 @@ def create_web_app() -> Flask:
                 baseline_date=account.get("baseline_date"),
             )
             report_path = build_output_path(Path("combined-history.xml"))
-            weather_contexts = load_weather_contexts_for_suspicious_days(
-                summary,
-                account["account_number"],
-                settings["tz"],
-            )
+            # Keep upload/import synchronous only for local meter data. Historical
+            # weather is fetched on demand by the selected-day detail endpoint.
+            weather_contexts = {}
             report_summary = attach_weather_context_to_summary(summary, weather_contexts)
             report_summary.to_csv(report_path, index=True)
         except Exception as exc:
