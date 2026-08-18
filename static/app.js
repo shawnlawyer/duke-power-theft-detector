@@ -467,6 +467,30 @@
     return `${prefix}${numeric.toFixed(3).replace(/\.?0+$/, "")}${suffix || ""}`;
   }
 
+  function describeChange(value, suffix) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) {
+      return "not available";
+    }
+    const numeric = Number(value);
+    if (Math.abs(numeric) < 0.0005) {
+      return `no change${suffix || ""}`;
+    }
+    const direction = numeric > 0 ? "higher" : "lower";
+    return `${formatNumber(Math.abs(numeric), suffix)} ${direction}`;
+  }
+
+  function describeGap(value, subject) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) {
+      return `Add the ${subject} to compare it.`;
+    }
+    const numeric = Number(value);
+    if (Math.abs(numeric) < 0.0005) {
+      return `Matches the ${subject}.`;
+    }
+    const direction = numeric > 0 ? "above" : "below";
+    return `${formatNumber(Math.abs(numeric), " kW")} ${direction} the ${subject}.`;
+  }
+
   function notesForDate(date) {
     return accountNotes.filter((note) => note.note_date === date);
   }
@@ -783,16 +807,16 @@
         value: formatNumber(detail.current_day.max_kw, " kW"),
         note:
           detail.inventory_alignment?.all_on_gap_kw === null
-            ? "Add your load list to compare this against the all-on check."
-            : `${formatSigned(detail.inventory_alignment.all_on_gap_kw, " kW")} against the all-on check.`,
+            ? "Add your load list to compare this against the listed-load estimate."
+            : describeGap(detail.inventory_alignment.all_on_gap_kw, "listed-load estimate"),
       },
       {
         label: "Mostly-off check",
         value: formatNumber(detail.load_summary?.off_kw, " kW"),
         note:
           detail.inventory_alignment?.off_gap_kw === null
-            ? "Add overnight loads or wait for a night average."
-            : `${formatSigned(detail.inventory_alignment.off_gap_kw, " kW")} against the mostly-off check.`,
+            ? "Mark any always-on loads in your inventory first."
+            : describeGap(detail.inventory_alignment.off_gap_kw, "always-on estimate"),
       },
     ];
 
@@ -814,28 +838,28 @@
     if (detail.previous_day && detail.vs_previous_day) {
       rows.push({
         title: `Versus ${detail.previous_day.label}`,
-        body: `Total ${formatSigned(detail.vs_previous_day.total_kwh, " kWh")}, night average ${formatSigned(
+        body: `Total use was ${describeChange(detail.vs_previous_day.total_kwh, " kWh")}; night average was ${describeChange(
           detail.vs_previous_day.night_avg_kw,
           " kW"
-        )}, peak ${formatSigned(detail.vs_previous_day.max_kw, " kW")}.`,
+        )}; peak was ${describeChange(detail.vs_previous_day.max_kw, " kW")}.`,
       });
     }
     if (detail.baseline_day && detail.vs_baseline_day) {
       rows.push({
         title: `Versus ${detail.baseline_day.label}`,
-        body: `Total ${formatSigned(detail.vs_baseline_day.total_kwh, " kWh")}, night average ${formatSigned(
+        body: `Total use was ${describeChange(detail.vs_baseline_day.total_kwh, " kWh")}; night average was ${describeChange(
           detail.vs_baseline_day.night_avg_kw,
           " kW"
-        )}, peak ${formatSigned(detail.vs_baseline_day.max_kw, " kW")}.`,
+        )}; peak was ${describeChange(detail.vs_baseline_day.max_kw, " kW")}.`,
       });
     }
     if (detail.load_summary) {
       rows.push({
         title: "House load list",
-        body: `Everything on adds up to ${formatNumber(detail.load_summary.all_on_kw, " kW")}. Mostly off adds up to ${formatNumber(
-          detail.load_summary.off_kw,
-          " kW"
-        )}.`,
+        body: `Listed loads at once: ${formatNumber(detail.load_summary.all_on_watts, " W")}. Marked always-on loads: ${formatNumber(
+          detail.load_summary.off_watts,
+          " W"
+        )}. This is the inventory estimate, not the meter reading.`,
       });
     }
 
@@ -861,13 +885,22 @@
     (detail.top_jumps || []).forEach((jump) => {
       rows.push({
         title: `${jump.time}`,
-        body: `${formatNumber(jump.kw, " kW")} after a ${formatNumber(jump.delta_kw, " kW")} jump.`,
+        body: `${formatNumber(jump.kw, " kW")}; up ${formatNumber(jump.delta_kw, " kW")} from the reading before.`,
       });
     });
     (detail.alert_events || []).forEach((event) => {
+      const details = [];
+      if (event.expected_kw !== null && event.expected_kw !== undefined) {
+        details.push(
+          `${formatNumber(event.excess_kw, " kW")} above the normal overnight level of ${formatNumber(event.expected_kw, " kW")}`
+        );
+      }
+      if (event.delta_kw !== null && event.delta_kw !== undefined && Number(event.delta_kw) > 0) {
+        details.push(`up ${formatNumber(event.delta_kw, " kW")} from the reading before`);
+      }
       rows.push({
-        title: event.timestamp,
-        body: `${formatNumber(event.kw, " kW")}. ${event.reasons}`,
+        title: event.timestamp_label || event.timestamp,
+        body: `${formatNumber(event.kw, " kW")}${details.length ? `; ${details.join("; ")}.` : "."}`,
       });
     });
 

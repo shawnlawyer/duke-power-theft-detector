@@ -7485,12 +7485,13 @@ def resolve_energy_company_for_form(
     return str(lookup_energy_company_by_zip(zip_code, address).get("energy_company") or "")
 
 
-def geocode_address(address: str) -> dict[str, object] | None:
-    if not address.strip():
+def geocode_address(address: str, zip_code: str | None = None) -> dict[str, object] | None:
+    search_parts = [part.strip() for part in (address, zip_code, "USA") if part and part.strip()]
+    if not search_parts:
         return None
     params = urlencode(
         {
-            "name": address,
+            "name": ", ".join(search_parts),
             "count": 1,
             "language": "en",
             "format": "json",
@@ -7544,10 +7545,10 @@ def resolve_household_weather_location(account_number: str | None) -> dict[str, 
     profile = load_household_profile(account_number)
     if profile["latitude"] is not None and profile["longitude"] is not None:
         return profile
-    if not profile["address"]:
+    if not profile["address"] and not profile.get("zip_code"):
         return None
 
-    resolved = geocode_address(profile["address"])
+    resolved = geocode_address(profile.get("address") or "", profile.get("zip_code"))
     if resolved is None:
         return None
     return save_household_weather_location(
@@ -7808,7 +7809,7 @@ def load_day_weather(account_number: str | None, weather_date: str | None, tz_na
     except Exception:
         return {"available": False, "reason": "Weather could not be looked up right now."}
     if location is None:
-        return {"available": False, "reason": "Add the service address to pull weather for that day."}
+        return {"available": False, "reason": "Add the service address or ZIP code in Account to pull weather for that day."}
 
     with get_db_connection() as conn:
         account = get_or_create_account(conn, account_number)
@@ -8923,6 +8924,7 @@ def compute_alert_events(
         events.append(
             {
                 "timestamp": row.start.isoformat(),
+                "timestamp_label": format_event_timestamp(row.start),
                 "date": row.start.date().isoformat(),
                 "kw": round(float(row.kw), 3),
                 "delta_kw": None if pd.isna(row.delta_kw) else round(float(row.delta_kw), 3),
@@ -8992,6 +8994,18 @@ def format_timestamp_label(value: pd.Timestamp) -> str:
     hour = value.hour % 12 or 12
     suffix = "a.m." if value.hour < 12 else "p.m."
     return f"{hour}:{value.minute:02d} {suffix}"
+
+
+def format_event_timestamp(value: str | pd.Timestamp | None) -> str:
+    if value is None:
+        return "Unknown time"
+    try:
+        timestamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if pd.isna(timestamp):
+        return "Unknown time"
+    return f"{format_date_label(timestamp.date())} at {format_timestamp_label(timestamp)}"
 
 
 def format_date_label(value: ddate | None) -> str | None:
@@ -9198,7 +9212,7 @@ def build_key_findings(
         findings.append(
             {
                 "title": "Sharpest alert moment",
-                "detail": f"{top_event['timestamp']} hit {top_event['kw']:.2f} kW{jump_text}.",
+                "detail": f"{top_event.get('timestamp_label', top_event['timestamp'])} reached {top_event['kw']:.2f} kW{jump_text}.",
             }
         )
 
@@ -9225,7 +9239,7 @@ def build_key_findings(
         findings.append(
             {
                 "title": "Peak reading",
-                "detail": f"{peak['start'].isoformat()} reached {peak['kw']:.2f} kW.",
+                "detail": f"{format_event_timestamp(peak['start'])} reached {peak['kw']:.2f} kW.",
             }
         )
 

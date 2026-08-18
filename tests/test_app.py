@@ -219,6 +219,9 @@ def test_compute_alert_events_finds_midnight_spike():
 
     assert events
     assert events[0]["date"] == "2024-01-01"
+    assert events[0]["timestamp_label"].startswith("Jan 01, 2024 at ")
+    assert events[0]["expected_kw"] is not None
+    assert events[0]["excess_kw"] >= 0
     assert "midnight" in events[0]["reasons"] or "overnight" in events[0]["reasons"]
 
 
@@ -3904,6 +3907,48 @@ def test_load_day_weather_uses_geocoded_address_and_cache(tmp_path, monkeypatch)
     assert calls["count"] == 2
     assert round(float(profile["latitude"]), 4) == 35.2271
     assert profile["weather_location"] == "Charlotte, North Carolina, United States"
+
+
+def test_load_day_weather_can_use_saved_zip_when_address_is_missing(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.save_account_profile("acct-1", display_name="Test Home")
+    app.save_household_profile("acct-1", {"zip_code": "28202"})
+
+    seen_queries = []
+
+    def fake_fetch_json(url):
+        seen_queries.append(url)
+        if "geocoding-api" in url:
+            assert "28202" in url
+            return {
+                "results": [
+                    {
+                        "latitude": 35.2271,
+                        "longitude": -80.8431,
+                        "name": "Charlotte",
+                        "admin1": "North Carolina",
+                        "country": "United States",
+                    }
+                ]
+            }
+        return {
+            "hourly": {
+                "time": ["2024-01-01T00:00"],
+                "temperature_2m": [41.2],
+                "apparent_temperature": [39.7],
+                "precipitation": [0.0],
+                "weather_code": [0],
+                "cloud_cover": [10],
+                "wind_speed_10m": [3.0],
+            }
+        }
+
+    monkeypatch.setattr(app, "fetch_json", fake_fetch_json)
+
+    weather = app.load_day_weather("acct-1", "2024-01-01", "America/New_York")
+
+    assert weather["available"] is True
+    assert len(seen_queries) == 2
 
 
 def test_build_weather_context_classifies_heat_storm_and_mild_days():
