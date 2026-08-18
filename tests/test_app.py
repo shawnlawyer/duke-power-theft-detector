@@ -2558,12 +2558,15 @@ def test_marketing_host_renders_public_homepage(tmp_path, monkeypatch):
     response = client.get("/", base_url="https://homeenergywatch.com")
 
     assert response.status_code == 200
-    assert b"Find the change in the data before deciding what it means." in response.data
-    assert b"Duke Energy interval export" in response.data
-    assert b"Move from export to saved record without losing the thread." in response.data
+    assert b"Read your own meter data the way a reviewer would." in response.data
+    assert b"Duke Energy Progress" in response.data
+    assert b"Uploads stack up instead of overwriting each other." in response.data
     assert b"$19.99 / month" in response.data
     assert b"$99 / month" in response.data
-    assert b"Unlimited reports while subscribed" in response.data
+    assert b"Unlimited saved reports while the subscription is active" in response.data
+    # The public page must keep stating the limits the product is honest about.
+    assert b"It does not connect to your utility for you." in response.data
+    assert b"It is not live monitoring." in response.data
     assert b">Homeowners</a>" in response.data
     assert b">Review desk</a>" in response.data
     assert b">Start a review</a>" in response.data
@@ -4089,10 +4092,10 @@ def test_review_dashboard_renders_note_markers_and_modal_shell(tmp_path, monkeyp
     response = client.get("/", query_string={"account_number": "acct-1"})
 
     assert response.status_code == 200
-    assert b"Open notes" in response.data
+    assert b'id="detail-note-button"' in response.data
     assert b'data-note-date="2024-01-01"' in response.data
     assert b'id="note-modal"' in response.data
-    assert b"Highest usage windows" in response.data
+    assert b"Heaviest hours" in response.data
 
 
 def test_history_page_offers_two_file_comparison_upload(tmp_path, monkeypatch):
@@ -4417,12 +4420,12 @@ def test_web_routes_render_and_analyze(tmp_path, monkeypatch):
         )
 
     assert response.status_code == 200
-    assert b"Selected day" in response.data
-    assert b"Click a day to see the curve" in response.data
+    assert b"Day inspector" in response.data
+    assert b"Pick a day in the table to load its curve" in response.data
     assert b"All-on check" in response.data
     assert b"Download CSV" in response.data
     assert b"Download JSON" in response.data
-    assert b"Added" in response.data
+    assert b"Readings added" in response.data
     assert b"Already present" in response.data
     assert b"Conflicts skipped" in response.data
     assert list((tmp_path / "output").glob("*.csv"))
@@ -4480,8 +4483,8 @@ def test_index_shows_latest_analysis_for_default_account(tmp_path, monkeypatch):
 
     assert home.status_code == 200
     assert b"Commission Review" in home.data
-    assert b"What still needs review." in home.data
-    assert b"Selected day" in home.data
+    assert b"What the current rules picked out" in home.data
+    assert b"Day inspector" in home.data
 
 
 def test_commissioner_can_invite_staff(tmp_path, monkeypatch):

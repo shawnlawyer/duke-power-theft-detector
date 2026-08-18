@@ -768,9 +768,10 @@
   function renderMetrics(detail) {
     const cards = [
       {
-        label: "Total use that day",
+        label: "Total use",
         value: formatNumber(detail.current_day.total_kwh, " kWh"),
-        note: detail.current_day.reasons || "No alert rule fired.",
+        // The full rule text is already shown once, in the subheading above.
+        note: detail.current_day.suspicious ? "Flagged for review." : "No rule fired.",
       },
       {
         label: "Night average",

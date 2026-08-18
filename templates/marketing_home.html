@@ -1,43 +1,509 @@
 {% extends "marketing_base.html" %}
 
 {% block content %}
-  <main class="marketing-main sharp-home">
-    <section class="sharp-context-strip" aria-label="Review context">
-      <div><span>Starts with</span><strong>Utility exports and usage history</strong></div>
-      <div><span>Checks against</span><strong>Weather and household load</strong></div>
-      <div><span>Keeps separate</span><strong>Findings, notes, and reports</strong></div>
-      <div><span>Supports</span><strong>Homeowners and review desks</strong></div>
-    </section>
+  <main class="marketing-main">
 
-    <section class="sharp-hero">
-      <div class="sharp-hero-copy">
-        <p class="sharp-eyebrow">Utility-data review with the record still attached</p>
-        <h1>Find the change in the data before deciding what it means.</h1>
-        <p class="sharp-lead">Home Energy Watch helps homeowners and review teams read utility-use records carefully. It shows the source, the coverage period, the measured change, and the context still needed before a finding is saved.</p>
-        <div class="sharp-actions"><a class="sharp-button sharp-button-primary" href="{{ start_home_url }}">Start with a utility export</a><a class="sharp-button sharp-button-secondary" href="{{ for_commissions_url }}">See review desk flow</a></div>
-        <div class="sharp-proof-list"><div><span>Careful by default</span><strong>Patterns are flagged for review. The page does not treat a chart as a conclusion.</strong></div><div><span>Designed to grow</span><strong>Scheduled utility and weather refreshes fit today; smart-meter and device feeds can be added later.</strong></div></div>
+    {# ================= HERO ================= #}
+    <section class="wb-wrap wb-hero">
+      <div class="wb-hero-copy">
+        <p class="mini-label">Utility interval data &middot; review tool</p>
+        <h1>Read your own meter data the way a reviewer would.</h1>
+        <p class="wb-lead">
+          Download the usage history your electric utility already gives you and upload the file.
+          Home Energy Watch turns it into a measured record &mdash; an overnight baseline, the nights that
+          break from it, and the exact interval where the meter jumped &mdash; with the rules that produced
+          every flag kept attached to the result.
+        </p>
+        <div class="wb-actions">
+          <a class="button button-primary" href="{{ start_home_url }}">Start with your export</a>
+          <a class="button button-secondary" href="{{ how_it_works_url }}">How it works</a>
+        </div>
+        <p class="wb-hero-note">
+          <strong>A flag is a prompt to look, not a verdict.</strong>
+          The tool measures what the meter recorded and shows the rule that fired.
+          Deciding what it means is your job, and it keeps the evidence in one place while you do it.
+        </p>
       </div>
-      <aside class="sharp-review-packet" aria-label="Utility export evidence preview">
-        <div class="sharp-packet-top"><div><span>Review packet</span><strong>Duke Energy interval export</strong></div><div class="sharp-packet-status">Needs reviewer context</div></div>
-        <div class="sharp-packet-ledger"><div><span class="sharp-small-label">Source</span><strong>Green Button XML</strong><p>Uploaded by the homeowner and retained with the record.</p></div><div><span class="sharp-small-label">Coverage</span><strong>Mar 1 to Apr 30, 2026</strong><p>60 days. Two missing intervals remain visible.</p></div><div><span class="sharp-small-label">Top finding</span><strong>Overnight baseline rose after Mar 18</strong><p>Median quiet-hour load moved from 0.74 to 1.18 kW.</p></div><div><span class="sharp-small-label">Flagged nights</span><strong>7 nights</strong><p>All flagged nights fall between 12:10 a.m. and 4:50 a.m.</p></div></div>
-        <div class="sharp-packet-body"><div class="sharp-packet-chart"><div class="sharp-chart-title"><strong>Nightly baseline, kW</strong><span>Measured intervals only</span></div><svg class="sharp-line-chart" viewBox="0 0 610 286" role="img" aria-label="Nightly baseline chart showing a sustained rise after March 18"><line x1="48" y1="28" x2="48" y2="228"/><line x1="48" y1="228" x2="586" y2="228"/><line x1="48" y1="168" x2="586" y2="168"/><line x1="48" y1="108" x2="586" y2="108"/><line x1="48" y1="48" x2="586" y2="48"/><polyline points="48,170 80,172 112,166 144,169 176,164 208,160 240,162 272,98 304,94 336,96 368,88 400,92 432,84 464,91 496,87 528,83 560,90 586,82"/><line class="chart-marker" x1="256" y1="38" x2="256" y2="228"/><text x="8" y="232">0.4</text><text x="8" y="172">0.8</text><text x="8" y="112">1.2</text><text x="8" y="52">1.6</text><text x="48" y="264">Mar 1</text><text x="250" y="264">Mar 18</text><text x="532" y="264">Apr 30</text></svg><div class="sharp-chart-foot"><span>Gaps are not smoothed</span><span>Weather context added below</span></div></div><div class="sharp-packet-side"><div><h3>A sustained change, not a single spike.</h3><p>Mild nights do not fully explain the higher baseline. Confirm the household equipment schedule before saving a finding.</p></div><table><thead><tr><th>Night</th><th>Signal</th></tr></thead><tbody><tr><td>Mar 22</td><td>1.21 kW median</td></tr><tr><td>Apr 9</td><td>Similar weather</td></tr><tr><td>Apr 24</td><td>No note yet</td></tr></tbody></table></div></div>
+
+      {# A specimen sheet drawn the way the application draws a real record. #}
+      <aside class="wb-specimen" aria-label="Example record">
+        <div class="wb-specimen-head">
+          <div>
+            <span class="mini-label">Record</span>
+            <strong>Duke Energy Progress &middot; 0184</strong>
+          </div>
+          <span class="wb-tag">7 nights flagged</span>
+        </div>
+
+        <div class="wb-readout">
+          <div>
+            <span class="mini-label">Days measured</span>
+            <strong>89</strong>
+          </div>
+          <div>
+            <span class="mini-label">Overnight baseline</span>
+            <strong>0.36<em> kW</em></strong>
+          </div>
+          <div>
+            <span class="mini-label">After Mar 18</span>
+            <strong class="flag">0.88<em> kW</em></strong>
+          </div>
+          <div>
+            <span class="mini-label">Alert moments</span>
+            <strong>6</strong>
+          </div>
+        </div>
+
+        <div class="wb-plot">
+          <div class="wb-plot-head">
+            <span class="mini-label">Nightly average, 00:00&ndash;05:00</span>
+            <span>kW per night &middot; measured intervals</span>
+          </div>
+          <svg class="wb-chart" viewBox="0 0 640 236" role="img"
+               aria-label="Nightly average load holding near 0.36 kW through mid-March, then stepping up to about 0.88 kW and staying there.">
+            <line class="grid" x1="40" y1="35.8" x2="630" y2="35.8"/>
+            <line class="grid" x1="40" y1="79.3" x2="630" y2="79.3"/>
+            <line class="grid" x1="40" y1="122.9" x2="630" y2="122.9"/>
+            <line class="grid" x1="40" y1="166.4" x2="630" y2="166.4"/>
+            <line class="axis" x1="40" y1="14" x2="40" y2="210"/>
+            <line class="axis" x1="40" y1="210" x2="630" y2="210"/>
+
+            <line class="baseline" x1="40" y1="175.2" x2="341.7" y2="175.2"/>
+            <line class="baseline" x1="341.7" y1="61.9" x2="630" y2="61.9"/>
+            <line class="marker" x1="341.7" y1="20" x2="341.7" y2="210"/>
+
+            <polyline class="series" points="40.0,177.1 46.7,183.6 53.4,170.8 60.1,181.5 66.8,183.2 73.5,176.0 80.2,168.4 86.9,168.6 93.6,168.6 100.3,178.2 107.0,183.9 113.8,167.5 120.5,177.3 127.2,166.0 133.9,174.5 140.6,173.4 147.3,169.9 154.0,168.4 160.7,175.8 167.4,179.5 174.1,169.9 180.8,184.5 187.5,171.5 194.2,171.0 200.9,171.7 207.6,171.0 214.3,172.3 221.0,170.8 227.7,176.9 234.4,179.9 241.1,184.7 247.8,181.9 254.5,166.4 261.2,172.3 268.0,174.5 274.7,179.3 281.4,175.2 288.1,168.4 294.8,173.8 301.5,177.1 308.2,166.7 314.9,185.0 321.6,182.3 328.3,180.8 335.0,184.3 341.7,68.0 348.4,58.4 355.1,53.2 361.8,60.8 368.5,66.3 375.2,62.6 381.9,55.8 388.6,71.5 395.3,68.7 402.0,63.4 408.8,68.7 415.5,65.6 422.2,59.1 428.9,53.4 435.6,70.8 442.3,62.8 449.0,56.9 455.7,54.3 462.4,67.1 469.1,70.0 475.8,71.3 482.5,63.2 489.2,52.8 495.9,67.4 502.6,64.3 509.3,63.9 516.0,53.2 522.7,71.1 529.4,57.3 536.1,60.2 542.8,66.9 549.5,62.8 556.2,69.3 563.0,59.1 569.7,68.9 576.4,69.8 583.1,66.0 589.8,65.0 596.5,58.6 603.2,52.5 609.9,66.9 616.6,60.2 623.3,59.1 630.0,52.3"/>
+
+            <text x="34" y="39" text-anchor="end">1.0</text>
+            <text x="34" y="83" text-anchor="end">0.8</text>
+            <text x="34" y="126" text-anchor="end">0.6</text>
+            <text x="34" y="170" text-anchor="end">0.4</text>
+            <text x="40" y="224">Feb 1</text>
+            <text x="341.7" y="224" text-anchor="middle">Mar 18</text>
+            <text x="630" y="224" text-anchor="end">Apr 30</text>
+            <text class="callout" x="348" y="32">+0.52 kW sustained</text>
+          </svg>
+        </div>
+
+        <div class="wb-specimen-rules">
+          <div><span class="mini-label">Night window</span><strong>00:00&ndash;05:00</strong></div>
+          <div><span class="mini-label">Min night kW</span><strong>0.90</strong></div>
+          <div><span class="mini-label">Multiplier</span><strong>1.6&times;</strong></div>
+          <div><span class="mini-label">Timezone</span><strong>America/New_York</strong></div>
+        </div>
+
+        <p class="wb-specimen-foot">
+          Every number above comes from one uploaded file and the four rules beside it. Change a rule and the record recomputes.
+        </p>
       </aside>
     </section>
 
-    <section class="sharp-section sharp-section-alt"><div class="sharp-section-head"><h2>Begin with the evidence, then decide what deserves review.</h2><p>The first review view shows the source, coverage, top finding, gaps, and next question before deeper analysis begins.</p></div><div class="sharp-evidence-lockup"><div class="sharp-evidence-rail"><div><span class="sharp-small-label">Source retained</span><strong>The file stays part of the finding.</strong><p>Source details remain attached so a reviewer can trace the record later.</p></div><div class="sharp-rail-note">The evidence stays traceable after the report is saved.</div></div><div class="sharp-evidence-grid"><div><span class="sharp-small-label">Source</span><strong>Utility usage-history CSV</strong><p>Uploaded Apr 28, 2026.</p></div><div><span class="sharp-small-label">Coverage</span><strong>Jan 1 to Apr 27</strong><p>117 days with 4 estimated readings.</p></div><div><span class="sharp-small-label">Finding</span><strong>Evening use rose in March</strong><p>Average 6 p.m. to 10 p.m. load rose 22%.</p></div><div><span class="sharp-small-label">Flagged nights</span><strong>5 nights</strong><p>Higher than nearby nights with similar weather.</p></div><div><span class="sharp-small-label">Open question</span><strong>What changed at home?</strong><p>Confirm equipment and schedule before saving a finding.</p></div><div class="sharp-evidence-chart"><div class="sharp-chart-title"><strong>Daily use with estimated readings marked</strong><span>kWh per day</span></div><div class="sharp-usage-bars"><i style="height:42%"></i><i style="height:48%"></i><i style="height:46%"></i><i style="height:58%"></i><i class="flag" style="height:76%"></i><i class="flag" style="height:82%"></i><i style="height:70%"></i><i class="flag" style="height:86%"></i><i style="height:74%"></i><i style="height:78%"></i></div></div></div></div></section>
+    {# ================= SPEC STRIP ================= #}
+    <section class="wb-spec">
+      <div class="wb-wrap wb-spec-grid">
+        <div>
+          <span class="mini-label">Accepts</span>
+          <strong>3 file formats</strong>
+          <p>Green Button ESPI XML, Duke-style interval XML, and interval CSV. The format is detected for you.</p>
+        </div>
+        <div>
+          <span class="mini-label">Works at</span>
+          <strong>Interval resolution</strong>
+          <p>Whatever your utility exports &mdash; 15-minute, 30-minute, or hourly readings &mdash; kept at that resolution.</p>
+        </div>
+        <div>
+          <span class="mini-label">Adds</span>
+          <strong>Weather for flagged days</strong>
+          <p>High, low, feels-like, rain, wind, and conditions from a public historical weather archive.</p>
+        </div>
+        <div>
+          <span class="mini-label">Gives back</span>
+          <strong>CSV, JSON, Markdown</strong>
+          <p>Every analysis is downloadable, and a full ZIP of everything on file is one click away.</p>
+        </div>
+      </div>
+    </section>
 
-    <section class="sharp-section"><div class="sharp-trust-rules"><div class="sharp-trust-lead"><p class="sharp-eyebrow">Careful review rules</p><h2>Three rules stay visible before anyone acts.</h2><p>Home Energy Watch keeps the review grounded by showing where the record is strong, where it is limited, and what still needs human context.</p></div><div class="sharp-rules-grid"><div><span>01</span><h3>Source context stays attached.</h3><p>File type, upload time, account, meter, coverage period, and refresh source remain visible in the record.</p></div><div><span>02</span><h3>Gaps are shown honestly.</h3><p>Missing intervals, estimated readings, daylight-saving shifts, and partial windows are shown before interpretation.</p></div><div><span>03</span><h3>Notes do not become findings.</h3><p>Human context stays separate from measured patterns until the reviewer saves a supported finding.</p></div></div></div></section>
+    {# ================= 1. THE READ ================= #}
+    <section class="wb-section">
+      <div class="wb-wrap">
+        <div class="wb-section-head">
+          <span class="mini-label">01 &mdash; The read</span>
+          <h2>It finds the quiet hours first, because that is where a house should be predictable.</h2>
+          <p>
+            Overnight load is the part of the day least explained by people being awake. Home Energy Watch
+            takes the median of your quiet-hour averages as a baseline, then flags each night against two
+            rules you set: a floor in kilowatts, and a multiple of that baseline.
+          </p>
+        </div>
 
-    <section class="sharp-section sharp-section-alt"><div class="sharp-section-head"><h2>Move from export to saved record without losing the thread.</h2><p>Each step preserves the source while adding the context needed for a clear finding, note, or report.</p></div><div class="sharp-record-track"><div class="sharp-track-header"><div>Step 1<strong>Import</strong></div><div>Step 2<strong>Normalize</strong></div><div>Step 3<strong>Context</strong></div><div>Step 4<strong>Review</strong></div><div>Step 5<strong>Save</strong></div></div><div class="sharp-track-body"><div><h3>Upload the export.</h3><p>Add a Green Button file, interval CSV, usage-history download, or scheduled utility refresh.</p><span>Output: source record</span></div><div><h3>Clean the timeline.</h3><p>Convert timestamps, units, estimates, gaps, and coverage boundaries into one readable history.</p><span>Output: measured timeline</span></div><div><h3>Add real-world context.</h3><p>Bring in weather, household equipment, occupancy notes, and known load changes.</p><span>Output: review context</span></div><div><h3>Check the patterns.</h3><p>Review overnight use, unusual days, period comparisons, and current energy signals.</p><span>Output: supported questions</span></div><div><h3>Save the record.</h3><p>Keep findings, notes, reports, and activity history connected without blending them together.</p><span>Output: review record</span></div></div></div></section>
+        <div class="wb-figure">
+          <div class="wb-figure-body">
+            <h3>Every flag names the rule that fired.</h3>
+            <p>
+              No night is flagged without a reason you can read. When you disagree with a rule, change it &mdash;
+              the night window, the floor, the multiplier, and the timezone are all yours, and the record
+              recomputes against the new ones.
+            </p>
+            <ul class="wb-checks">
+              <li><b>01</b><span><strong>Median of quiet-hour averages</strong> becomes the baseline, or you name a specific reference day.</span></li>
+              <li><b>02</b><span><strong>Floor rule</strong> flags any night whose average sits at or above your minimum kilowatts.</span></li>
+              <li><b>03</b><span><strong>Multiple rule</strong> flags any night running at or above your multiple of the baseline.</span></li>
+              <li><b>04</b><span><strong>Interval alerts</strong> catch the single reading that jumped, with the size of the jump and the hour's usual level.</span></li>
+            </ul>
+          </div>
 
-    <section class="sharp-section"><div class="sharp-section-head"><h2>Open the parts of the record that need review.</h2><p>A reviewer can scan the index, then examine overnight use, unusual days, comparisons, weather, load, notes, and reports.</p></div><div class="sharp-analysis-bench"><div class="sharp-bench-index"><div>01<strong>Overnight use</strong></div><div>02<strong>Unusual days</strong></div><div>03<strong>Period comparisons</strong></div><div>04<strong>Weather and load</strong></div><div>05<strong>Notes</strong></div><div>06<strong>Reports</strong></div></div><div class="sharp-bench-grid"><div class="sharp-bench-primary"><h3>Overnight baseline review</h3><p>Quiet-hour load is compared across similar nights, with flagged ranges kept separate from saved findings.</p><div class="sharp-baseline-chart"><i></i><i></i><i></i><i></i><i></i><i></i><i class="flag"></i><i class="flag"></i><i class="flag"></i><i class="flag"></i><i class="flag"></i></div><div class="sharp-comparison-strip"><div><strong>0.74</strong><span>Prior median kW</span></div><div><strong>1.18</strong><span>Current median kW</span></div><div><strong>7</strong><span>Flagged nights</span></div><div><strong>2</strong><span>Open gaps</span></div></div></div><div><h3>Unusual days</h3><p>Days are checked against nearby usage, estimated readings, and similar weather before review.</p><div class="sharp-mini-bars"><i style="width:54%"></i><i class="flag" style="width:76%"></i></div></div><div><h3>Comparisons</h3><p>Billing periods, before-and-after windows, and similar weather weeks stay coverage-aware.</p></div><div><h3>Weather and load</h3><p>Degree days, equipment schedule, and other loads sit beside usage.</p></div><div><h3>Notes and reports</h3><p>Homeowner context, saved findings, and report history remain connected but distinct.</p></div></div></div></section>
+          <div class="wb-panel">
+            <div class="wb-panel-bar">
+              <span>Days &middot; sorted by severity</span>
+              <span>7 of 89 flagged</span>
+            </div>
+            <div class="wb-panel-body">
+              <table class="wb-table">
+                <thead>
+                  <tr><th>Day</th><th class="num">kWh</th><th class="num">Night kW</th><th class="num">Peak kW</th><th class="num">Alerts</th></tr>
+                </thead>
+                <tbody>
+                  <tr class="hit"><td class="mono">2026-04-24</td><td class="num">18.729</td><td class="num">1.125</td><td class="num">2.340</td><td class="num">1</td></tr>
+                  <tr class="hit"><td class="mono">2026-04-02</td><td class="num">17.049</td><td class="num">1.066</td><td class="num">2.335</td><td class="num">1</td></tr>
+                  <tr class="hit"><td class="mono">2026-04-13</td><td class="num">18.648</td><td class="num">0.935</td><td class="num">2.278</td><td class="num">1</td></tr>
+                  <tr><td class="mono">2026-03-11</td><td class="num">14.402</td><td class="num">0.361</td><td class="num">1.904</td><td class="num">&ndash;</td></tr>
+                  <tr><td class="mono">2026-03-04</td><td class="num">13.988</td><td class="num">0.348</td><td class="num">1.877</td><td class="num">&ndash;</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="wb-panel-foot">
+              Rule fired on 2026-04-24: night average stays at or above 0.90&nbsp;kW; night average is at least 1.6&times; the overnight baseline.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
 
-    <section class="sharp-section sharp-section-alt"><div class="sharp-section-head"><h2>Use it for one household or a full review queue.</h2><p>Homeowners need a readable household record. Review desks need queue discipline across several accounts. Home Energy Watch keeps those jobs separate.</p></div><div class="sharp-audience-view"><div><p class="sharp-eyebrow">Homeowner record</p><h3>One household, one utility history, one place for notes.</h3><p class="sharp-lead">A homeowner can sign in, upload exports, keep account and meter records, schedule refreshes, and save reports over time.</p><div class="sharp-home-card"><div><span>Account</span><strong>Duke Energy account ending 0184</strong></div><div><span>Household load</span><strong>Heat pump, electric water heater, crawl-space dehumidifier</strong></div><div><span>Open question</span><strong>Did the equipment schedule explain the overnight change?</strong></div><div><span>Saved output</span><strong>Draft report with finding, evidence, and note separated</strong></div></div></div><div><p class="sharp-eyebrow">Review desk</p><h3>Several accounts, visible status, clean handoff.</h3><p class="sharp-lead">A review desk can sort accounts by fresh data, open findings, missing context, and reports ready for follow-up.</p><div class="sharp-desk-table"><div class="head">Account <span>Status</span><span>Next action</span></div><div><strong>Household 0184</strong><span>Open</span><span>Ask for schedule</span></div><div><strong>Household 0227</strong><span>Watching</span><span>Save note</span></div><div><strong>Household 0412</strong><span>Ready</span><span>Send report</span></div></div></div></div></section>
+    {# ================= 2. THE DAY ================= #}
+    <section class="wb-section alt">
+      <div class="wb-wrap">
+        <div class="wb-section-head">
+          <span class="mini-label">02 &mdash; The day</span>
+          <h2>Open one day and everything about it arrives at once.</h2>
+          <p>
+            A flagged night is only useful if you can see what the rest of that day looked like, what the
+            day before looked like, and what else was happening.
+          </p>
+        </div>
 
-    <section class="sharp-section"><div class="sharp-section-head"><h2>Keep every data source in its own lane.</h2><p>Scheduled utility and weather refreshes can support the record now. Smart-meter and home-device feeds can be added later without blending sources together.</p></div><div class="sharp-feed-lane"><div><span class="sharp-small-label">Available now</span><h3>Utility export upload</h3><p>Green Button XML, interval CSV, and usage-history files provide the starting evidence record.</p><strong>Uploaded file retained</strong></div><div><span class="sharp-small-label">Ongoing record</span><h3>Scheduled utility and weather refreshes</h3><p>Refresh status, weather context, and import activity are shown alongside the review history.</p><strong>Last refresh visible</strong></div><div><span class="sharp-small-label">Future support</span><h3>Smart-meter and home-device feeds</h3><p>The layout has room for live intervals and device context without blending those sources into utility exports.</p><strong>Planned feed type</strong></div></div></section>
+        <div class="wb-figure flip">
+          <div class="wb-figure-body">
+            <h3>The day inspector.</h3>
+            <p>
+              Pick a day and the curve loads beside your chosen reference day and the day before it. The
+              sharpest interval-to-interval jumps are ranked, that day's weather is attached, and any note
+              you wrote about the house is right there instead of in another tab.
+            </p>
+            <ul class="wb-checks">
+              <li><b>&rarr;</b><span>Three load curves overlaid: <strong>this day, the previous day, your reference day.</strong></span></li>
+              <li><b>&rarr;</b><span><strong>Ranked jumps</strong> &mdash; the timestamp, the kilowatts, and the change from the interval before.</span></li>
+              <li><b>&rarr;</b><span><strong>Weather that day</strong>, and whether heat, cold, or a storm plausibly explains the spike.</span></li>
+              <li><b>&rarr;</b><span><strong>Your inventory gap</strong> &mdash; how far the reading sits from what the house can actually draw.</span></li>
+            </ul>
+          </div>
 
-    <section class="sharp-section sharp-section-alt"><div class="sharp-section-head"><h2>Simple pricing in a clear rate sheet.</h2><p>Subscribe once, then create as many reports as you need while your plan is active.</p></div><div class="sharp-rate-sheet"><div class="sharp-rate-row sharp-rate-head"><div>Plan</div><div>Price</div><div>Best for</div><div>Includes</div></div>{% for plan in billing_plans %}<div class="sharp-rate-row"><div><h3>{{ plan.name }}</h3><p>{{ plan.summary }}</p></div><div><strong>{{ plan.monthly_price_label }}</strong></div><div><p>{% if plan.id == 'home' %}A household that wants saved account records, notes, comparisons, and reports.{% elif plan.id == 'review' %}A review team handling several households, saved findings, report handoffs, and account history.{% else %}A commission or agency workspace built around the review team and accounts involved.{% endif %}</p></div><div><ul><li>Source and coverage check</li><li>Overnight baselines and flagged-night review</li><li>Comparison artifacts and saved notes</li><li>Unlimited reports while subscribed</li></ul></div></div>{% endfor %}</div></section>
+          <div class="wb-panel">
+            <div class="wb-panel-bar">
+              <span>Day inspector &middot; Apr 24, 2026</span>
+              <span>1 note</span>
+            </div>
+            <div class="wb-panel-body">
+              <div class="wb-kv">
+                <div><span>Total use</span><strong>18.729 kWh</strong></div>
+                <div><span>Night average</span><strong class="flag">1.125 kW</strong></div>
+                <div><span>Peak reading</span><strong>2.340 kW</strong></div>
+                <div><span>Versus Apr 23</span><strong>+0.505 kWh &middot; night +0.167 kW</strong></div>
+                <div><span>Sharpest jump</span><strong>03:15 &middot; +1.437 kW</strong></div>
+                <div><span>Weather</span><strong>75.7&deg; / 57.7&deg; &middot; overcast</strong></div>
+                <div><span>Everything on adds up to</span><strong>10.238 kW</strong></div>
+                <div><span>Mostly off adds up to</span><strong>0.850 kW</strong></div>
+              </div>
+            </div>
+            <p class="wb-panel-foot">
+              Note on this day: &ldquo;Nobody home overnight; house was empty from the 23rd through the 25th.&rdquo;
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
 
-    <section class="sharp-final-intake"><div class="sharp-intake-panel"><div class="sharp-drop-zone"><div><span class="sharp-small-label">Start point</span><strong>Bring the utility export into the record.</strong><p>The first step is a source file, a coverage period, a measured timeline, and a few review questions.</p></div><div class="sharp-file-line"><span>Green Button XML, interval CSV, or usage-history file</span><strong>Ready</strong></div></div><div class="sharp-intake-copy"><h2>Start a careful review with the data you already have.</h2><p>Upload a utility export, keep the source details attached, and build a record that shows what changed, when it changed, what supports the finding, and what still needs review.</p><div class="sharp-actions"><a class="sharp-button sharp-button-primary" href="{{ start_home_url }}">Start a review</a><a class="sharp-button sharp-button-secondary" href="{{ home_login_url }}">Sign in</a></div></div></div></section>
+    {# ================= 3. THE HOUSE ================= #}
+    <section class="wb-section">
+      <div class="wb-wrap">
+        <div class="wb-section-head">
+          <span class="mini-label">03 &mdash; The house</span>
+          <h2>Measure the meter against what your house can actually draw.</h2>
+          <p>
+            A number is only strange relative to something. List what you own and roughly what it pulls, and
+            the tool gives you two useful ceilings to compare every reading against.
+          </p>
+        </div>
+
+        <div class="wb-figure">
+          <div class="wb-figure-body">
+            <h3>Two ceilings, one gap.</h3>
+            <p>
+              <strong>Everything on</strong> is the total if every tracked load ran at once &mdash; a reading above it
+              means something is running that you have not listed. <strong>Mostly off</strong> is just the
+              always-on equipment, which is what your overnight baseline should be sitting near.
+            </p>
+            <ul class="wb-checks">
+              <li><b>&rarr;</b><span>Set quantities against a real meter interval and compare <strong>expected draw with measured draw</strong>.</span></li>
+              <li><b>&rarr;</b><span>The 24-hour load shape shows the median kilowatts for every hour, <strong>quiet hours marked</strong>.</span></li>
+              <li><b>&rarr;</b><span>Dated notes attach to the day they describe &mdash; <strong>kept beside the numbers, never mixed into them</strong>.</span></li>
+            </ul>
+          </div>
+
+          <div class="wb-panel">
+            <div class="wb-panel-bar">
+              <span>Load shape &middot; median kW by hour</span>
+              <span>Quiet hours in rust</span>
+            </div>
+            <div class="wb-panel-body">
+              <div class="wb-hours">
+                <div class="night"><span>12A</span><i style="width:38%"></i><em>0.40</em></div>
+                <div class="night"><span>2A</span><i style="width:57%"></i><em>0.60</em></div>
+                <div class="night"><span>4A</span><i style="width:38%"></i><em>0.40</em></div>
+                <div><span>6A</span><i style="width:62%"></i><em>0.66</em></div>
+                <div><span>8A</span><i style="width:65%"></i><em>0.68</em></div>
+                <div><span>10A</span><i style="width:46%"></i><em>0.48</em></div>
+                <div><span>12P</span><i style="width:42%"></i><em>0.44</em></div>
+                <div><span>2P</span><i style="width:43%"></i><em>0.45</em></div>
+                <div><span>4P</span><i style="width:54%"></i><em>0.57</em></div>
+                <div><span>6P</span><i style="width:90%"></i><em>0.95</em></div>
+                <div><span>8P</span><i style="width:94%"></i><em>0.99</em></div>
+                <div><span>10P</span><i style="width:57%"></i><em>0.60</em></div>
+              </div>
+            </div>
+            <p class="wb-panel-foot">
+              Peak reading 2.468&nbsp;kW sits 7.77&nbsp;kW below the everything-on ceiling. The overnight baseline sits 0.49&nbsp;kW below the mostly-off total.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    {# ================= 4. THE RECORD ================= #}
+    <section class="wb-section alt">
+      <div class="wb-wrap">
+        <div class="wb-section-head">
+          <span class="mini-label">04 &mdash; The record</span>
+          <h2>Uploads stack up instead of overwriting each other.</h2>
+          <p>
+            Utility exports overlap. Home Energy Watch merges each new file into the history you already have
+            and tells you exactly what it did with every reading &mdash; including the ones it refused to touch.
+          </p>
+        </div>
+
+        <div class="wb-figure flip">
+          <div class="wb-figure-body">
+            <h3>Nothing is quietly overwritten.</h3>
+            <p>
+              A reading is identified by its account, start time, and duration. If a new file repeats a reading
+              you already have with the same value, it is counted as already present. If it repeats one with a
+              <em>different</em> value, that is a conflict &mdash; it is counted, skipped, and left for you to look at.
+            </p>
+            <ul class="wb-checks">
+              <li><b>&rarr;</b><span>Compare two exports and the tool aligns them <strong>year-over-year or month-over-month</strong>, and tells you which it used.</span></li>
+              <li><b>&rarr;</b><span>Months without a match on the other side are <strong>left out of the totals and listed separately</strong>.</span></li>
+              <li><b>&rarr;</b><span>Each comparison writes a <strong>Markdown packet and a CSV</strong> of the aligned rows.</span></li>
+              <li><b>&rarr;</b><span>Saved reports are <strong>access-controlled</strong>, not just hard-to-guess links.</span></li>
+            </ul>
+          </div>
+
+          <div class="wb-panel">
+            <div class="wb-panel-bar">
+              <span>Import result</span>
+              <span>duke-usage-history-2026-04-30.csv</span>
+            </div>
+            <div class="wb-panel-body">
+              <div class="wb-kv">
+                <div><span>Rows in file</span><strong>8,544</strong></div>
+                <div><span>Readings added</span><strong>2,880</strong></div>
+                <div><span>Already present, identical</span><strong>5,661</strong></div>
+                <div><span>Conflicts skipped</span><strong class="flag">3</strong></div>
+                <div><span>Coverage after import</span><strong>2026-02-01 &rarr; 2026-04-30</strong></div>
+                <div><span>Source files on this account</span><strong>4</strong></div>
+              </div>
+            </div>
+            <p class="wb-panel-foot">
+              Three intervals arrived with values that disagree with what was already stored. The originals were kept.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    {# ================= 5. WHO IT IS FOR ================= #}
+    <section class="wb-section">
+      <div class="wb-wrap">
+        <div class="wb-section-head">
+          <span class="mini-label">05 &mdash; Who it is for</span>
+          <h2>One household, or a desk holding several.</h2>
+        </div>
+
+        <div class="wb-cards">
+          <article>
+            <span class="mini-label">Homeowners</span>
+            <h3>You think your bill stopped matching your house.</h3>
+            <p>
+              Keep your own history, watch the overnight number across months, and walk into the next call
+              with the file, the measurement, and the date it changed &mdash; instead of a feeling.
+            </p>
+          </article>
+          <article>
+            <span class="mini-label">Advocates and review desks</span>
+            <h3>You handle several accounts at once.</h3>
+            <p>
+              Every account keeps its own history, notes, thresholds, and report trail. Grant a reviewer or a
+              family member scoped access to a single account without handing over anything else.
+            </p>
+          </article>
+          <article>
+            <span class="mini-label">Commissions</span>
+            <h3>You need the record to hold up later.</h3>
+            <p>
+              Every sign-in, import, comparison, profile edit, and permission change is written to a
+              hash-chained activity log, and the audit page re-verifies the whole chain each time it loads.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    {# ================= 6. LIMITS ================= #}
+    <section class="wb-limits">
+      <div class="wb-wrap">
+        <span class="mini-label">What it does not do</span>
+        <h2>The honest boundaries, up front.</h2>
+        <p>
+          This tool is used in disputes with utilities, so it is worth being exact about where it stops.
+          If any of the following is what you need, this is not it yet.
+        </p>
+
+        <div class="wb-limits-grid">
+          <div>
+            <b>&times;</b>
+            <div>
+              <strong>It does not connect to your utility for you.</strong>
+              <p>There is no automatic Duke or Green Button Connect sync. You download the export yourself and upload it. Manual upload is the supported path.</p>
+            </div>
+          </div>
+          <div>
+            <b>&times;</b>
+            <div>
+              <strong>It never signs in on your behalf.</strong>
+              <p>No password scraping, no browser extension, no mobile-app capture. Your utility credentials stay yours.</p>
+            </div>
+          </div>
+          <div>
+            <b>&times;</b>
+            <div>
+              <strong>It is not live monitoring.</strong>
+              <p>There is no smart-meter stream and no device-level feed. You are reading history, at whatever resolution your utility exported.</p>
+            </div>
+          </div>
+          <div>
+            <b>&times;</b>
+            <div>
+              <strong>It does not detect theft.</strong>
+              <p>It measures load and reports which rule fired. Tampering, a failing appliance, a new tenant, and a forgotten space heater all look similar in interval data.</p>
+            </div>
+          </div>
+          <div>
+            <b>&times;</b>
+            <div>
+              <strong>It does not fill in missing readings.</strong>
+              <p>Gaps in your export stay gaps. Nothing is smoothed, interpolated, or estimated into the record.</p>
+            </div>
+          </div>
+          <div>
+            <b>&times;</b>
+            <div>
+              <strong>Utility lookup is North Carolina only.</strong>
+              <p>Matching a service address to an electric company works against NC service-territory data. Elsewhere, type the utility name yourself.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    {# ================= 7. PRICING ================= #}
+    <section class="wb-section alt">
+      <div class="wb-wrap">
+        <div class="wb-section-head">
+          <span class="mini-label">06 &mdash; Pricing</span>
+          <h2>One subscription, unlimited reports.</h2>
+          <p>Priced by how many electric accounts you are keeping records for, not by how much you use it.</p>
+        </div>
+
+        <div class="wb-rates">
+          <div class="wb-rate-row head">
+            <div>Plan</div>
+            <div>Price</div>
+            <div>Included</div>
+          </div>
+          {% for plan in billing_plans %}
+            <div class="wb-rate-row">
+              <div>
+                <h3>{{ plan.name }}</h3>
+                <p>{{ plan.summary }}</p>
+              </div>
+              <div>
+                <p class="wb-rate-price">{{ plan.monthly_price_label }}</p>
+              </div>
+              <div>
+                <ul>
+                  {% if plan.account_limit %}
+                    <li>Up to {{ plan.account_limit }} electric account{{ '' if plan.account_limit == 1 else 's' }}</li>
+                  {% else %}
+                    <li>Scoped to the review team and the accounts involved</li>
+                  {% endif %}
+                  <li>Interval uploads, overnight baselines, flagged-night and alert review</li>
+                  <li>Day inspector, weather context, load inventory, dated notes</li>
+                  <li>Two-export comparison packets in Markdown and CSV</li>
+                  <li>Unlimited saved reports while the subscription is active</li>
+                </ul>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </section>
+
+    {# ================= 8. CLOSE ================= #}
+    <section class="wb-wrap wb-close">
+      <div class="wb-close-inner">
+        <div>
+          <span class="mini-label">Start here</span>
+          <h2>You already have the file. That is the whole setup.</h2>
+          <p>
+            Create an account, add your electric account number, and upload the usage history you downloaded
+            from your utility. The first record takes a few minutes and everything stays yours &mdash; including
+            a one-click ZIP of every byte we hold.
+          </p>
+          <div class="wb-actions">
+            <a class="button button-primary" href="{{ start_home_url }}">Create an account</a>
+            <a class="button button-secondary" href="{{ home_login_url }}">Sign in</a>
+          </div>
+        </div>
+
+        <div class="wb-drop">
+          <span class="mini-label">Files that work today</span>
+          <strong>Bring any one of these</strong>
+          <ul>
+            <li>Green Button ESPI usage export <span>.XML</span></li>
+            <li>Duke-style interval history <span>.XML</span></li>
+            <li>Interval spreadsheet with start, usage, and end or duration <span>.CSV</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
   </main>
 {% endblock %}

@@ -1,36 +1,40 @@
 {% set ranked_hours = analysis.hourly_profile|selectattr('kw', 'ne', none)|list|sort(attribute='kw', reverse=true) %}
+{% set history_endpoint = 'customer_history_page' if customer_mode|default(false) else 'history_page' %}
+{% set account_endpoint = 'customer_account_page' if customer_mode|default(false) else 'account_page' %}
+{% set inventory_endpoint = 'customer_inventory_page' if customer_mode|default(false) else 'inventory_page' %}
+
 <div class="analysis-workspace">
-  <section class="section-block snapshot dashboard-hero">
-    <div class="section-header">
+
+  {# ---- Title block: what this record is, measured, in one place ---- #}
+  <section class="section-block record-block" aria-labelledby="record-block-title">
+    <div class="record-identity">
       <div>
-        <p class="section-kicker">Review packet</p>
-        <h2>{{ analysis.account.energy_company or "Electric account" }}</h2>
-          <p>Source retained with coverage and review context{% if analysis.coverage_start and analysis.coverage_end %} · {{ analysis.coverage_start }} to {{ analysis.coverage_end }}{% endif %}
-          </p>
+        <p class="section-kicker">Record</p>
+        <h2 id="record-block-title">{{ analysis.account.energy_company or "Electric account" }} &middot; {{ analysis.account.account_number }}</h2>
+        <p class="plain-note">
+          {{ analysis.account.display_name or "Household record" }}{% if analysis.coverage_start and analysis.coverage_end %} &middot; measured {{ analysis.coverage_start }} to {{ analysis.coverage_end }}{% endif %}
+        </p>
       </div>
-      {% if analysis.report_files %}
-        <div class="inline-link-row">
+      <div class="record-identity-actions">
+        {% if analysis.report_files %}
           {% for report in analysis.report_files %}
             <a class="inline-link" href="{{ url_for('download_report', filename=report.filename) }}">Download {{ report.label }}</a>
           {% endfor %}
-        </div>
-      {% elif analysis.report_file %}
-        <a class="inline-link" href="{{ url_for('download_report', filename=analysis.report_file) }}">Download report</a>
-      {% endif %}
+        {% elif analysis.report_file %}
+          <a class="inline-link" href="{{ url_for('download_report', filename=analysis.report_file) }}">Download report</a>
+        {% endif %}
+        <a class="inline-link" href="{{ url_for(history_endpoint, account_number=analysis.account.account_number) }}">History and imports</a>
+      </div>
     </div>
 
-    <div class="summary-strip dashboard-kpis">
+    <div class="summary-strip readout-strip">
       <div>
-        <span class="label">Coverage days</span>
+        <span class="label">Days measured</span>
         <strong>{{ analysis.days_analyzed }}</strong>
       </div>
       <div>
         <span class="label">Flagged nights</span>
-        <strong>{{ analysis.suspicious_rows|length }}</strong>
-      </div>
-      <div>
-        <span class="label">Open notes</span>
-        <strong>{{ analysis.note_day_count }}</strong>
+        <strong{% if analysis.suspicious_rows|length %} class="value-flag"{% endif %}>{{ analysis.suspicious_rows|length }}</strong>
       </div>
       <div>
         <span class="label">Alert moments</span>
@@ -38,179 +42,79 @@
       </div>
       <div>
         <span class="label">Overnight baseline</span>
-        <strong>{{ analysis.baseline if analysis.baseline is not none else "n/a" }}{% if analysis.baseline is not none %} kW{% endif %}</strong>
+        <strong>{{ analysis.baseline if analysis.baseline is not none else "n/a" }}{% if analysis.baseline is not none %}<em> kW</em>{% endif %}</strong>
       </div>
       <div>
-        <span class="label">Max expected house load</span>
-        <strong>{{ analysis.load_summary.all_on_kw }} kW</strong>
+        <span class="label">Peak reading</span>
+        <strong>{{ analysis.inventory_comparison.peak_kw if analysis.inventory_comparison.peak_kw is not none else "n/a" }}{% if analysis.inventory_comparison.peak_kw is not none %}<em> kW</em>{% endif %}</strong>
+      </div>
+      <div>
+        <span class="label">All-on ceiling</span>
+        <strong>{{ analysis.load_summary.all_on_kw }}<em> kW</em></strong>
+      </div>
+      <div>
+        <span class="label">Dated notes</span>
+        <strong>{{ analysis.note_day_count }}</strong>
       </div>
     </div>
 
+    {# Settings are the reproducibility record: the exact rules that produced the flags above. #}
+    <div class="rule-strip" aria-label="Rules applied to this record">
+      <div><span class="label">Timezone</span><strong>{{ analysis.settings.tz }}</strong></div>
+      <div><span class="label">Night window</span><strong>{{ analysis.settings.night_start }}&ndash;{{ analysis.settings.night_end }}</strong></div>
+      <div><span class="label">Min night kW</span><strong>{{ analysis.settings.min_night_kw }}</strong></div>
+      <div><span class="label">Baseline multiplier</span><strong>{{ analysis.settings.night_multiplier }}&times;</strong></div>
+      <div><span class="label">Reference day</span><strong>{{ analysis.baseline_date or "median night" }}</strong></div>
+      <div><span class="label">Source files</span><strong>{{ analysis.imported_files_count }}</strong></div>
+      <div><span class="label">Run at</span><strong>{{ analysis.analysis_generated_at }}</strong></div>
+    </div>
+
     {% if analysis.import_result %}
-      <div class="summary-strip import-strip">
-        <div>
-          <span class="label">Added</span>
-          <strong>{{ analysis.import_result.added_count }}</strong>
-        </div>
-        <div>
-          <span class="label">Already present</span>
-          <strong>{{ analysis.import_result.already_present_count }}</strong>
-        </div>
-        <div>
-          <span class="label">Conflicts skipped</span>
-          <strong>{{ analysis.import_result.conflicts_skipped_count }}</strong>
-        </div>
-        <div>
-          <span class="label">Rows in file</span>
-          <strong>{{ analysis.import_result.interval_count }}</strong>
-        </div>
+      <div class="rule-strip import-strip" aria-label="Result of the last import">
+        <div><span class="label">Last import</span><strong>{{ analysis.input_file }}</strong></div>
+        <div><span class="label">Readings added</span><strong>{{ analysis.import_result.added_count }}</strong></div>
+        <div><span class="label">Already present</span><strong>{{ analysis.import_result.already_present_count }}</strong></div>
+        <div><span class="label">Conflicts skipped</span><strong{% if analysis.import_result.conflicts_skipped_count %} class="value-flag"{% endif %}>{{ analysis.import_result.conflicts_skipped_count }}</strong></div>
+        <div><span class="label">Rows in file</span><strong>{{ analysis.import_result.interval_count }}</strong></div>
       </div>
     {% endif %}
   </section>
 
-  <section class="section-block evidence-record" aria-labelledby="evidence-record-title">
-    <div class="section-header">
-      <div>
-        <p class="section-kicker">Evidence record</p>
-        <h2 id="evidence-record-title">Keep the source beside the question.</h2>
-        <p class="plain-note">The application keeps measured history, household context, and reviewer notes visible without turning a flag into a conclusion.</p>
-      </div>
-    </div>
-
-    <div class="evidence-ledger">
-      <div class="evidence-rail">
-        <div>
-          <span class="label">Source retained</span>
-          <strong>{{ analysis.imported_files_count }} history file{% if analysis.imported_files_count != 1 %}s{% endif %} on this account</strong>
-          <p class="plain-note">The uploaded record remains connected to the account, coverage period, and import result.</p>
-        </div>
-        <a class="inline-link" href="{{ url_for('customer_history_page' if customer_mode|default(false) else 'history_page', account_number=analysis.account.account_number) }}">Open history and imports</a>
-      </div>
-      <div class="evidence-ledger-grid">
-        <div class="evidence-cell">
-          <span class="label">Account and meter</span>
-          <strong>{{ analysis.account.energy_company or "Electric account" }}</strong>
-          <p>{{ analysis.account.account_number }}{% if analysis.account.meter_value %} · meter {{ analysis.account.meter_value }}{% endif %}</p>
-        </div>
-        <div class="evidence-cell">
-          <span class="label">Coverage</span>
-          <strong>{{ analysis.coverage_start or "Not available" }}{% if analysis.coverage_end %} to {{ analysis.coverage_end }}{% endif %}</strong>
-          <p>{{ analysis.days_analyzed }} day{% if analysis.days_analyzed != 1 %}s{% endif %} analyzed.</p>
-        </div>
-        <div class="evidence-cell">
-          <span class="label">Top finding</span>
-          <strong>{% if analysis.key_findings %}{{ analysis.key_findings[0].title }}{% else %}No saved finding yet{% endif %}</strong>
-          <p>{% if analysis.key_findings %}{{ analysis.key_findings[0].detail }}{% else %}Review the patterns below to decide what deserves a closer look.{% endif %}</p>
-        </div>
-        <div class="evidence-cell">
-          <span class="label">Flagged days</span>
-          <strong>{{ analysis.suspicious_rows|length }}</strong>
-          <p>{{ analysis.alert_events|length }} alert moment{% if analysis.alert_events|length != 1 %}s{% endif %} in the current record.</p>
-        </div>
-        <div class="evidence-cell">
-          <span class="label">Open question</span>
-          <strong>What changed at home?</strong>
-          <p>Check household notes, equipment, weather, and the timing before saving a finding.</p>
-        </div>
-        <div class="evidence-rule-note">
-          <strong>Review note</strong>
-          <p>Measured patterns support a closer look. They do not identify a cause on their own.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section class="section-block review-rules" aria-labelledby="review-rules-title">
-    <div class="section-header">
-      <div>
-        <p class="section-kicker">Careful review rules</p>
-        <h2 id="review-rules-title">Three checks stay visible before anyone acts.</h2>
-      </div>
-    </div>
-    <div class="review-rules-grid">
-      <article><span>01</span><h3>Source context stays attached.</h3><p>Account, meter, coverage, import results, and report links remain part of the working record.</p></article>
-      <article><span>02</span><h3>Gaps are shown honestly.</h3><p>Missing intervals, estimates, weather gaps, and partial comparisons stay visible before interpretation.</p></article>
-      <article><span>03</span><h3>Notes stay separate.</h3><p>Household observations and reviewer notes remain distinct from the measured pattern until you save a supported finding.</p></article>
-    </div>
-  </section>
-
-  {% if staff_user and analysis.accounts %}
-    <section class="section-block review-queue" aria-labelledby="review-queue-title">
-      <div class="section-header">
-        <div>
-          <p class="section-kicker">Review desk</p>
-          <h2 id="review-queue-title">Several accounts, visible status, clean handoff.</h2>
-          <p class="plain-note">Use the account list to move between records. Each account keeps its own source history, notes, findings, and report trail.</p>
-        </div>
-      </div>
-      <div class="review-queue-table table-wrap">
-        <table>
-          <thead><tr><th>Account</th><th>Utility</th><th>Current record</th><th>Next action</th></tr></thead>
-          <tbody>
-            {% for queue_account in analysis.accounts[:8] %}
-              <tr>
-                <td><strong>{{ queue_account.account_number }}</strong><div class="table-note">{{ queue_account.display_name or "Household record" }}</div></td>
-                <td>{{ queue_account.energy_company or "Electric account" }}</td>
-                <td>{% if queue_account.account_number == analysis.account.account_number %}<span class="pill">Open now</span>{% else %}<span class="pill">Available</span>{% endif %}</td>
-                <td><a class="inline-link" href="{{ url_for('index', account_number=queue_account.account_number) }}">Open review</a></td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  {% endif %}
-
-  <section class="section-block record-route" aria-labelledby="record-route-title">
-    <div class="section-header">
-      <div>
-        <p class="section-kicker">Record path</p>
-        <h2 id="record-route-title">Move from export to saved record without losing the thread.</h2>
-      </div>
-    </div>
-    <div class="record-route-grid">
-      <a href="{{ url_for('customer_history_page' if customer_mode|default(false) else 'history_page', account_number=analysis.account.account_number) }}"><span>01</span><strong>Import</strong><small>Upload the next export and keep the source record.</small></a>
-      <a href="#patterns"><span>02</span><strong>Normalize</strong><small>Read timestamps, units, gaps, and coverage as one history.</small></a>
-      <a href="{{ url_for('customer_account_page' if customer_mode|default(false) else 'account_page', account_number=analysis.account.account_number) }}"><span>03</span><strong>Context</strong><small>Keep household, meter, weather, and equipment details current.</small></a>
-      <a href="#day-explorer"><span>04</span><strong>Review</strong><small>Open overnight use, unusual days, comparisons, and alerts.</small></a>
-      <a href="{{ url_for('customer_history_page' if customer_mode|default(false) else 'history_page', account_number=analysis.account.account_number) }}#notes"><span>05</span><strong>Save</strong><small>Keep notes, findings, and reports connected but distinct.</small></a>
-    </div>
-  </section>
-
-  {% if analysis.key_findings %}
-    <section class="section-block dashboard-callouts">
-      <div class="section-header">
-        <div>
-          <p class="section-kicker">Saved finding</p>
-          <h2>What still needs review.</h2>
-        </div>
-      </div>
-
-      <div class="finding-list">
-        {% for finding in analysis.key_findings %}
-          <article class="finding-item">
-            <h3>{{ finding.title }}</h3>
-            <p>{{ finding.detail }}</p>
-          </article>
-        {% endfor %}
-      </div>
-    </section>
-  {% endif %}
-
+  {# ---- The bench ---- #}
   <div class="analysis-grid">
     <div class="analysis-main">
-      <section class="section-block usage-explorer" id="patterns">
+
+      {% if analysis.key_findings %}
+        <section class="section-block" aria-labelledby="readout-title">
+          <div class="section-header">
+            <div>
+              <p class="section-kicker">Rule read-out</p>
+              <h2 id="readout-title">What the current rules picked out</h2>
+              <p class="plain-note">Generated from the measured history and the rules above. A flag is a prompt to look, not a cause.</p>
+            </div>
+          </div>
+          <div class="finding-list">
+            {% for finding in analysis.key_findings %}
+              <article class="finding-item">
+                <h3>{{ finding.title }}</h3>
+                <p>{{ finding.detail }}</p>
+              </article>
+            {% endfor %}
+          </div>
+        </section>
+      {% endif %}
+
+      <section class="section-block" id="patterns">
         <div class="section-header">
           <div>
-            <p class="section-kicker">Analysis bench</p>
-            <h2>Open the parts of the record that need review.</h2>
-            <p class="plain-note">Review overnight use, unusual days, comparisons, weather, load, notes, and reports without losing the source record.</p>
+            <p class="section-kicker">Load shape</p>
+            <h2>Median kilowatts by hour</h2>
+            <p class="plain-note">Overnight hours inside the {{ analysis.settings.night_start }}&ndash;{{ analysis.settings.night_end }} window are marked.</p>
           </div>
         </div>
 
         <div class="tool-panel-grid">
-          <div>
-            <h3 class="panel-title">Overnight use and hourly load</h3>
+          <div class="profile-panel">
             <div class="profile-list dashboard-profile-list">
               {% for hour in analysis.hourly_profile %}
                 <div class="profile-row {% if hour.overnight %}overnight{% endif %}">
@@ -226,7 +130,7 @@
 
           <div class="stack-panel">
             <div class="mini-panel">
-              <h3>Highest usage windows</h3>
+              <h3>Heaviest hours</h3>
               <div class="detail-list">
                 {% for hour in ranked_hours[:6] %}
                   <article class="detail-list-item">
@@ -238,25 +142,34 @@
             </div>
 
             <div class="mini-panel">
-              <h3>All-on check</h3>
+              <h3>Measured against inventory</h3>
               <div class="detail-list">
+                <article class="detail-list-item">
+                  <span>Peak reading</span>
+                  <strong>{{ analysis.inventory_comparison.peak_kw if analysis.inventory_comparison.peak_kw is not none else "n/a" }} kW</strong>
+                </article>
+                <article class="detail-list-item">
+                  <span>All-on ceiling</span>
+                  <strong>{{ analysis.load_summary.all_on_kw }} kW</strong>
+                </article>
+                <article class="detail-list-item">
+                  <span>Peak vs ceiling</span>
+                  <strong>{{ analysis.inventory_comparison.all_on_gap_kw if analysis.inventory_comparison.all_on_gap_kw is not none else "n/a" }} kW</strong>
+                </article>
+                <article class="detail-list-item">
+                  <span>Always-on load</span>
+                  <strong>{{ analysis.load_summary.off_kw }} kW</strong>
+                </article>
+                <article class="detail-list-item">
+                  <span>Baseline vs always-on</span>
+                  <strong>{{ analysis.inventory_comparison.off_gap_kw if analysis.inventory_comparison.off_gap_kw is not none else "n/a" }} kW</strong>
+                </article>
                 <article class="detail-list-item">
                   <span>Tracked units</span>
                   <strong>{{ analysis.load_summary.total_units }}</strong>
                 </article>
-                <article class="detail-list-item">
-                  <span>Lighting tracked</span>
-                  <strong>{{ analysis.load_summary.lighting_units }} unit{% if analysis.load_summary.lighting_units != 1 %}s{% endif %}</strong>
-                </article>
-                <article class="detail-list-item">
-                  <span>Lighting wattage</span>
-                  <strong>{{ analysis.load_summary.lighting_watts }} W</strong>
-                </article>
-                <article class="detail-list-item">
-                  <span>Mostly-off load</span>
-                  <strong>{{ analysis.load_summary.off_kw }} kW</strong>
-                </article>
               </div>
+              <a class="inline-link" href="{{ url_for(inventory_endpoint, account_number=analysis.account.account_number) }}">Edit inventory</a>
             </div>
           </div>
         </div>
@@ -265,15 +178,15 @@
       <section class="section-block day-browser" id="day-explorer">
         <div class="section-header">
           <div>
-            <p class="section-kicker">Unusual days</p>
-            <h2>Check the days that need a closer look.</h2>
-            <p class="plain-note">Filter flagged days or days with notes, then rank by total use, overnight pull, peak load, or alert count.</p>
+            <p class="section-kicker">Days</p>
+            <h2>{{ analysis.days_analyzed }} measured day{% if analysis.days_analyzed != 1 %}s{% endif %}</h2>
+            <p class="plain-note">Pick a day to load it into the inspector. Filter and sort to bring the outliers to the top.</p>
           </div>
         </div>
 
         <div class="table-toolbar">
           <div class="filter-chip-row">
-            <button type="button" class="filter-chip active" data-day-filter="all">All days</button>
+            <button type="button" class="filter-chip active" data-day-filter="all">All</button>
             <button type="button" class="filter-chip" data-day-filter="flagged">Flagged</button>
             <button type="button" class="filter-chip" data-day-filter="notes">With notes</button>
             <button type="button" class="filter-chip" data-day-filter="quiet">Unflagged</button>
@@ -298,12 +211,12 @@
             <thead>
               <tr>
                 <th>Day</th>
-                <th>Total use</th>
-                <th>Night average</th>
-                <th>Peak load</th>
-                <th>Alerts</th>
-                <th>Notes</th>
-                <th>Status</th>
+                <th class="num">kWh</th>
+                <th class="num">Night kW</th>
+                <th class="num">Peak kW</th>
+                <th class="num">Alerts</th>
+                <th class="num">Notes</th>
+                <th></th>
               </tr>
             </thead>
             <tbody data-day-table-body>
@@ -320,16 +233,14 @@
                   data-severity="{{ row.severity_score if row.severity_score is defined else 0 }}"
                 >
                   <td class="day-date-cell">
-                    <button type="button" class="day-select" data-date="{{ row.date }}">
-                      {{ row.date }}
-                    </button>
-                    <div class="day-row-meta">{{ row.reasons if row.reasons else "No alert rule fired." }}</div>
+                    <button type="button" class="day-select" data-date="{{ row.date }}">{{ row.date }}</button>
+                    {% if row.reasons %}<div class="day-row-meta">{{ row.reasons }}</div>{% endif %}
                   </td>
-                  <td><span class="day-metric">{{ row.total_kwh }}</span> kWh</td>
-                  <td><span class="day-metric">{{ row.night_avg_kw if row.night_avg_kw is not none else "n/a" }}</span>{% if row.night_avg_kw is not none %} kW{% endif %}</td>
-                  <td><span class="day-metric">{{ row.max_kw }}</span> kW</td>
-                  <td>{{ row.alert_count }}</td>
-                  <td>
+                  <td class="num"><span class="day-metric">{{ row.total_kwh }}</span></td>
+                  <td class="num"><span class="day-metric">{{ row.night_avg_kw if row.night_avg_kw is not none else "n/a" }}</span></td>
+                  <td class="num"><span class="day-metric">{{ row.max_kw }}</span></td>
+                  <td class="num"><span class="day-metric muted-metric">{{ row.alert_count or "-" }}</span></td>
+                  <td class="num">
                     {% if row.note_count %}
                       <button
                         type="button"
@@ -344,12 +255,8 @@
                       <span class="note-marker-empty">-</span>
                     {% endif %}
                   </td>
-                  <td>
-                    {% if row.suspicious %}
-                      <span class="pill danger">Flagged</span>
-                    {% else %}
-                      <span class="pill">Normal</span>
-                    {% endif %}
+                  <td class="num">
+                    {% if row.suspicious %}<span class="pill danger">Flagged</span>{% endif %}
                   </td>
                 </tr>
               {% endfor %}
@@ -362,25 +269,59 @@
         <div class="section-header">
           <div>
             <p class="section-kicker">Alert moments</p>
-            <h2>Where the meter jumped.</h2>
+            <h2>Interval-level jumps</h2>
+            <p class="plain-note">Readings that crossed the alert rules, with the jump from the previous interval.</p>
           </div>
         </div>
 
         <div class="detail-list timeline-list">
           {% if analysis.alert_events %}
-            {% for event in analysis.alert_events[:8] %}
+            {% for event in analysis.alert_events[:10] %}
               <article class="detail-list-item">
                 <span>{{ event.timestamp }}</span>
-                <strong>{{ event.kw }} kW{% if event.delta_kw is not none %} after a {{ event.delta_kw }} kW jump{% endif %}</strong>
+                <strong>{{ event.kw }} kW{% if event.delta_kw is not none %} &nbsp;&darr;&uarr; {{ event.delta_kw }}{% endif %}</strong>
               </article>
             {% endfor %}
           {% else %}
-            <div class="empty-note">No alert moments crossed the current thresholds.</div>
+            <div class="empty-note">No reading crossed the current alert rules.</div>
           {% endif %}
         </div>
       </section>
+
+      {% if staff_user and analysis.accounts and analysis.accounts|length > 1 %}
+        <section class="section-block review-queue">
+          <div class="section-header">
+            <div>
+              <p class="section-kicker">Accounts</p>
+              <h2>{{ analysis.accounts|length }} account{% if analysis.accounts|length != 1 %}s{% endif %} on this desk</h2>
+            </div>
+          </div>
+          <div class="table-wrap review-queue-table">
+            <table>
+              <thead><tr><th>Account</th><th>Household</th><th>Utility</th><th></th></tr></thead>
+              <tbody>
+                {% for queue_account in analysis.accounts[:12] %}
+                  <tr {% if queue_account.account_number == analysis.account.account_number %}class="day-row active"{% endif %}>
+                    <td><strong class="mono-cell">{{ queue_account.account_number }}</strong></td>
+                    <td>{{ queue_account.display_name or "-" }}</td>
+                    <td>{{ queue_account.energy_company or "-" }}</td>
+                    <td class="num">
+                      {% if queue_account.account_number == analysis.account.account_number %}
+                        <span class="pill secondary">Open</span>
+                      {% else %}
+                        <a class="inline-link" href="{{ url_for('index', account_number=queue_account.account_number) }}">Open</a>
+                      {% endif %}
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      {% endif %}
     </div>
 
+    {# ---- Inspector rail ---- #}
     <div class="analysis-sidebar">
       <section
         class="section-block detail-panel sticky-panel"
@@ -395,10 +336,10 @@
       >
         <div class="detail-header">
           <div>
-            <p class="section-kicker">Selected day</p>
+            <p class="section-kicker">Day inspector</p>
             <h2 id="detail-heading">{{ analysis.initial_day_detail.label if analysis.initial_day_detail else "Choose a day" }}</h2>
             <p class="plain-note" id="detail-subheading">
-              Click a day to see the curve, previous day comparison, weather, notes, and load checks.
+              Pick a day in the table to load its curve, comparison, spikes, weather, and notes.
             </p>
           </div>
           <div class="detail-header-actions">
@@ -412,7 +353,7 @@
               {% if not analysis.initial_day_detail or not analysis.initial_day_detail.note_count %}hidden{% endif %}
               {% if analysis.initial_day_detail %}data-note-date="{{ analysis.initial_day_detail.date }}"{% endif %}
             >
-              Open notes
+              Notes
             </button>
           </div>
         </div>
@@ -427,7 +368,7 @@
 
         <div class="detail-grid secondary triple">
           <div class="detail-column">
-            <h3>How it compares</h3>
+            <h3>Compared with</h3>
             <div class="detail-list" id="detail-comparison"></div>
           </div>
           <div class="detail-column">
@@ -435,7 +376,7 @@
             <div class="detail-list" id="detail-spikes"></div>
           </div>
           <div class="detail-column">
-            <h3>Weather that day</h3>
+            <h3>Weather</h3>
             <div id="detail-weather"></div>
           </div>
         </div>
@@ -446,54 +387,9 @@
       <section class="section-block inventory-overview">
         <div class="section-header">
           <div>
-            <p class="section-kicker">Weather and load</p>
-            <h2>Compare the meter with what the house can draw.</h2>
-            <p class="plain-note">Your inventory is the working ceiling for the loads you have tracked so far.</p>
-          </div>
-        </div>
-
-        <div class="summary-strip inventory-summary-grid">
-          <div>
-            <span class="label">Everything on</span>
-            <strong>{{ analysis.load_summary.all_on_kw }} kW</strong>
-          </div>
-          <div>
-            <span class="label">Mostly off</span>
-            <strong>{{ analysis.load_summary.off_kw }} kW</strong>
-          </div>
-          <div>
-            <span class="label">Tracked units</span>
-            <strong>{{ analysis.load_summary.total_units }}</strong>
-          </div>
-          <div>
-            <span class="label">Lighting tracked</span>
-            <strong>{{ analysis.load_summary.lighting_units }}</strong>
-          </div>
-        </div>
-
-        {% if analysis.load_overview.top_loads %}
-          <div class="top-load-list">
-            {% for item in analysis.load_overview.top_loads %}
-              <article class="load-focus-item">
-                <div>
-                  <strong>{{ item.label }}</strong>
-                  <p class="plain-note">{{ item.quantity }} at {{ item.watts_each }} W{% if item.notes %} · {{ item.notes }}{% endif %}</p>
-                </div>
-                <span>{{ item.total_watts }} W</span>
-              </article>
-            {% endfor %}
-          </div>
-        {% else %}
-          <div class="empty-note">Add loads on the Inventory page to see a better ceiling for lights, breakers, appliances, and always-on equipment.</div>
-        {% endif %}
-      </section>
-
-      <section class="section-block">
-        <div class="section-header">
-          <div>
             <p class="section-kicker">All-on check</p>
-            <h2>Count what was on and compare it with the meter.</h2>
-            <p class="plain-note">Use the saved load list, then compare expected draw with a meter interval from the selected day.</p>
+            <h2>Count what was running</h2>
+            <p class="plain-note">Set quantities, then compare the expected draw with a real meter interval from the selected day.</p>
           </div>
         </div>
 
@@ -509,11 +405,11 @@
 
               <div class="summary-strip test-summary">
                 <div>
-                  <span class="label">Expected draw</span>
+                  <span class="label">Expected</span>
                   <strong id="load-test-expected">0 kW</strong>
                 </div>
                 <div>
-                  <span class="label">Meter reading</span>
+                  <span class="label">Measured</span>
                   <strong id="load-test-actual">n/a</strong>
                 </div>
                 <div>
@@ -537,8 +433,8 @@
                 <thead>
                   <tr>
                     <th>Load</th>
-                    <th>Qty on</th>
-                    <th>Total</th>
+                    <th class="num">On</th>
+                    <th class="num">Total</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -546,9 +442,9 @@
                     <tr>
                       <td>
                         <strong>{{ item.label }}</strong>
-                        <div class="table-note">{{ item.quantity }} available at {{ item.watts_each }} W each</div>
+                        <div class="table-note">{{ item.quantity }} &times; {{ item.watts_each }} W</div>
                       </td>
-                      <td>
+                      <td class="num">
                         <input
                           class="load-test-count"
                           type="number"
@@ -560,7 +456,7 @@
                           data-watts-each="{{ item.watts_each }}"
                         >
                       </td>
-                      <td class="load-test-row-total" data-item-total="{{ item.id }}">0 W</td>
+                      <td class="num load-test-row-total" data-item-total="{{ item.id }}">0 W</td>
                     </tr>
                   {% endfor %}
                 </tbody>
@@ -568,9 +464,33 @@
             </div>
           </div>
         {% else %}
-          <div class="empty-note">Add the biggest loads first on the Inventory page so this check can compare your meter to something real.</div>
+          <div class="empty-note">
+            Add the biggest loads on the Inventory page so this check has something real to compare the meter against.
+          </div>
         {% endif %}
       </section>
+
+      {% if analysis.load_overview.top_loads %}
+        <section class="section-block">
+          <div class="section-header">
+            <div>
+              <p class="section-kicker">Inventory</p>
+              <h2>Largest tracked loads</h2>
+            </div>
+          </div>
+          <div class="top-load-list">
+            {% for item in analysis.load_overview.top_loads %}
+              <article class="load-focus-item">
+                <div>
+                  <strong>{{ item.label }}</strong>
+                  <p class="plain-note">{{ item.quantity }} &times; {{ item.watts_each }} W{% if item.notes %} &middot; {{ item.notes }}{% endif %}</p>
+                </div>
+                <span>{{ item.total_watts }} W</span>
+              </article>
+            {% endfor %}
+          </div>
+        </section>
+      {% endif %}
     </div>
   </div>
 
@@ -580,9 +500,9 @@
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="note-modal-title">
       <div class="modal-header">
         <div>
-          <p class="section-kicker">Field notes</p>
+          <p class="section-kicker">Dated notes</p>
           <h2 id="note-modal-title">Notes</h2>
-          <p class="plain-note" id="note-modal-subtitle">See what changed on this day.</p>
+          <p class="plain-note" id="note-modal-subtitle">What was recorded about this day.</p>
         </div>
         <button type="button" class="button-secondary button-small" id="note-modal-close">Close</button>
       </div>

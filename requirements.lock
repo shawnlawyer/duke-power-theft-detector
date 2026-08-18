@@ -272,6 +272,9 @@ cryptography==50.0.0 \
 fido2==2.2.1 \
     --hash=sha256:ed397da981b9ab133da6ead7309e41f924b566b749956129efe286fae097749f
     # via -r requirements.txt
+fido2==2.2.1 \
+    --hash=sha256:ed397da981b9ab133da6ead7309e41f924b566b749956129efe286fae097749f
+    # via -r requirements.txt
 flask==3.1.3 \
     --hash=sha256:0ef0e52b8a9cd932855379197dd8f94047b359ca0a78695144304cb45f87c9eb \
     --hash=sha256:f4bcbefc124291925f1a26446da31a5178f9483862233b23c0c96a20701f670c
