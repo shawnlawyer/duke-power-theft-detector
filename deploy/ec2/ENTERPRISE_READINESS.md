@@ -11,6 +11,7 @@ This ledger separates implemented controls from production proof and approval-ga
 - Commissioners can invite, suspend, reactivate, and change access for other staff members. They can reset another staff member's authenticator after confirmation; the reset destroys recovery codes, revokes sessions, and requires fresh enrollment without changing the password, role, or active status. Self-reset and self-lockout are blocked.
 - Customer account reads and writes are checked against account access records.
 - Customer signup and account forms determine the electric company from the service ZIP code and street address instead of offering a provider list. Browser and API history imports preserve that matched provider instead of accepting a submitted replacement.
+- The app emits redacted JSON request logs with request IDs, route templates, status codes, durations, and coarse actor labels. Unhandled exceptions are captured server-side with a traceback, and the incident-response runbook is checked in.
 - Customer signup records the accepted Terms and Privacy Notice versions, the utility-data authorization version and scope, and hashed request evidence. Authorization grants, withdrawals, superseded grants, and access-removal revocations are retained as an append-only account history.
 - History uploads, comparisons, saved utility connections, and utility sync require an active customer authorization. Withdrawal erases saved utility credentials when no active authorization remains.
 - Customers can download a ZIP archive of every authorized account, profile, inventory item, interval, weather record, generated report, policy acceptance, and utility-data authorization. Credentials, password fields, Stripe internals, technical request hashes, internal paths, and unauthorized accounts are excluded.
@@ -20,7 +21,7 @@ This ledger separates implemented controls from production proof and approval-ga
 - Production sessions use secure, HTTP-only, same-site cookies and the app emits browser security headers.
 - Utility access secrets use authenticated encryption at rest.
 - Audit records form a keyed hash chain. Commissioners can verify and export the filtered record; export stops when integrity fails.
-- Direct Stripe operations remain backend-only. `POWER_BILLING_ENABLED=false` keeps checkout closed until Home Energy Watch prices and matching Stripe Price IDs are approved, even if stale Stripe configuration remains. No live charge or refund is part of automated verification.
+- Direct Stripe operations remain backend-only. `POWER_BILLING_ENABLED=false` keeps checkout closed until the approved Stripe Price IDs are installed, even if stale Stripe configuration remains. No live charge or refund is part of automated verification.
 - The release image uses a digest-pinned Python base and a fully hashed dependency lock. Runtime packaging tools are removed after installation.
 - The release-security gate runs the complete test suite, `pip-audit`, and a digest-pinned Trivy scan that fails on fixed high or critical findings. The local gate passed all 120 tests with no known dependency vulnerabilities and zero container or secret findings.
 - Local, Omen staging, and EC2 candidate images pass the complete 120-test automated suite. A disposable PostgreSQL exercise also passed idempotent migration, legal-hold enforcement, and approved deletion.
@@ -41,7 +42,7 @@ This ledger separates implemented controls from production proof and approval-ga
 - The hardened production image `sha256:e0f23c3e4f10590f6fc2b0d822b826d2485e446fda94c9bfd7a1c1b2c72dddae` passed all 120 tests on EC2 before promotion. The running container is healthy, required MFA remains active, its audit chain is valid, and all three existing staff accounts are present.
 - The live signup contains no utility dropdown or submitted energy-company field. Its ZIP/address endpoint resolved a Raleigh service address to Duke Energy Progress using the matching service territory.
 - `POWER_DATA_DELETION_ENABLED=false` is active on Omen and production, and `POWER_DATA_DELETION_POLICY_VERSION` is blank. No account-data deletion can execute until an approved policy version is deliberately configured.
-- `POWER_BILLING_ENABLED=false` is active on Omen and production. The live pricing and signup pages contain no dollar amount, and the public pricing page exposes no checkout action while pricing is unapproved.
+- `POWER_BILLING_ENABLED=false` is active on Omen and production. The live pricing and signup pages show the approved monthly prices, and the public pricing page exposes no checkout action until the Stripe IDs are connected.
 - The architecture-matched x86 Omen image passed the high and critical Trivy gate with zero Debian or Python findings.
 - GitHub release-security run `29820086282` passed on pull request 1, and run `29820188538` passed after merge to `main`. Both executed the complete test, dependency-audit, and container-scan gate.
 - Customer-consent run `29822323048` passed on pull request 3, and run `29822409301` passed after merge to `main`.
@@ -70,7 +71,7 @@ Requires Shawn's approval for the maintenance window and the estimated increase 
 
 ### Live payment verification
 
-Home Energy Watch pricing and matching Stripe Price IDs must be approved before enabling checkout. A later live test also requires explicit approval for the exact charge and refund. Automated tests use Stripe fakes and do not move money.
+Home Watch is $19.99 a month and Review Desk is $99 a month. The matching Stripe Price IDs must be installed before enabling checkout. A later live test also requires explicit approval for the exact charge and refund. Automated tests use Stripe fakes and do not move money.
 
 ### Customer-data retention policy
 
@@ -84,7 +85,7 @@ CloudWatch alarms, centralized log retention, and S3 versioned storage add AWS r
 
 1. Approve the customer-data retention schedule, preserved-record scope, and customer notification language. The export, request, review, legal-hold, and fail-closed deletion workflow is implemented, but execution remains disabled pending that approval.
 2. Move uploaded history and generated reports to encrypted, versioned object storage with lifecycle policy.
-3. Add centralized application logs, availability alarms, database alarms, and an incident-response runbook.
+3. Add centralized application log retention, availability alarms, and database alarms.
 4. Run and record a database restore exercise with measured recovery time and recovery point.
 5. Complete privacy, terms, utility authorization, and commission procurement review.
 6. Obtain an independent security review before handling commission-wide production data.

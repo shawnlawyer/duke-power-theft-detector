@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import os
 import re
 import secrets
@@ -36,10 +37,24 @@ from uuid import uuid4
 from dateutil import tz
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, flash, g, has_request_context, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from werkzeug.exceptions import HTTPException
 import pandas as pd
 from lxml import etree
 import pyotp
 import qrcode
+from fido2.cose import CoseKey
+from fido2.server import Fido2Server
+from fido2.utils import websafe_decode, websafe_encode
+from fido2.webauthn import (
+    Aaguid,
+    AttestedCredentialData,
+    AuthenticationResponse,
+    PublicKeyCredentialDescriptor,
+    PublicKeyCredentialRpEntity,
+    PublicKeyCredentialType,
+    PublicKeyCredentialUserEntity,
+    UserVerificationRequirement,
+)
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
@@ -73,6 +88,13 @@ DEFAULT_ALERT_MULTIPLIER = float(os.getenv("POWER_ALERT_MULTIPLIER", "1.5"))
 DEFAULT_ALERT_JUMP_KW = float(os.getenv("POWER_ALERT_JUMP_KW", "0.75"))
 DEFAULT_CLI_OUTPUT = "usage_report.csv"
 DEFAULT_APP_SECRET = "local-power-data-only"
+DEFAULT_STRIPE_API_VERSION = "2026-02-25.clover"
+DEFAULT_OWNER_FREE_PLAY_PROMOTION_CODE = "HEW-OWNER-100"
+DEFAULT_OWNER_FREE_PLAY_MAX_REDEMPTIONS = 3
+DEFAULT_OWNER_FREE_PLAY_VALID_DAYS = 30
+OWNER_FREE_PLAY_COUPON_NAME = "Owner free-play code"
+OWNER_FREE_PLAY_PURPOSE = "controlled-free-play"
+OWNER_FREE_PLAY_PROJECT = "home-energy-watch"
 DEFAULT_INPUT_DIR = Path(os.getenv("POWER_INPUT_DIR", "/data/input"))
 DEFAULT_OUTPUT_DIR = Path(os.getenv("POWER_OUTPUT_DIR", "/data/output"))
 DEFAULT_DB_PATH = Path(os.getenv("POWER_DB_PATH", str(DEFAULT_OUTPUT_DIR / "power-history.db")))
@@ -92,10 +114,68 @@ MFA_CHALLENGE_EXPIRY_MINUTES = 5
 MFA_RECOVERY_CODE_COUNT = 10
 MFA_RECOVERY_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 MFA_ISSUER = "Home Energy Watch"
+PASSKEY_ISSUER = "Home Energy Watch"
+PASSKEY_USER_KINDS = ("staff", "customer")
+PASSKEY_SESSION_KEY_PREFIX = "pending_passkey_"
+PASSKEY_USER_VERIFICATION = UserVerificationRequirement.PREFERRED
 CUSTOMER_AUTH_TOKEN_PURPOSES = ("verify_email", "password_reset")
 STAFF_AUTH_TOKEN_PURPOSES = ("password_reset",)
 EMAIL_OUTBOX: list[dict[str, str]] = []
 CUSTOMER_ACCESS_LEVELS = ("Viewer", "Manager")
+APP_LOGGER_NAME = "home_energy_watch"
+
+
+def get_application_log_level() -> int:
+    configured = (os.getenv("POWER_LOG_LEVEL") or "INFO").strip().upper()
+    return getattr(logging, configured, logging.INFO)
+
+
+def get_application_log_format() -> str:
+    configured = (os.getenv("POWER_LOG_FORMAT") or "").strip().lower()
+    if configured in {"json", "text"}:
+        return configured
+    return "json" if is_production_environment() else "text"
+
+
+def configure_application_logging() -> None:
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(level=get_application_log_level(), format="%(message)s")
+    root_logger.setLevel(get_application_log_level())
+    logging.getLogger(APP_LOGGER_NAME).setLevel(get_application_log_level())
+
+
+def get_application_logger() -> logging.Logger:
+    return logging.getLogger(APP_LOGGER_NAME)
+
+
+def summarize_request_route() -> str:
+    if not has_request_context():
+        return ""
+    if request.url_rule is not None:
+        return str(request.url_rule.rule)
+    if request.endpoint:
+        return str(request.endpoint)
+    return request.path
+
+
+def summarize_request_actor() -> str:
+    if session.get("staff_user_id") is not None:
+        return "staff"
+    if session.get("customer_user_id") is not None:
+        return "customer"
+    return "anonymous"
+
+
+def emit_application_log(event: str, **fields: object) -> None:
+    record = {"event": event, **fields}
+    if get_application_log_format() == "json":
+        message = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    else:
+        message = " ".join(f"{key}={value}" for key, value in record.items())
+    get_application_logger().info(message)
+
+
 ENERGY_COMPANY_GROUPS = (
     {
         "label": "Regulated electric companies",
@@ -256,7 +336,7 @@ ENERGY_COMPANY_BY_EIA_ID = {
     "7639": "Greenville Utilities Commission",
     "20785": "Wilson Energy",
 }
-DUKE_MY_ACCOUNT_URL = "https://www.duke-energy.com/my-account/sign-in"
+DUKE_USAGE_DETAILS_URL = "https://www.duke-energy.com/my-account/usage?tab=day"
 GREEN_BUTTON_CONNECT_URL = "https://www.greenbuttonalliance.org/green-button-connect-my-data-cmd"
 GREEN_BUTTON_DOWNLOAD_URL = "https://www.greenbuttonalliance.org/green-button-download-my-data-dmd"
 NCUC_DATA_ACCESS_ORDER_URL = "https://starw1.ncuc.gov/NCUC/ViewFile.aspx?Id=b18eb0c3-6968-47d0-adbf-9f1b6ea8f680"
@@ -265,9 +345,9 @@ UTILITY_ACCESS_GUIDES = (
         "id": "duke_download",
         "name": "Download your Duke history",
         "status": "Works now",
-        "summary": "Sign in to Duke My Account, open your usage history, download the detailed interval file, then upload it here.",
-        "action_label": "Go to Duke My Account",
-        "action_url": DUKE_MY_ACCOUNT_URL,
+        "summary": "Open Duke's Usage Details page, then use Quick Links to download your data and upload the file here.",
+        "action_label": "Open Duke Usage Details",
+        "action_url": DUKE_USAGE_DETAILS_URL,
         "secondary_label": "About Green Button files",
         "secondary_url": GREEN_BUTTON_DOWNLOAD_URL,
     },
@@ -318,20 +398,20 @@ BILLING_PLAN_DEFINITIONS = (
     {
         "id": "home",
         "name": "Home Watch",
-        "monthly_price_label": "Pricing being finalized",
+        "monthly_price_label": "$19.99 / month",
         "account_limit": 1,
         "checkout_supported": True,
         "stripe_price_env": "STRIPE_PRICE_HOME",
-        "summary": "For one household watching its own electric account.",
+        "summary": "For one household watching its own electric account with unlimited saved reports.",
     },
     {
         "id": "review",
         "name": "Review Desk",
-        "monthly_price_label": "Pricing being finalized",
+        "monthly_price_label": "$99 / month",
         "account_limit": 20,
         "checkout_supported": True,
         "stripe_price_env": "STRIPE_PRICE_REVIEW",
-        "summary": "For advocates and reviewers working across a small set of accounts.",
+        "summary": "For advocates and reviewers working across a small set of accounts with unlimited reports.",
     },
     {
         "id": "agency",
@@ -343,7 +423,6 @@ BILLING_PLAN_DEFINITIONS = (
         "summary": "For a commission or agency review workspace.",
     },
 )
-DEFAULT_STRIPE_API_VERSION = "2026-02-25.clover"
 DEFAULT_MARKETING_HOSTS = ("homeenergywatch.com", "www.homeenergywatch.com")
 DEFAULT_APP_HOSTS = ("app.homeenergywatch.com",)
 CURRENT_TERMS_VERSION = "2026-07-21"
@@ -497,6 +576,28 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Sync saved utility connections once and exit",
     )
+    parser.add_argument(
+        "--ensure-owner-free-play-code",
+        action="store_true",
+        help="Find or create the bounded owner promotion code for Stripe Checkout testing",
+    )
+    parser.add_argument(
+        "--promotion-code",
+        default=DEFAULT_OWNER_FREE_PLAY_PROMOTION_CODE,
+        help="Customer-facing promotion code to reuse or create with --ensure-owner-free-play-code",
+    )
+    parser.add_argument(
+        "--promotion-max-redemptions",
+        type=int,
+        default=DEFAULT_OWNER_FREE_PLAY_MAX_REDEMPTIONS,
+        help="Maximum successful redemptions for a created owner promotion code",
+    )
+    parser.add_argument(
+        "--promotion-valid-days",
+        type=int,
+        default=DEFAULT_OWNER_FREE_PLAY_VALID_DAYS,
+        help="Days until expiration for a created owner promotion code",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Web host to bind when using --serve")
     parser.add_argument("--port", type=int, default=8000, help="Web port to bind when using --serve")
     return parser
@@ -510,6 +611,24 @@ def ensure_data_dirs() -> None:
 def normalize_account_number(value: str | None) -> str:
     normalized = (value or "").strip()
     return normalized or DEFAULT_ACCOUNT_NUMBER
+
+
+def clean_account_number(value: str | None) -> str:
+    normalized = clean_optional_text(value)
+    if not normalized:
+        raise ValueError("Enter the electric account number.")
+    if len(normalized) > 100:
+        raise ValueError("The electric account number is too long.")
+    return normalized
+
+
+def clean_meter_value(value: str | None) -> str | None:
+    normalized = clean_optional_text(value)
+    if normalized is None:
+        return None
+    if len(normalized) > 100:
+        raise ValueError("The meter value is too long.")
+    return normalized
 
 
 def normalize_optional_date(value: str | None) -> str | None:
@@ -619,6 +738,7 @@ def ensure_accounts_table(conn: DatabaseConnection) -> int:
             display_name TEXT NOT NULL,
             energy_company TEXT,
             baseline_date TEXT,
+            meter_value TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )
@@ -627,11 +747,13 @@ def ensure_accounts_table(conn: DatabaseConnection) -> int:
     account_columns = table_columns(conn, "accounts")
     if "energy_company" not in account_columns:
         conn.execute("ALTER TABLE accounts ADD COLUMN energy_company TEXT")
+    if "meter_value" not in account_columns:
+        conn.execute("ALTER TABLE accounts ADD COLUMN meter_value TEXT")
     timestamp = timestamp_now()
     conn.execute(
         """
-        INSERT INTO accounts (account_number, display_name, baseline_date, created_at, updated_at)
-        VALUES (?, ?, NULL, ?, ?)
+        INSERT INTO accounts (account_number, display_name, baseline_date, meter_value, created_at, updated_at)
+        VALUES (?, ?, NULL, NULL, ?, ?)
         ON CONFLICT(account_number) DO NOTHING
         """,
         (DEFAULT_ACCOUNT_NUMBER, "Primary account", timestamp, timestamp),
@@ -765,6 +887,29 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS account_notes (
+            id BIGSERIAL PRIMARY KEY,
+            account_id BIGINT NOT NULL,
+            note_date TEXT NOT NULL,
+            body TEXT NOT NULL,
+            author_kind TEXT NOT NULL,
+            author_label TEXT NOT NULL,
+            customer_user_id BIGINT,
+            staff_user_id BIGINT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_account_notes_account_id
+        ON account_notes (account_id, note_date, created_at, id)
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS utility_connections (
             id BIGSERIAL PRIMARY KEY,
             account_id BIGINT NOT NULL,
@@ -872,6 +1017,31 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_staff_mfa_recovery_user
         ON staff_mfa_recovery_codes (staff_user_id, consumed_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS passkey_credentials (
+            id BIGSERIAL PRIMARY KEY,
+            actor_kind TEXT NOT NULL,
+            actor_id BIGINT NOT NULL,
+            credential_id TEXT NOT NULL UNIQUE,
+            nickname TEXT,
+            public_key TEXT NOT NULL,
+            sign_count BIGINT NOT NULL DEFAULT 0,
+            transports TEXT,
+            last_used_at TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(actor_kind, actor_id, credential_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_passkey_credentials_actor
+        ON passkey_credentials (actor_kind, actor_id, is_active)
         """
     )
     conn.execute(
@@ -1110,7 +1280,10 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
             stripe_customer_id TEXT,
             stripe_subscription_id TEXT,
             stripe_payment_intent_id TEXT,
+            stripe_payment_reference TEXT,
             stripe_receipt_url TEXT,
+            stripe_amount_total BIGINT,
+            stripe_currency TEXT,
             payments_customer_id TEXT,
             payments_order_id TEXT,
             payments_checkout_session_id TEXT,
@@ -1129,7 +1302,10 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT")
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT")
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_payment_intent_id TEXT")
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_payment_reference TEXT")
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_receipt_url TEXT")
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_amount_total BIGINT")
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_currency TEXT")
 
 
 def migrate_database(conn: DatabaseConnection) -> None:
@@ -1328,6 +1504,29 @@ def migrate_database(conn: DatabaseConnection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS account_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            note_date TEXT NOT NULL,
+            body TEXT NOT NULL,
+            author_kind TEXT NOT NULL,
+            author_label TEXT NOT NULL,
+            customer_user_id INTEGER,
+            staff_user_id INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_account_notes_account_id
+        ON account_notes (account_id, note_date, created_at, id)
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS utility_connections (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             account_id INTEGER NOT NULL,
@@ -1448,6 +1647,31 @@ def migrate_database(conn: DatabaseConnection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_staff_mfa_recovery_user
         ON staff_mfa_recovery_codes (staff_user_id, consumed_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS passkey_credentials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_kind TEXT NOT NULL,
+            actor_id INTEGER NOT NULL,
+            credential_id TEXT NOT NULL UNIQUE,
+            nickname TEXT,
+            public_key TEXT NOT NULL,
+            sign_count INTEGER NOT NULL DEFAULT 0,
+            transports TEXT,
+            last_used_at TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(actor_kind, actor_id, credential_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_passkey_credentials_actor
+        ON passkey_credentials (actor_kind, actor_id, is_active)
         """
     )
     conn.execute(
@@ -1689,7 +1913,10 @@ def migrate_database(conn: DatabaseConnection) -> None:
             stripe_customer_id TEXT,
             stripe_subscription_id TEXT,
             stripe_payment_intent_id TEXT,
+            stripe_payment_reference TEXT,
             stripe_receipt_url TEXT,
+            stripe_amount_total INTEGER,
+            stripe_currency TEXT,
             payments_customer_id TEXT,
             payments_order_id TEXT,
             payments_checkout_session_id TEXT,
@@ -1716,8 +1943,14 @@ def migrate_database(conn: DatabaseConnection) -> None:
         conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_subscription_id TEXT")
     if "stripe_payment_intent_id" not in billing_columns:
         conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_payment_intent_id TEXT")
+    if "stripe_payment_reference" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_payment_reference TEXT")
     if "stripe_receipt_url" not in billing_columns:
         conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_receipt_url TEXT")
+    if "stripe_amount_total" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_amount_total INTEGER")
+    if "stripe_currency" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_currency TEXT")
 
 
 def clean_email(value: str | None) -> str:
@@ -2003,6 +2236,494 @@ def serialize_staff_user_row(row: sqlite3.Row | None) -> dict[str, object] | Non
         "mfa_enabled_at": mapping.get("mfa_enabled_at"),
         "last_login_at": mapping.get("last_login_at"),
     }
+
+
+def normalize_passkey_kind(kind: str | None) -> str:
+    normalized = (kind or "").strip().lower()
+    if normalized not in PASSKEY_USER_KINDS:
+        raise ValueError("Choose a valid account type for passkeys.")
+    return normalized
+
+
+def passkey_session_key(kind: str, purpose: str) -> str:
+    return f"{PASSKEY_SESSION_KEY_PREFIX}{kind}_{purpose}"
+
+
+def normalize_passkey_json_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key): normalize_passkey_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [normalize_passkey_json_value(item) for item in value]
+    if isinstance(value, (bytes, bytearray)):
+        return websafe_encode(bytes(value))
+    if hasattr(value, "value") and not isinstance(value, str):
+        return getattr(value, "value")
+    return value
+
+
+def serialize_passkey_state(state: dict[str, object] | None) -> dict[str, object] | None:
+    if state is None:
+        return None
+    normalized = normalize_passkey_json_value(state)
+    return normalized if isinstance(normalized, dict) else None
+
+
+def passkey_rp_id(origin: str | None = None) -> str:
+    base_origin = (origin or build_public_base_url()).rstrip("/")
+    parsed = urlsplit(base_origin)
+    hostname = parsed.hostname or current_request_host()
+    return hostname.split(":", 1)[0]
+
+
+def passkey_rp_entity(origin: str | None = None) -> PublicKeyCredentialRpEntity:
+    return PublicKeyCredentialRpEntity(id=passkey_rp_id(origin), name=PASSKEY_ISSUER)
+
+
+def build_passkey_server(origin: str | None = None) -> Fido2Server:
+    expected_origin = (origin or build_public_base_url()).rstrip("/")
+    return Fido2Server(
+        passkey_rp_entity(expected_origin),
+        verify_origin=lambda candidate: candidate == expected_origin,
+    )
+
+
+def passkey_user_entity(kind: str, user_id: int, email: str, display_name: str) -> PublicKeyCredentialUserEntity:
+    return PublicKeyCredentialUserEntity(
+        id=f"{kind}:{int(user_id)}".encode("utf-8"),
+        name=email,
+        display_name=display_name or email,
+    )
+
+
+def serialize_cose_key(public_key: CoseKey) -> str:
+    payload: dict[str, object] = {}
+    for key, value in dict(public_key).items():
+        if isinstance(value, (bytes, bytearray)):
+            payload[str(key)] = {"__type": "bytes", "value": websafe_encode(bytes(value))}
+        else:
+            payload[str(key)] = value
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def deserialize_cose_key(serialized: str) -> CoseKey:
+    raw = json.loads(serialized)
+    restored: dict[int, object] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict) and value.get("__type") == "bytes":
+            restored[int(key)] = websafe_decode(str(value.get("value") or ""))
+        else:
+            restored[int(key)] = value
+    return CoseKey.parse(restored)
+
+
+def passkey_credential_row_to_authenticator(row: sqlite3.Row | dict[str, object]) -> AttestedCredentialData:
+    mapping = dict(row)
+    credential_id = websafe_decode(str(mapping["credential_id"]))
+    public_key = deserialize_cose_key(str(mapping["public_key"]))
+    return AttestedCredentialData.create(
+        Aaguid.NONE,
+        credential_id,
+        public_key,
+    )
+
+
+def serialize_passkey_credential_row(row: sqlite3.Row | None) -> dict[str, object] | None:
+    if row is None:
+        return None
+    mapping = dict(row)
+    transports_value = mapping.get("transports")
+    try:
+        transports = json.loads(transports_value) if transports_value else []
+    except json.JSONDecodeError:
+        transports = []
+    return {
+        "id": int(mapping["id"]),
+        "actor_kind": mapping["actor_kind"],
+        "actor_id": int(mapping["actor_id"]),
+        "credential_id": mapping["credential_id"],
+        "nickname": mapping.get("nickname") or "",
+        "public_key": mapping["public_key"],
+        "sign_count": int(mapping.get("sign_count") or 0),
+        "transports": transports,
+        "last_used_at": mapping.get("last_used_at"),
+        "created_at": mapping.get("created_at"),
+        "updated_at": mapping.get("updated_at"),
+        "active": bool(mapping.get("is_active")),
+    }
+
+
+def list_passkey_credentials(actor_kind: str, actor_id: int) -> list[dict[str, object]]:
+    kind = normalize_passkey_kind(actor_kind)
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, actor_kind, actor_id, credential_id, nickname, public_key, sign_count,
+                   transports, last_used_at, is_active, created_at, updated_at
+            FROM passkey_credentials
+            WHERE actor_kind = ? AND actor_id = ?
+            ORDER BY id DESC
+            """,
+            (kind, int(actor_id)),
+        ).fetchall()
+    return [credential for row in rows if (credential := serialize_passkey_credential_row(row)) is not None]
+
+
+def list_passkey_descriptors(actor_kind: str, actor_id: int) -> list[PublicKeyCredentialDescriptor]:
+    descriptors: list[PublicKeyCredentialDescriptor] = []
+    for credential in list_passkey_credentials(actor_kind, actor_id):
+        if not credential["active"]:
+            continue
+        descriptors.append(
+            PublicKeyCredentialDescriptor(
+                type=PublicKeyCredentialType.PUBLIC_KEY,
+                id=websafe_decode(str(credential["credential_id"])),
+            )
+        )
+    return descriptors
+
+
+def create_passkey_credential(
+    actor_kind: str,
+    actor_id: int,
+    credential_id: bytes,
+    public_key: CoseKey,
+    nickname: str | None = None,
+    transports: list[str] | None = None,
+    sign_count: int = 0,
+) -> dict[str, object]:
+    kind = normalize_passkey_kind(actor_kind)
+    timestamp = timestamp_now()
+    encoded_credential_id = websafe_encode(credential_id)
+    public_key_json = serialize_cose_key(public_key)
+    transports_json = json.dumps(transports or [], sort_keys=True, separators=(",", ":"))
+    with get_db_connection() as conn:
+        existing = conn.execute(
+            """
+            SELECT id FROM passkey_credentials
+            WHERE actor_kind = ? AND actor_id = ? AND credential_id = ?
+            """,
+            (kind, int(actor_id), encoded_credential_id),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO passkey_credentials (
+                    actor_kind, actor_id, credential_id, nickname, public_key, sign_count,
+                    transports, last_used_at, is_active, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)
+                """,
+                (
+                    kind,
+                    int(actor_id),
+                    encoded_credential_id,
+                    (nickname or "").strip() or None,
+                    public_key_json,
+                    int(sign_count),
+                    transports_json,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE passkey_credentials
+                SET nickname = ?, public_key = ?, sign_count = ?, transports = ?,
+                    is_active = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    (nickname or "").strip() or None,
+                    public_key_json,
+                    int(sign_count),
+                    transports_json,
+                    timestamp,
+                    int(existing["id"]),
+                ),
+            )
+        if kind == "staff":
+            conn.execute(
+                "UPDATE staff_users SET auth_version = auth_version + 1, updated_at = ? WHERE id = ?",
+                (timestamp, int(actor_id)),
+            )
+        else:
+            conn.execute(
+                "UPDATE customer_users SET auth_version = auth_version + 1, updated_at = ? WHERE id = ?",
+                (timestamp, int(actor_id)),
+            )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT id, actor_kind, actor_id, credential_id, nickname, public_key, sign_count,
+                   transports, last_used_at, is_active, created_at, updated_at
+            FROM passkey_credentials
+            WHERE actor_kind = ? AND actor_id = ? AND credential_id = ?
+            """,
+            (kind, int(actor_id), encoded_credential_id),
+        ).fetchone()
+    return serialize_passkey_credential_row(row) or {}
+
+
+def update_passkey_credential_use(actor_kind: str, actor_id: int, credential_id: str, sign_count: int) -> None:
+    kind = normalize_passkey_kind(actor_kind)
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE passkey_credentials
+            SET sign_count = ?, last_used_at = ?, updated_at = ?
+            WHERE actor_kind = ? AND actor_id = ? AND credential_id = ? AND is_active = 1
+            """,
+            (int(sign_count), timestamp, timestamp, kind, int(actor_id), credential_id),
+        )
+        conn.commit()
+
+
+def load_passkey_credential(actor_kind: str, actor_id: int, credential_id: str) -> dict[str, object] | None:
+    kind = normalize_passkey_kind(actor_kind)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id, actor_kind, actor_id, credential_id, nickname, public_key, sign_count,
+                   transports, last_used_at, is_active, created_at, updated_at
+            FROM passkey_credentials
+            WHERE actor_kind = ? AND actor_id = ? AND credential_id = ? AND is_active = 1
+            """,
+            (kind, int(actor_id), credential_id),
+        ).fetchone()
+    return serialize_passkey_credential_row(row)
+
+
+def remove_passkey_credential(actor_kind: str, actor_id: int, credential_id: int) -> dict[str, object]:
+    kind = normalize_passkey_kind(actor_kind)
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        target = conn.execute(
+            """
+            SELECT id, actor_kind, actor_id, credential_id, nickname, public_key, sign_count,
+                   transports, last_used_at, is_active, created_at, updated_at
+            FROM passkey_credentials
+            WHERE id = ? AND actor_kind = ? AND actor_id = ?
+            """,
+            (int(credential_id), kind, int(actor_id)),
+        ).fetchone()
+        if target is None:
+            raise ValueError("That passkey is no longer available.")
+        conn.execute(
+            """
+            UPDATE passkey_credentials
+            SET is_active = 0, updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, int(credential_id)),
+        )
+        if kind == "staff":
+            conn.execute(
+                "UPDATE staff_users SET auth_version = auth_version + 1, updated_at = ? WHERE id = ?",
+                (timestamp, int(actor_id)),
+            )
+        else:
+            conn.execute(
+                "UPDATE customer_users SET auth_version = auth_version + 1, updated_at = ? WHERE id = ?",
+                (timestamp, int(actor_id)),
+            )
+        conn.commit()
+    return serialize_passkey_credential_row(target) or {}
+
+
+def get_passkey_user(kind: str, email: str | None) -> dict[str, object] | None:
+    normalized_kind = normalize_passkey_kind(kind)
+    if normalized_kind == "staff":
+        user = get_staff_user_by_email(email)
+        if user is not None and user.get("invite_pending"):
+            return None
+    else:
+        user = get_customer_user_by_email(email)
+    if user is None or not user.get("is_active"):
+        return None
+    if normalized_kind == "customer" and email_verification_required() and not user.get("email_verified"):
+        return None
+    return user
+
+
+def resolve_sign_in_user(email: str, password: str) -> tuple[str, dict[str, object]]:
+    try:
+        customer_user = authenticate_customer_user(email, password)
+    except EmailVerificationRequired as exc:
+        raise exc
+    except Exception:
+        customer_user = None
+    else:
+        return "customer", customer_user
+
+    staff_user = authenticate_staff_user(email, password)
+    return "staff", staff_user
+
+
+def resolve_passkey_login(email: str) -> tuple[str, dict[str, object]] | None:
+    customer_user = get_passkey_user("customer", email)
+    if customer_user is not None:
+        return "customer", customer_user
+    staff_user = get_passkey_user("staff", email)
+    if staff_user is not None:
+        return "staff", staff_user
+    return None
+
+
+def complete_sign_in_passkey(
+    response_data: dict[str, object],
+    *,
+    origin: str | None = None,
+) -> tuple[str, dict[str, object], dict[str, object], str]:
+    last_error: Exception | None = None
+    for kind in PASSKEY_USER_KINDS:
+        session_key = passkey_session_key(kind, "login")
+        if session_key not in session:
+            continue
+        try:
+            user, credential, next_url = complete_passkey_login(kind, response_data, origin=origin)
+        except Exception as exc:
+            last_error = exc
+            continue
+        return kind, user, credential, next_url
+    if last_error is not None:
+        raise last_error
+    raise ValueError("Start passkey sign in again.")
+
+
+def start_passkey_enrollment(
+    kind: str,
+    user: dict[str, object],
+    *,
+    nickname: str | None = None,
+    origin: str | None = None,
+) -> dict[str, object]:
+    normalized_kind = normalize_passkey_kind(kind)
+    server = build_passkey_server(origin)
+    options, state = server.register_begin(
+        passkey_user_entity(
+            normalized_kind,
+            int(user["id"]),
+            str(user["email"]),
+            str(user["full_name"]),
+        ),
+        credentials=list_passkey_descriptors(normalized_kind, int(user["id"])),
+        user_verification=PASSKEY_USER_VERIFICATION,
+    )
+    session[passkey_session_key(normalized_kind, "enrollment")] = {
+        "user_id": int(user["id"]),
+        "state": serialize_passkey_state(state),
+        "nickname": (nickname or "").strip(),
+        "origin": (origin or build_public_base_url()).rstrip("/"),
+    }
+    return normalize_passkey_json_value(dict(options.public_key))
+
+
+def complete_passkey_enrollment(
+    kind: str,
+    user: dict[str, object],
+    response_data: dict[str, object],
+    *,
+    origin: str | None = None,
+) -> dict[str, object]:
+    normalized_kind = normalize_passkey_kind(kind)
+    session_key = passkey_session_key(normalized_kind, "enrollment")
+    pending = session.get(session_key)
+    if not isinstance(pending, dict) or int(pending.get("user_id") or 0) != int(user["id"]):
+        raise ValueError("Start passkey setup again.")
+    server = build_passkey_server(origin or str(pending.get("origin") or ""))
+    auth_data = server.register_complete(dict(pending.get("state") or {}), response_data)
+    credential_data = auth_data.credential_data
+    if credential_data is None:
+        raise ValueError("That passkey could not be saved.")
+    transports = response_data.get("transports")
+    if not isinstance(transports, list):
+        transports = response_data.get("response", {}).get("transports", []) if isinstance(response_data.get("response"), dict) else []
+    credential = create_passkey_credential(
+        normalized_kind,
+        int(user["id"]),
+        credential_data.credential_id,
+        credential_data.public_key,
+        nickname=str(pending.get("nickname") or "").strip() or None,
+        transports=[str(item) for item in transports] if isinstance(transports, list) else None,
+        sign_count=int(auth_data.counter),
+    )
+    session.pop(session_key, None)
+    return credential
+
+
+def start_passkey_login(
+    kind: str,
+    user: dict[str, object],
+    *,
+    next_url: str | None = None,
+    origin: str | None = None,
+) -> dict[str, object]:
+    normalized_kind = normalize_passkey_kind(kind)
+    descriptors = list_passkey_descriptors(normalized_kind, int(user["id"]))
+    if not descriptors:
+        raise ValueError("That passkey sign in did not work.")
+    server = build_passkey_server(origin)
+    options, state = server.authenticate_begin(
+        descriptors,
+        user_verification=PASSKEY_USER_VERIFICATION,
+    )
+    session[passkey_session_key(normalized_kind, "login")] = {
+        "user_id": int(user["id"]),
+        "state": serialize_passkey_state(state),
+        "next": (next_url or "").strip(),
+        "origin": (origin or build_public_base_url()).rstrip("/"),
+    }
+    return normalize_passkey_json_value(dict(options.public_key))
+
+
+def complete_passkey_login(
+    kind: str,
+    response_data: dict[str, object],
+    *,
+    origin: str | None = None,
+) -> tuple[dict[str, object], dict[str, object], str]:
+    normalized_kind = normalize_passkey_kind(kind)
+    session_key = passkey_session_key(normalized_kind, "login")
+    pending = session.get(session_key)
+    if not isinstance(pending, dict):
+        raise ValueError("Start passkey sign in again.")
+    user_id = int(pending.get("user_id") or 0)
+    if user_id <= 0:
+        raise ValueError("Start passkey sign in again.")
+    user = get_staff_user_by_id(user_id) if normalized_kind == "staff" else get_customer_user_by_id(user_id)
+    if user is None or not user.get("is_active"):
+        raise ValueError("That sign-in did not work.")
+    credentials = list_passkey_credentials(normalized_kind, user_id)
+    active_credentials = [row for row in credentials if row["active"]]
+    if not active_credentials:
+        raise ValueError("That sign-in did not work.")
+    server = build_passkey_server(origin or str(pending.get("origin") or ""))
+    auth_response = AuthenticationResponse.from_dict(response_data)
+    verified_credential = server.authenticate_complete(
+        dict(pending.get("state") or {}),
+        [passkey_credential_row_to_authenticator(row) for row in active_credentials],
+        response_data,
+    )
+    credential_id = websafe_encode(verified_credential.credential_id)
+    matching_row = next(
+        (row for row in active_credentials if row["credential_id"] == credential_id),
+        None,
+    )
+    if matching_row is None:
+        raise ValueError("That sign-in did not work.")
+    current_sign_count = int(matching_row.get("sign_count") or 0)
+    auth_counter = int(auth_response.response.authenticator_data.counter)
+    update_passkey_credential_use(
+        normalized_kind,
+        user_id,
+        credential_id,
+        max(current_sign_count, auth_counter),
+    )
+    session.pop(session_key, None)
+    next_url = str(pending.get("next") or "")
+    return user, matching_row, next_url
 
 
 def count_staff_users() -> int:
@@ -3204,8 +3925,8 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
         ).fetchone()
         billing_row = conn.execute(
             """
-            SELECT plan_id, subscription_status, stripe_receipt_url, current_period_end,
-                   created_at, updated_at
+            SELECT plan_id, subscription_status, stripe_payment_reference, stripe_receipt_url,
+                   stripe_amount_total, stripe_currency, current_period_end, created_at, updated_at
             FROM customer_billing
             WHERE customer_user_id = ?
             """,
@@ -3489,7 +4210,10 @@ def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: in
             "stripe_customer_id": "",
             "stripe_subscription_id": "",
             "stripe_payment_intent_id": "",
+            "stripe_payment_reference": "",
             "stripe_receipt_url": "",
+            "stripe_amount_total": None,
+            "stripe_currency": "",
             "payments_customer_id": "",
             "payments_order_id": "",
             "payments_checkout_session_id": "",
@@ -3520,7 +4244,10 @@ def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: in
         "stripe_customer_id": mapping.get("stripe_customer_id") or "",
         "stripe_subscription_id": mapping.get("stripe_subscription_id") or "",
         "stripe_payment_intent_id": mapping.get("stripe_payment_intent_id") or "",
+        "stripe_payment_reference": mapping.get("stripe_payment_reference") or "",
         "stripe_receipt_url": mapping.get("stripe_receipt_url") or "",
+        "stripe_amount_total": mapping.get("stripe_amount_total"),
+        "stripe_currency": mapping.get("stripe_currency") or "",
         "payments_customer_id": mapping.get("payments_customer_id") or "",
         "payments_order_id": mapping.get("payments_order_id") or "",
         "payments_checkout_session_id": mapping.get("payments_checkout_session_id") or "",
@@ -3535,7 +4262,8 @@ def load_customer_billing(customer_user_id: int) -> dict[str, object]:
             """
             SELECT customer_user_id, plan_id, subscription_status, checkout_session_id,
                    stripe_customer_id, stripe_subscription_id, stripe_payment_intent_id,
-                   stripe_receipt_url,
+                   stripe_payment_reference, stripe_receipt_url, stripe_amount_total,
+                   stripe_currency,
                    payments_customer_id, payments_order_id, payments_checkout_session_id,
                    payments_receipt_id, current_period_end
             FROM customer_billing
@@ -3554,7 +4282,10 @@ def upsert_customer_billing(
     stripe_customer_id: str | None = None,
     stripe_subscription_id: str | None = None,
     stripe_payment_intent_id: str | None = None,
+    stripe_payment_reference: str | None = None,
     stripe_receipt_url: str | None = None,
+    stripe_amount_total: int | None = None,
+    stripe_currency: str | None = None,
     payments_customer_id: str | None = None,
     payments_order_id: str | None = None,
     payments_checkout_session_id: str | None = None,
@@ -3570,11 +4301,12 @@ def upsert_customer_billing(
             INSERT INTO customer_billing (
                 customer_user_id, plan_id, subscription_status, checkout_session_id,
                 stripe_customer_id, stripe_subscription_id, stripe_payment_intent_id,
-                stripe_receipt_url,
+                stripe_payment_reference, stripe_receipt_url, stripe_amount_total,
+                stripe_currency,
                 payments_customer_id, payments_order_id,
                 payments_checkout_session_id, payments_receipt_id, current_period_end, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(customer_user_id) DO UPDATE SET
                 plan_id = excluded.plan_id,
                 subscription_status = excluded.subscription_status,
@@ -3582,7 +4314,10 @@ def upsert_customer_billing(
                 stripe_customer_id = excluded.stripe_customer_id,
                 stripe_subscription_id = excluded.stripe_subscription_id,
                 stripe_payment_intent_id = excluded.stripe_payment_intent_id,
+                stripe_payment_reference = excluded.stripe_payment_reference,
                 stripe_receipt_url = excluded.stripe_receipt_url,
+                stripe_amount_total = excluded.stripe_amount_total,
+                stripe_currency = excluded.stripe_currency,
                 payments_customer_id = excluded.payments_customer_id,
                 payments_order_id = excluded.payments_order_id,
                 payments_checkout_session_id = excluded.payments_checkout_session_id,
@@ -3600,7 +4335,12 @@ def upsert_customer_billing(
                 stripe_payment_intent_id
                 if stripe_payment_intent_id is not None
                 else existing["stripe_payment_intent_id"],
+                stripe_payment_reference
+                if stripe_payment_reference is not None
+                else existing["stripe_payment_reference"],
                 stripe_receipt_url if stripe_receipt_url is not None else existing["stripe_receipt_url"],
+                stripe_amount_total if stripe_amount_total is not None else existing["stripe_amount_total"],
+                stripe_currency if stripe_currency is not None else existing["stripe_currency"],
                 payments_customer_id if payments_customer_id is not None else existing["payments_customer_id"],
                 payments_order_id if payments_order_id is not None else existing["payments_order_id"],
                 payments_checkout_session_id
@@ -3752,6 +4492,15 @@ def get_stripe_price_id(plan: dict[str, object]) -> str:
     return (os.getenv(env_name) or "").strip()
 
 
+def clean_promotion_code(value: str | None) -> str:
+    normalized = (value or "").strip().upper()
+    if not normalized:
+        raise ValueError("Promotion code is required.")
+    if not re.fullmatch(r"[A-Z0-9-]+", normalized):
+        raise ValueError("Promotion codes can only use letters, numbers, and dashes.")
+    return normalized
+
+
 def extract_mapping_value(obj: object, key: str) -> object:
     if isinstance(obj, dict):
         return obj.get(key)
@@ -3834,6 +4583,7 @@ def create_customer_checkout_session(
         stripe_customer_id=normalize_stripe_id(extract_mapping_value(session_obj, "customer")),
         stripe_subscription_id=normalize_stripe_id(extract_mapping_value(session_obj, "subscription")),
         stripe_payment_intent_id=normalize_stripe_id(extract_mapping_value(session_obj, "payment_intent")),
+        stripe_payment_reference=resolve_stripe_payment_reference(session_obj),
     )
     return {"id": session_id, "url": session_url}
 
@@ -3890,6 +4640,31 @@ def extract_stripe_receipt_url(session_obj: object) -> str:
     return ""
 
 
+def normalize_stripe_amount(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_stripe_amount_total(session_obj: object) -> int | None:
+    return normalize_stripe_amount(extract_mapping_value(session_obj, "amount_total"))
+
+
+def extract_stripe_currency(session_obj: object) -> str:
+    currency = extract_mapping_value(session_obj, "currency")
+    return str(currency or "").strip().lower()
+
+
+def resolve_stripe_payment_reference(session_obj: object) -> str:
+    payment_intent_id = normalize_stripe_id(extract_mapping_value(session_obj, "payment_intent"))
+    if payment_intent_id:
+        return payment_intent_id
+    return normalize_stripe_id(session_obj)
+
+
 def refresh_customer_billing_from_stripe(customer_user: dict[str, object], session_id: str | None = None) -> dict[str, object]:
     configure_stripe()
     billing = load_customer_billing(int(customer_user["id"]))
@@ -3907,7 +4682,7 @@ def refresh_customer_billing_from_stripe(customer_user: dict[str, object], sessi
     subscription_status = str(extract_mapping_value(subscription_obj, "status") or "")
     payment_status = str(extract_mapping_value(session_obj, "payment_status") or "")
     billing_status = stripe_subscription_status_to_billing_status(subscription_status)
-    if not subscription_status and payment_status == "paid":
+    if not subscription_status and payment_status in {"paid", "no_payment_required"}:
         billing_status = "active"
     current_period_end = normalize_stripe_timestamp(extract_mapping_value(subscription_obj, "current_period_end"))
     return upsert_customer_billing(
@@ -3918,7 +4693,10 @@ def refresh_customer_billing_from_stripe(customer_user: dict[str, object], sessi
         stripe_customer_id=normalize_stripe_id(extract_mapping_value(session_obj, "customer")),
         stripe_subscription_id=subscription_id,
         stripe_payment_intent_id=normalize_stripe_id(extract_mapping_value(session_obj, "payment_intent")),
+        stripe_payment_reference=resolve_stripe_payment_reference(session_obj),
         stripe_receipt_url=extract_stripe_receipt_url(session_obj),
+        stripe_amount_total=extract_stripe_amount_total(session_obj),
+        stripe_currency=extract_stripe_currency(session_obj),
         current_period_end=current_period_end,
     )
 
@@ -3946,6 +4724,9 @@ def handle_stripe_event(event: object) -> None:
             stripe_customer_id=normalize_stripe_id(extract_mapping_value(event_object, "customer")),
             stripe_subscription_id=normalize_stripe_id(extract_mapping_value(event_object, "subscription")),
             stripe_payment_intent_id=normalize_stripe_id(extract_mapping_value(event_object, "payment_intent")),
+            stripe_payment_reference=resolve_stripe_payment_reference(event_object),
+            stripe_amount_total=extract_stripe_amount_total(event_object),
+            stripe_currency=extract_stripe_currency(event_object),
         )
         return
 
@@ -3968,6 +4749,117 @@ def handle_stripe_event(event: object) -> None:
         )
 
 
+def verify_configured_stripe_account() -> None:
+    expected_account_id = get_stripe_account_id()
+    if not expected_account_id or not hasattr(stripe, "Account"):
+        return
+    account_obj = stripe.Account.retrieve()
+    actual_account_id = normalize_stripe_id(account_obj)
+    if actual_account_id and actual_account_id != expected_account_id:
+        raise ValueError("Stripe account does not match the configured Home Energy Watch account.")
+
+
+def extract_coupon_id_from_promotion_code(promotion_code_obj: object) -> str:
+    promotion = extract_mapping_value(promotion_code_obj, "promotion")
+    coupon_id = normalize_stripe_id(extract_mapping_value(promotion, "coupon"))
+    if coupon_id:
+        return coupon_id
+    return normalize_stripe_id(extract_mapping_value(promotion_code_obj, "coupon"))
+
+
+def find_existing_owner_free_play_promotion_code(code: str) -> dict[str, object] | None:
+    configure_stripe()
+    verify_configured_stripe_account()
+    promotion_code = clean_promotion_code(code)
+    result = stripe.PromotionCode.list(code=promotion_code, active=True, limit=10)
+    candidates = extract_mapping_value(result, "data")
+    if not isinstance(candidates, list):
+        return None
+    for candidate in candidates:
+        coupon_id = extract_coupon_id_from_promotion_code(candidate)
+        if not coupon_id or not hasattr(stripe, "Coupon"):
+            continue
+        coupon = stripe.Coupon.retrieve(coupon_id)
+        percent_off = normalize_stripe_amount(extract_mapping_value(coupon, "percent_off"))
+        duration = str(extract_mapping_value(coupon, "duration") or "")
+        if percent_off != 100 or duration != "once":
+            continue
+        summary = candidate if isinstance(candidate, dict) else dict(candidate)
+        summary["_coupon_summary"] = coupon
+        return summary
+    return None
+
+
+def summarize_promotion_code(promotion_code_obj: object) -> dict[str, object]:
+    summary = promotion_code_obj if isinstance(promotion_code_obj, dict) else dict(promotion_code_obj)
+    coupon_id = extract_coupon_id_from_promotion_code(summary)
+    coupon = extract_mapping_value(summary, "_coupon_summary") or {}
+    if not coupon and coupon_id and hasattr(stripe, "Coupon"):
+        coupon = stripe.Coupon.retrieve(coupon_id)
+    expires_at = extract_mapping_value(summary, "expires_at")
+    expiration = ""
+    if expires_at not in {None, ""}:
+        try:
+            expiration = datetime.fromtimestamp(int(expires_at), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        except (TypeError, ValueError, OSError):
+            expiration = ""
+    return {
+        "promotion_code": str(extract_mapping_value(summary, "code") or ""),
+        "promotion_code_id": normalize_stripe_id(summary),
+        "active": bool(extract_mapping_value(summary, "active")),
+        "mode": "live" if bool(extract_mapping_value(summary, "livemode")) else "test",
+        "discount_percentage": normalize_stripe_amount(extract_mapping_value(coupon, "percent_off")),
+        "redemption_limit": normalize_stripe_amount(extract_mapping_value(summary, "max_redemptions")),
+        "redemptions_used": normalize_stripe_amount(extract_mapping_value(summary, "times_redeemed")) or 0,
+        "expiration": expiration,
+    }
+
+
+def ensure_owner_free_play_promotion_code(
+    code: str = DEFAULT_OWNER_FREE_PLAY_PROMOTION_CODE,
+    *,
+    max_redemptions: int = DEFAULT_OWNER_FREE_PLAY_MAX_REDEMPTIONS,
+    valid_days: int = DEFAULT_OWNER_FREE_PLAY_VALID_DAYS,
+) -> dict[str, object]:
+    promotion_code = clean_promotion_code(code)
+    if max_redemptions < 1:
+        raise ValueError("Promotion max redemptions must be at least 1.")
+    if valid_days < 1:
+        raise ValueError("Promotion validity must be at least 1 day.")
+    existing = find_existing_owner_free_play_promotion_code(promotion_code)
+    if existing is not None:
+        return summarize_promotion_code(existing)
+
+    configure_stripe()
+    verify_configured_stripe_account()
+    environment = runtime_environment()
+    expires_at = int((datetime.now(timezone.utc) + timedelta(days=valid_days)).timestamp())
+    metadata = {
+        "project": OWNER_FREE_PLAY_PROJECT,
+        "purpose": OWNER_FREE_PLAY_PURPOSE,
+        "environment": environment,
+    }
+    coupon = stripe.Coupon.create(
+        percent_off=100,
+        duration="once",
+        name=OWNER_FREE_PLAY_COUPON_NAME,
+        metadata=metadata,
+        idempotency_key=f"{OWNER_FREE_PLAY_PROJECT}:free-play-coupon:{environment}:v1",
+    )
+    promotion = stripe.PromotionCode.create(
+        promotion={
+            "type": "coupon",
+            "coupon": normalize_stripe_id(coupon),
+        },
+        code=promotion_code,
+        max_redemptions=max_redemptions,
+        expires_at=expires_at,
+        metadata=metadata,
+        idempotency_key=f"{OWNER_FREE_PLAY_PROJECT}:free-play-promotion:{environment}:{promotion_code}:v1",
+    )
+    return summarize_promotion_code(promotion)
+
+
 def serialize_account_row(row: sqlite3.Row | tuple | None) -> dict[str, object] | None:
     if row is None:
         return None
@@ -3978,8 +4870,12 @@ def serialize_account_row(row: sqlite3.Row | tuple | None) -> dict[str, object] 
         "display_name": mapping["display_name"],
         "energy_company": mapping.get("energy_company") or "",
         "baseline_date": mapping["baseline_date"],
+        "meter_value": mapping.get("meter_value") or "",
         "address": mapping.get("address") or "",
     }
+
+
+ACCOUNT_FIELD_UNSET = object()
 
 
 def get_or_create_account(
@@ -3988,13 +4884,16 @@ def get_or_create_account(
     display_name: str | None = None,
     energy_company: str | None = None,
     baseline_date: str | None = None,
+    meter_value: str | None | object = ACCOUNT_FIELD_UNSET,
 ) -> dict[str, object]:
     normalized_number = normalize_account_number(account_number)
     normalized_date = normalize_optional_date(baseline_date) if baseline_date is not None else None
     normalized_energy_company = clean_energy_company(energy_company)
+    meter_value_supplied = meter_value is not ACCOUNT_FIELD_UNSET
+    normalized_meter_value = clean_meter_value(meter_value) if meter_value_supplied else None
     existing = conn.execute(
         """
-        SELECT id, account_number, display_name, energy_company, baseline_date
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
         FROM accounts
         WHERE account_number = ?
         """,
@@ -4014,6 +4913,9 @@ def get_or_create_account(
         if baseline_date is not None and normalized_date != current["baseline_date"]:
             updates.append("baseline_date = ?")
             values.append(normalized_date)
+        if meter_value_supplied and normalized_meter_value != (current.get("meter_value") or None):
+            updates.append("meter_value = ?")
+            values.append(normalized_meter_value)
         if updates:
             updates.append("updated_at = ?")
             values.append(timestamp_now())
@@ -4024,7 +4926,7 @@ def get_or_create_account(
             )
             existing = conn.execute(
                 """
-                SELECT id, account_number, display_name, energy_company, baseline_date
+                SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
                 FROM accounts
                 WHERE account_number = ?
                 """,
@@ -4036,21 +4938,22 @@ def get_or_create_account(
     account_label = (display_name or "").strip() or normalized_energy_company or normalized_number
     conn.execute(
         """
-        INSERT INTO accounts (account_number, display_name, energy_company, baseline_date, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO accounts (account_number, display_name, energy_company, baseline_date, meter_value, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             normalized_number,
             account_label,
             normalized_energy_company,
             normalized_date,
+            normalized_meter_value,
             timestamp,
             timestamp,
         ),
     )
     created = conn.execute(
         """
-        SELECT id, account_number, display_name, energy_company, baseline_date
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
         FROM accounts
         WHERE account_number = ?
         """,
@@ -4059,11 +4962,51 @@ def get_or_create_account(
     return serialize_account_row(created) or {}
 
 
+def rename_account_number(
+    conn: sqlite3.Connection,
+    current_account_number: str | None,
+    replacement_account_number: str | None,
+) -> dict[str, object]:
+    current_normalized = clean_account_number(current_account_number)
+    replacement_normalized = clean_account_number(replacement_account_number)
+    current = conn.execute(
+        """
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+        FROM accounts
+        WHERE account_number = ?
+        """,
+        (current_normalized,),
+    ).fetchone()
+    if current is None:
+        raise ValueError("That account was not found.")
+    if replacement_normalized == current_normalized:
+        return serialize_account_row(current) or {}
+    conflict = conn.execute(
+        "SELECT id FROM accounts WHERE account_number = ? AND id <> ?",
+        (replacement_normalized, int(current["id"])),
+    ).fetchone()
+    if conflict is not None:
+        raise ValueError("That account number is already in use.")
+    conn.execute(
+        "UPDATE accounts SET account_number = ?, updated_at = ? WHERE id = ?",
+        (replacement_normalized, timestamp_now(), int(current["id"])),
+    )
+    updated = conn.execute(
+        """
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+        FROM accounts
+        WHERE id = ?
+        """,
+        (int(current["id"]),),
+    ).fetchone()
+    return serialize_account_row(updated) or {}
+
+
 def list_accounts() -> list[dict[str, object]]:
     with get_db_connection() as conn:
         rows = conn.execute(
             """
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
                    household_profiles.address
             FROM accounts
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
@@ -4115,7 +5058,7 @@ def list_account_page(search: str | None = None, page: int = 1, per_page: int = 
         offset = (safe_page - 1) * safe_per_page
         rows = conn.execute(
             f"""
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
                    household_profiles.address
             FROM accounts
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
@@ -4151,7 +5094,7 @@ def find_account(account_number: str | None) -> dict[str, object] | None:
     with get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
                    household_profiles.address
             FROM accounts
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
@@ -4204,7 +5147,7 @@ def list_customer_account_page(
         offset = (safe_page - 1) * safe_per_page
         rows = conn.execute(
             f"""
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
                    household_profiles.address
             FROM account_access_emails
             JOIN accounts ON accounts.id = account_access_emails.account_id
@@ -4280,14 +5223,19 @@ def save_account_profile(
     display_name: str | None = None,
     energy_company: str | None = None,
     baseline_date: str | None = None,
+    meter_value: str | None | object = ACCOUNT_FIELD_UNSET,
+    current_account_number: str | None = None,
 ) -> dict[str, object]:
     with get_db_connection() as conn:
+        if current_account_number is not None and normalize_account_number(current_account_number) != normalize_account_number(account_number):
+            rename_account_number(conn, current_account_number, account_number)
         account = get_or_create_account(
             conn,
             account_number,
             display_name=display_name,
             energy_company=energy_company,
             baseline_date=baseline_date,
+            meter_value=meter_value,
         )
         conn.commit()
     return account
@@ -4302,6 +5250,25 @@ def serialize_account_access_row(row: sqlite3.Row | None) -> dict[str, object] |
         "email": mapping["email"],
         "full_name": mapping.get("full_name") or "",
         "access_level": mapping.get("access_level") or "Viewer",
+    }
+
+
+def serialize_account_note_row(row: sqlite3.Row | None) -> dict[str, object] | None:
+    if row is None:
+        return None
+    mapping = dict(row)
+    return {
+        "id": int(mapping["id"]),
+        "account_id": int(mapping["account_id"]),
+        "note_date": mapping["note_date"],
+        "body": mapping["body"],
+        "author_kind": mapping["author_kind"],
+        "author_label": mapping.get("author_label") or "Homeowner",
+        "customer_user_id": mapping.get("customer_user_id"),
+        "staff_user_id": mapping.get("staff_user_id"),
+        "created_at": mapping.get("created_at"),
+        "updated_at": mapping.get("updated_at"),
+        "can_delete": bool(mapping.get("can_delete")),
     }
 
 
@@ -4361,6 +5328,108 @@ def add_account_access_email(
         )
         conn.commit()
     return next(item for item in list_account_access_emails(account_number) if item["email"] == normalized_email)
+
+
+def list_account_notes(
+    account_number: str | None,
+    actor: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        rows = conn.execute(
+            """
+            SELECT id, account_id, note_date, body, author_kind, author_label,
+                   customer_user_id, staff_user_id, created_at, updated_at
+            FROM account_notes
+            WHERE account_id = ?
+            ORDER BY note_date DESC, created_at DESC, id DESC
+            """,
+            (account["id"],),
+        ).fetchall()
+
+    notes: list[dict[str, object]] = []
+    customer_user_id = None
+    if actor is not None and actor.get("kind") == "customer":
+        customer_user_id = int(actor["user"]["id"])
+    for row in rows:
+        serialized = serialize_account_note_row(row)
+        if serialized is None:
+            continue
+        serialized["can_delete"] = (
+            customer_user_id is not None
+            and serialized["author_kind"] == "customer"
+            and serialized["customer_user_id"] is not None
+            and int(serialized["customer_user_id"]) == customer_user_id
+        )
+        notes.append(serialized)
+    return notes
+
+
+def add_customer_account_note(
+    account_number: str | None,
+    customer_user: dict[str, object],
+    note_date: str | None,
+    body: str | None,
+) -> dict[str, object]:
+    normalized_note_date = clean_note_date(note_date)
+    normalized_body = clean_note_body(body)
+    timestamp = timestamp_now()
+    author_label = clean_optional_text(str(customer_user.get("full_name") or "")) or clean_optional_text(
+        str(customer_user.get("email") or "")
+    )
+    if not author_label:
+        author_label = "Homeowner"
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        note_row = conn.execute(
+            """
+            INSERT INTO account_notes (
+                account_id, note_date, body, author_kind, author_label,
+                customer_user_id, staff_user_id, created_at, updated_at
+            )
+            VALUES (?, ?, ?, 'customer', ?, ?, NULL, ?, ?)
+            RETURNING id, account_id, note_date, body, author_kind, author_label,
+                      customer_user_id, staff_user_id, created_at, updated_at
+            """,
+            (
+                account["id"],
+                normalized_note_date,
+                normalized_body,
+                author_label,
+                int(customer_user["id"]),
+                timestamp,
+                timestamp,
+            ),
+        ).fetchone()
+    return serialize_account_note_row(note_row) or {}
+
+
+def delete_customer_account_note(
+    account_number: str | None,
+    note_id: int,
+    customer_user: dict[str, object],
+) -> dict[str, object]:
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        note_row = conn.execute(
+            """
+            SELECT id, account_id, note_date, body, author_kind, author_label,
+                   customer_user_id, staff_user_id, created_at, updated_at
+            FROM account_notes
+            WHERE account_id = ? AND id = ?
+            """,
+            (account["id"], int(note_id)),
+        ).fetchone()
+        if note_row is None:
+            raise ValueError("That note could not be found.")
+        if int(note_row["customer_user_id"] or 0) != int(customer_user["id"]):
+            raise PermissionError("You can only delete notes you created.")
+        conn.execute(
+            "DELETE FROM account_notes WHERE account_id = ? AND id = ?",
+            (account["id"], int(note_id)),
+        )
+        conn.commit()
+    return serialize_account_note_row(note_row) or {}
 
 
 def delete_account_access_email(account_number: str | None, access_id: int) -> dict[str, object]:
@@ -4559,6 +5628,16 @@ def get_customer_account_data_authorization(
         ),
         None,
     )
+
+
+def customer_can_manage_own_history_without_data_permission(
+    account_number: str | None,
+    customer_user: dict[str, object] | None,
+) -> bool:
+    if customer_user is None:
+        return False
+    access = get_customer_account_access(str(customer_user["email"]), account_number)
+    return bool(access and access.get("access_level") == "Manager")
 
 
 def ensure_customer_manages_account(
@@ -5929,6 +7008,25 @@ def clean_optional_text(value: str | None) -> str | None:
     return normalized or None
 
 
+def clean_note_date(value: str | None) -> str:
+    normalized = clean_optional_text(value)
+    if not normalized:
+        return ddate.today().isoformat()
+    try:
+        return ddate.fromisoformat(normalized).isoformat()
+    except ValueError as exc:
+        raise ValueError("Choose a valid note date.") from exc
+
+
+def clean_note_body(value: str | None) -> str:
+    normalized = clean_optional_text(value)
+    if not normalized:
+        raise ValueError("Enter a note.")
+    if len(normalized) > 2000:
+        raise ValueError("Keep notes under 2000 characters.")
+    return normalized
+
+
 def form_checkbox_checked(value: object) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -6124,6 +7222,7 @@ def create_customer_signup(
     confirm_account_authority: bool,
     evidence_remote_hash: str | None = None,
     evidence_user_agent_hash: str | None = None,
+    meter_value: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     normalized_email = clean_email(email)
     normalized_name = (full_name or "").strip() or normalized_email
@@ -6132,14 +7231,11 @@ def create_customer_signup(
         raise ValueError("Agree to the Terms and Privacy Notice to create an account.")
     if not confirm_account_authority:
         raise ValueError("Confirm that you are allowed to manage this electric account.")
-    normalized_account_number = (account_number or "").strip()
-    if not normalized_account_number:
-        raise ValueError("Enter the electric account number.")
-    if len(normalized_account_number) > 100:
-        raise ValueError("The electric account number is too long.")
+    normalized_account_number = clean_account_number(account_number)
     normalized_energy_company = clean_energy_company(energy_company)
     if not normalized_energy_company:
         raise ValueError("Enter the service address so we can identify the energy company.")
+    normalized_meter_value = clean_meter_value(meter_value)
     plan = get_billing_plan(plan_id)
     profile = clean_household_profile_values(
         household_form,
@@ -6194,6 +7290,7 @@ def create_customer_signup(
             normalized_account_number,
             display_name=normalized_name,
             energy_company=normalized_energy_company,
+            meter_value=normalized_meter_value,
         )
         conn.execute(
             """
@@ -6363,11 +7460,18 @@ def resolve_energy_company_for_form(
     existing_profile: dict[str, object] | None = None,
     require_zip: bool = False,
 ) -> str:
+    manual_energy_company = clean_optional_text(form_like.get("energy_company"))
+    if manual_energy_company:
+        return clean_energy_company(manual_energy_company)
     zip_code = clean_zip_code(form_like.get("zip_code"), required=require_zip)
     if not zip_code:
+        if existing_profile and existing_profile.get("zip_code"):
+            zip_code = clean_zip_code(str(existing_profile.get("zip_code")), required=True)
+            address = clean_optional_text(existing_profile.get("address"))
+            return str(lookup_energy_company_by_zip(zip_code, address).get("energy_company") or "")
         if existing_account and existing_account.get("energy_company"):
             return str(existing_account["energy_company"])
-        return clean_energy_company(form_like.get("energy_company"))
+        raise ValueError("Enter the service ZIP code so we can identify the electric company.")
 
     address = clean_optional_text(form_like.get("address"))
     if (
@@ -6864,6 +7968,18 @@ def serialize_load_item_row(row: sqlite3.Row | None) -> dict[str, object] | None
     }
 
 
+LIGHTING_LOAD_TERMS = (
+    "light",
+    "lamp",
+    "led",
+    "fixture",
+    "bulb",
+    "sconce",
+    "flood",
+    "recessed",
+)
+
+
 def list_load_items(account_number: str | None = None) -> list[dict[str, object]]:
     with get_db_connection() as conn:
         account = get_or_create_account(conn, account_number)
@@ -6892,15 +8008,43 @@ def build_load_inventory_summary(load_items: list[dict[str, object]]) -> dict[st
             "off_watts": 0.0,
             "off_kw": 0.0,
             "item_count": 0,
+            "total_units": 0,
+            "always_on_units": 0,
+            "lighting_units": 0,
+            "lighting_watts": 0.0,
         }
     all_on_watts = sum(float(item["total_watts"]) for item in load_items)
     off_watts = sum(float(item["total_watts"]) for item in load_items if item["include_when_off"])
+    total_units = sum(int(item["quantity"]) for item in load_items)
+    always_on_units = sum(int(item["quantity"]) for item in load_items if item["include_when_off"])
+    lighting_items = [
+        item
+        for item in load_items
+        if any(term in f"{item['label']} {item.get('notes') or ''}".lower() for term in LIGHTING_LOAD_TERMS)
+    ]
+    lighting_units = sum(int(item["quantity"]) for item in lighting_items)
+    lighting_watts = sum(float(item["total_watts"]) for item in lighting_items)
     return {
         "all_on_watts": round(all_on_watts, 1),
         "all_on_kw": round(all_on_watts / 1000.0, 3),
         "off_watts": round(off_watts, 1),
         "off_kw": round(off_watts / 1000.0, 3),
         "item_count": len(load_items),
+        "total_units": total_units,
+        "always_on_units": always_on_units,
+        "lighting_units": lighting_units,
+        "lighting_watts": round(lighting_watts, 1),
+    }
+
+
+def build_load_overview(load_items: list[dict[str, object]]) -> dict[str, object]:
+    top_loads = sorted(
+        load_items,
+        key=lambda item: (float(item["total_watts"]), float(item["watts_each"])),
+        reverse=True,
+    )[:5]
+    return {
+        "top_loads": top_loads,
     }
 
 
@@ -7028,13 +8172,13 @@ class GreenButtonESPIAdapter(UtilityFeedAdapter):
             return 0
         if not isinstance(source, etree._ElementTree):
             return 0
-        has_espi = bool(source.xpath("//*[namespace-uri()='http://naesb.org/espi']"))
+        has_espi = any(xml_namespace(element.tag) == "http://naesb.org/espi" for element in source.iter())
         if not has_espi:
             return 0
-        has_atom_root = bool(
-            source.xpath(
-                "/*[local-name()='feed' or local-name()='entry'][namespace-uri()='http://www.w3.org/2005/Atom']"
-            )
+        root = source.getroot()
+        has_atom_root = (
+            xml_local_name(root.tag) in {"feed", "entry"}
+            and xml_namespace(root.tag) == "http://www.w3.org/2005/Atom"
         )
         return 120 if has_atom_root else 100
 
@@ -7056,14 +8200,22 @@ class DukeStyleIntervalXmlAdapter(UtilityFeedAdapter):
             return 0
         if not isinstance(source, etree._ElementTree):
             return 0
-        if bool(source.xpath("//*[namespace-uri()='http://naesb.org/espi']")):
+        if any(xml_namespace(element.tag) == "http://naesb.org/espi" for element in source.iter()):
             return 0
-        has_interval_reading = bool(source.xpath("//*[local-name()='IntervalReading']"))
+        root = source.getroot()
+        has_interval_reading = False
+        has_interval_block = False
+        for element in source.iter():
+            name = xml_local_name(element.tag)
+            if name == "IntervalReading":
+                has_interval_reading = True
+            elif name == "IntervalBlock":
+                has_interval_block = True
         if not has_interval_reading:
             return 0
-        if bool(source.xpath("/*[local-name()='UsagePoint']")):
+        if xml_local_name(root.tag) == "UsagePoint":
             return 80
-        if bool(source.xpath("//*[local-name()='IntervalBlock']")):
+        if has_interval_block:
             return 60
         return 40
 
@@ -7224,36 +8376,72 @@ def detect_utility_feed_adapter(path: str | Path) -> dict[str, object]:
     }
 
 
+def xml_local_name(tag: object) -> str:
+    if not isinstance(tag, str):
+        return ""
+    return tag.rsplit("}", 1)[-1]
+
+
+def xml_namespace(tag: object) -> str:
+    if not isinstance(tag, str) or not tag.startswith("{"):
+        return ""
+    return tag[1:].split("}", 1)[0]
+
+
+def xml_child_text(element: etree._Element, child_name: str) -> str | None:
+    for child in element:
+        if xml_local_name(child.tag) == child_name:
+            return child.text
+    return None
+
+
+def interval_reading_values(
+    interval_reading: etree._Element,
+) -> tuple[str | None, str | None, str | None]:
+    start_text = None
+    duration_text = None
+    value_text = None
+    for child in interval_reading:
+        child_name = xml_local_name(child.tag)
+        if child_name == "timePeriod":
+            start_text = xml_child_text(child, "start")
+            duration_text = xml_child_text(child, "duration")
+        elif child_name == "value":
+            value_text = child.text
+    return start_text, duration_text, value_text
+
+
 def build_interval_rows_from_tree(tree: etree._ElementTree, local_tz) -> list[dict[str, object]]:
     intervals: list[dict[str, object]] = []
-    interval_blocks = tree.xpath("//*[local-name()='IntervalBlock']")
+    interval_blocks = [element for element in tree.iter() if xml_local_name(element.tag) == "IntervalBlock"]
 
     for block in interval_blocks:
-        metadata = block.xpath("./*[local-name()='interval'][1]")
         default_duration = None
         unit_of_measure = None
-        if metadata:
-            seconds_per_interval = metadata[0].xpath("./*[local-name()='secondsPerInterval']/text()")
-            unit_text = metadata[0].xpath("./*[local-name()='unitOfMeasure']/text()")
-            if seconds_per_interval:
-                try:
-                    default_duration = int(seconds_per_interval[0].strip())
-                except (TypeError, ValueError):
-                    default_duration = None
-            if unit_text:
-                unit_of_measure = unit_text[0].strip()
+        metadata = next(
+            (child for child in block if xml_local_name(child.tag) == "interval"),
+            None,
+        )
+        if metadata is not None:
+            seconds_per_interval = xml_child_text(metadata, "secondsPerInterval")
+            unit_text = xml_child_text(metadata, "unitOfMeasure")
+            try:
+                default_duration = int(seconds_per_interval.strip()) if seconds_per_interval else None
+            except (AttributeError, TypeError, ValueError):
+                default_duration = None
+            unit_of_measure = unit_text.strip() if unit_text else None
 
-        for interval_reading in block.xpath("./*[local-name()='IntervalReading']"):
-            start_elem = interval_reading.xpath("./*[local-name()='timePeriod']/*[local-name()='start']/text()")
-            duration_elem = interval_reading.xpath("./*[local-name()='timePeriod']/*[local-name()='duration']/text()")
-            value_elem = interval_reading.xpath("./*[local-name()='value']/text()")
-            if not (start_elem and value_elem):
+        for interval_reading in block:
+            if xml_local_name(interval_reading.tag) != "IntervalReading":
+                continue
+            start_text, duration_text, value_text = interval_reading_values(interval_reading)
+            if not (start_text and value_text):
                 continue
 
             try:
-                start_epoch = int(start_elem[0].strip())
-                duration_seconds = int(duration_elem[0].strip()) if duration_elem else default_duration
-                raw_value = float(value_elem[0].strip())
+                start_epoch = int(start_text.strip())
+                duration_seconds = int(duration_text.strip()) if duration_text else default_duration
+                raw_value = float(value_text.strip())
             except (AttributeError, TypeError, ValueError):
                 continue
 
@@ -7277,17 +8465,17 @@ def build_interval_rows_from_tree(tree: etree._ElementTree, local_tz) -> list[di
             )
     if not intervals:
         # Fallback for simpler XML variants that may not use IntervalBlock metadata.
-        for interval_reading in tree.xpath("//*[local-name()='IntervalReading']"):
-            start_elem = interval_reading.xpath("./*[local-name()='timePeriod']/*[local-name()='start']/text()")
-            duration_elem = interval_reading.xpath("./*[local-name()='timePeriod']/*[local-name()='duration']/text()")
-            value_elem = interval_reading.xpath("./*[local-name()='value']/text()")
-            if not (start_elem and duration_elem and value_elem):
+        for interval_reading in tree.iter():
+            if xml_local_name(interval_reading.tag) != "IntervalReading":
+                continue
+            start_text, duration_text, value_text = interval_reading_values(interval_reading)
+            if not (start_text and duration_text and value_text):
                 continue
 
             try:
-                start_epoch = int(start_elem[0].strip())
-                duration_seconds = int(duration_elem[0].strip())
-                raw_value = float(value_elem[0].strip())
+                start_epoch = int(start_text.strip())
+                duration_seconds = int(duration_text.strip())
+                raw_value = float(value_text.strip())
             except (AttributeError, TypeError, ValueError):
                 continue
 
@@ -7451,6 +8639,9 @@ def import_interval_frame_to_db(
 
     imported_at = timestamp_now()
     modified_time = modified_time if modified_time is not None else datetime.now(tz.UTC).timestamp()
+    added_count = 0
+    already_present_count = 0
+    conflicts_skipped_count = 0
 
     with get_db_connection() as conn:
         account = get_or_create_account(
@@ -7460,27 +8651,33 @@ def import_interval_frame_to_db(
             energy_company=energy_company,
             baseline_date=baseline_date,
         )
-        conn.executemany(
-            """
-            INSERT INTO interval_readings (account_id, start_epoch, duration_s, wh, source_path, imported_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(account_id, start_epoch, duration_s) DO UPDATE SET
-                wh = excluded.wh,
-                source_path = excluded.source_path,
-                imported_at = excluded.imported_at
-            """,
-            [
-                (
-                    int(account["id"]),
-                    int(row.start_epoch),
-                    int(row.duration_s),
-                    float(row.wh),
-                    source_path,
-                    imported_at,
+        for row in frame.itertuples(index=False):
+            row_account_id = int(account["id"])
+            start_epoch = int(row.start_epoch)
+            duration_s = int(row.duration_s)
+            wh = float(row.wh)
+            existing = conn.execute(
+                """
+                SELECT wh
+                FROM interval_readings
+                WHERE account_id = ? AND start_epoch = ? AND duration_s = ?
+                """,
+                (row_account_id, start_epoch, duration_s),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO interval_readings (account_id, start_epoch, duration_s, wh, source_path, imported_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (row_account_id, start_epoch, duration_s, wh, source_path, imported_at),
                 )
-                for row in frame.itertuples(index=False)
-            ],
-        )
+                added_count += 1
+                continue
+            if round(float(existing["wh"]), 9) == round(wh, 9):
+                already_present_count += 1
+                continue
+            conflicts_skipped_count += 1
         conn.execute(
             """
             INSERT INTO imported_files (account_id, path, modified_time, interval_count, imported_at, service_point_id)
@@ -7496,8 +8693,11 @@ def import_interval_frame_to_db(
 
     return {
         "path": source_path,
-        "imported": True,
+        "imported": bool(added_count),
         "interval_count": int(frame.shape[0]),
+        "added_count": added_count,
+        "already_present_count": already_present_count,
+        "conflicts_skipped_count": conflicts_skipped_count,
         "account_number": account["account_number"],
         "adapter_id": adapter_id,
         "adapter_name": adapter_name,
@@ -7538,6 +8738,9 @@ def import_interval_file_to_db(
                 "path": path.as_posix(),
                 "imported": False,
                 "interval_count": int(existing["interval_count"]),
+                "added_count": 0,
+                "already_present_count": int(existing["interval_count"]),
+                "conflicts_skipped_count": 0,
                 "account_number": account["account_number"],
                 "adapter_id": adapter["adapter_id"],
                 "adapter_name": adapter["display_name"],
@@ -7868,12 +9071,69 @@ def find_top_jumps(df: pd.DataFrame, reading_date: ddate) -> list[dict[str, obje
     return jumps
 
 
+def build_note_date_index(account_notes: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
+    notes_by_date: dict[str, list[dict[str, object]]] = {}
+    for note in account_notes:
+        note_date = str(note.get("note_date") or "")
+        if not note_date:
+            continue
+        notes_by_date.setdefault(note_date, []).append(note)
+    return notes_by_date
+
+
+def summarize_note_preview(note_body: str, limit: int = 96) -> str:
+    compact = " ".join(str(note_body or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip() + "..."
+
+
+def attach_note_metadata_to_rows(
+    rows: list[dict[str, object]],
+    notes_by_date: dict[str, list[dict[str, object]]],
+) -> list[dict[str, object]]:
+    for row in rows:
+        row_notes = notes_by_date.get(str(row.get("date")), [])
+        row["note_count"] = len(row_notes)
+        row["has_note"] = bool(row_notes)
+        row["note_preview"] = summarize_note_preview(str(row_notes[0]["body"])) if row_notes else ""
+    return rows
+
+
+def attach_alert_counts_to_rows(
+    rows: list[dict[str, object]],
+    alert_events: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    counts: dict[str, int] = {}
+    for event in alert_events:
+        event_date = str(event.get("date") or "")
+        if not event_date:
+            continue
+        counts[event_date] = counts.get(event_date, 0) + 1
+    for row in rows:
+        row["alert_count"] = counts.get(str(row.get("date")), 0)
+    return rows
+
+
+def attach_ranked_metadata_to_rows(
+    rows: list[dict[str, object]],
+    ranked_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    ranked_by_date = {str(row.get("date")): row for row in ranked_rows}
+    for row in rows:
+        ranked = ranked_by_date.get(str(row.get("date")))
+        row["severity_score"] = 0.0 if ranked is None else float(ranked.get("severity_score") or 0.0)
+        row["severity_rank"] = None if ranked is None else ranked.get("severity_rank")
+    return rows
+
+
 def build_day_detail(
     df: pd.DataFrame,
     summary: pd.DataFrame,
     alert_events: list[dict[str, object]],
     target_date: str | ddate | None,
     baseline_date: str | None = None,
+    notes_by_date: dict[str, list[dict[str, object]]] | None = None,
 ) -> dict[str, object] | None:
     focus_date = normalize_report_date(target_date)
     if focus_date is None:
@@ -7887,6 +9147,7 @@ def build_day_detail(
     baseline_day_date = normalize_report_date(baseline_date)
     previous_day = summarize_single_day(summary, previous_date)
     baseline_day = summarize_single_day(summary, baseline_day_date)
+    note_bucket = (notes_by_date or {}).get(focus_date.isoformat(), [])
     return {
         "date": focus_date.isoformat(),
         "label": format_date_label(focus_date),
@@ -7902,6 +9163,8 @@ def build_day_detail(
         },
         "alert_events": [event for event in alert_events if event["date"] == focus_date.isoformat()][:8],
         "top_jumps": find_top_jumps(df, focus_date),
+        "notes": note_bucket,
+        "note_count": len(note_bucket),
     }
 
 
@@ -8994,7 +10257,9 @@ def build_report_context(
     accounts: list[dict[str, object]],
     household_profile: dict[str, object],
     load_items: list[dict[str, object]],
+    account_notes: list[dict[str, object]] | None = None,
     imported_files_count: int = 0,
+    import_result: dict[str, object] | None = None,
     weather_contexts: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     snapshot = build_analysis_snapshot(
@@ -9009,15 +10274,24 @@ def build_report_context(
     )
     focus_date = snapshot["focus_date"]
     load_summary = build_load_inventory_summary(load_items)
+    load_overview = build_load_overview(load_items)
+    note_index = build_note_date_index(account_notes or [])
+    attach_alert_counts_to_rows(snapshot["summary_rows"], alert_events)
+    attach_ranked_metadata_to_rows(snapshot["summary_rows"], snapshot["ranked_suspicious_days"])
+    attach_note_metadata_to_rows(snapshot["summary_rows"], note_index)
+    attach_note_metadata_to_rows(snapshot["suspicious_rows"], note_index)
+    attach_note_metadata_to_rows(snapshot["ranked_suspicious_days"], note_index)
     initial_day_detail = build_day_detail(
         df,
         summary,
         alert_events,
         focus_date,
         baseline_date=account.get("baseline_date"),
+        notes_by_date=note_index,
     )
     if initial_day_detail is not None:
         initial_day_detail["load_summary"] = load_summary
+        initial_day_detail["load_overview"] = load_overview
         initial_day_detail["inventory_alignment"] = {
             "off_gap_kw": None
             if initial_day_detail["current_day"]["night_avg_kw"] is None
@@ -9030,18 +10304,27 @@ def build_report_context(
                 3,
             ),
         }
-        initial_day_detail["weather"] = load_day_weather(account["account_number"], focus_date, settings["tz"])
+        # Weather is deliberately loaded by /api/day-detail after the user
+        # chooses a day. Do not make an upload wait on external weather APIs.
+        initial_day_detail["weather"] = {
+            "available": False,
+            "reason": "Weather loads when you open a day.",
+        }
     return {
         **snapshot,
         "baseline_date": account.get("baseline_date"),
         "imported_files_count": imported_files_count,
+        "import_result": import_result,
         "initial_day_detail": initial_day_detail,
         "account": account,
         "accounts": accounts,
         "household_profile": household_profile,
         "load_items": load_items,
         "load_summary": load_summary,
+        "load_overview": load_overview,
         "inventory_comparison": build_inventory_comparison(load_summary, df, baseline),
+        "account_notes": account_notes or [],
+        "note_day_count": len(note_index),
     }
 
 
@@ -9079,6 +10362,7 @@ def build_account_view(
     accounts = list_accounts()
     household_profile = load_household_profile(account["account_number"])
     load_items = list_load_items(account["account_number"])
+    account_notes = list_account_notes(account["account_number"])
     df, summary, baseline, alert_events = analyze_history_store(
         account_number=account["account_number"],
         tz_name=settings["tz"],
@@ -9103,6 +10387,7 @@ def build_account_view(
         accounts=accounts,
         household_profile=household_profile,
         load_items=load_items,
+        account_notes=account_notes,
         imported_files_count=count_imported_files(account["account_number"]),
     )
 
@@ -9197,6 +10482,7 @@ def build_customer_account_scaffold(
 
 def create_web_app() -> Flask:
     validate_runtime_security()
+    configure_application_logging()
     app = Flask(__name__)
     app.secret_key = get_app_secret()
     app.config.update(
@@ -9241,6 +10527,7 @@ def create_web_app() -> Flask:
     @app.before_request
     def establish_request_context():
         g.request_id = uuid4().hex
+        g.request_started_at = time.perf_counter()
 
     @app.before_request
     def enforce_csrf_protection():
@@ -9276,7 +10563,39 @@ def create_web_app() -> Flask:
             response.headers["Cache-Control"] = "no-store, private"
         if is_production_environment():
             response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        if request.endpoint != "static":
+            started_at = getattr(g, "request_started_at", None)
+            duration_ms = None
+            if started_at is not None:
+                duration_ms = round((time.perf_counter() - float(started_at)) * 1000, 1)
+            emit_application_log(
+                "request.completed",
+                request_id=str(getattr(g, "request_id", "") or uuid4().hex),
+                actor=summarize_request_actor(),
+                method=request.method,
+                route=summarize_request_route(),
+                status_code=int(response.status_code),
+                duration_ms=duration_ms,
+            )
         return response
+
+    @app.errorhandler(Exception)
+    def log_unhandled_exception(exc):
+        if isinstance(exc, HTTPException):
+            return exc
+        payload = {
+            "event": "request.failed",
+            "request_id": str(getattr(g, "request_id", "") or uuid4().hex),
+            "actor": summarize_request_actor(),
+            "method": request.method if has_request_context() else "",
+            "route": summarize_request_route() if has_request_context() else "",
+            "exception_type": exc.__class__.__name__,
+        }
+        message = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        get_application_logger().exception(message)
+        if has_request_context() and (request.path.startswith("/api/") or request.is_json):
+            return jsonify({"error": "An unexpected error occurred."}), 500
+        return "An unexpected error occurred.", 500
 
     def current_staff_user() -> dict[str, object] | None:
         staff_user_id = session.get("staff_user_id")
@@ -9382,7 +10701,7 @@ def create_web_app() -> Flask:
         if customer_user is None:
             if api:
                 return jsonify({"error": "Sign in to continue."}), 401
-            return redirect(url_for("customer_login", next=request.full_path if request.query_string else request.path))
+            return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
         return customer_user
 
     @app.before_request
@@ -9429,7 +10748,7 @@ def create_web_app() -> Flask:
 
         if api:
             return jsonify({"error": "Sign in to continue."}), 401
-        return redirect(url_for("customer_login", next=request.full_path if request.query_string else request.path))
+        return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
 
     def record_actor_event(
         actor: dict[str, object],
@@ -9460,7 +10779,7 @@ def create_web_app() -> Flask:
             return {"kind": "customer", "user": customer_user}
         if api:
             return jsonify({"error": "Sign in to continue."}), 401
-        return redirect(url_for("customer_login", next=request.full_path if request.query_string else request.path))
+        return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
 
     def actor_redirect(account_number: str | None = None):
         if current_customer_user() is not None and current_staff_user() is None:
@@ -9513,7 +10832,7 @@ def create_web_app() -> Flask:
             "privacy_url": build_absolute_url(marketing_base_url, "/privacy"),
             "utility_authorization_url": build_absolute_url(marketing_base_url, "/utility-data-authorization"),
             "start_home_url": build_absolute_url(app_base_url, "/signup"),
-            "home_login_url": build_absolute_url(app_base_url, "/customer/login"),
+            "home_login_url": build_absolute_url(app_base_url, "/login"),
             "commission_login_url": build_absolute_url(app_base_url, "/login"),
             "canonical_url": build_absolute_url(marketing_base_url, request.path),
             "robots_meta": "index,follow",
@@ -9526,6 +10845,7 @@ def create_web_app() -> Flask:
         account_search = request.args.get("account_search")
         account_page_number = parse_positive_int(request.args.get("account_page"), default=1)
         scaffold = build_account_scaffold(account_number, account_search, account_page_number)
+        staff_user = current_staff_user()
         return {
             "defaults": defaults,
             "analysis": None,
@@ -9539,6 +10859,7 @@ def create_web_app() -> Flask:
             "utility_connections": scaffold["utility_connections"],
             "data_authorizations": scaffold["data_authorizations"],
             "has_active_data_authorization": scaffold["has_active_data_authorization"],
+            "account_notes": list_account_notes(scaffold["account"]["account_number"], staff_user),
             "setup_section": setup_section,
             "active_account_number": scaffold["account"]["account_number"],
             "page_title": page_title,
@@ -9571,6 +10892,11 @@ def create_web_app() -> Flask:
             "data_authorizations": scaffold["data_authorizations"],
             "customer_data_authorization": scaffold["customer_data_authorization"],
             "has_active_data_authorization": scaffold["has_active_data_authorization"],
+            "customer_passkeys": list_passkey_credentials("customer", int(customer_user["id"])),
+            "account_notes": list_account_notes(
+                scaffold["account"]["account_number"],
+                {"kind": "customer", "user": customer_user},
+            ),
             "setup_section": setup_section,
             "active_account_number": scaffold["account"]["account_number"],
             "customer_mode": True,
@@ -9599,6 +10925,8 @@ def create_web_app() -> Flask:
             "email": value("email"),
             "password": "",
             "account_number": value("account_number"),
+            "energy_company": value("energy_company"),
+            "meter_value": value("meter_value"),
             "address": value("address"),
             "zip_code": value("zip_code"),
             "plan_id": selected_plan_id,
@@ -9659,6 +10987,7 @@ def create_web_app() -> Flask:
             "supported_feeds": list_supported_utility_adapters(),
             "utility_access_guides": list_utility_access_guides(),
             "csrf_token": get_csrf_token,
+            "today_iso": ddate.today().isoformat(),
             "app_base_url": build_public_base_url(),
             "marketing_base_url": build_marketing_base_url(),
             "request_on_marketing_host": is_marketing_host(current_request_host()),
@@ -9713,6 +11042,10 @@ def create_web_app() -> Flask:
                     accounts=scaffold["accounts"],
                     household_profile=scaffold["household_profile"],
                     load_items=scaffold["load_items"],
+                    account_notes=list_account_notes(
+                        account["account_number"],
+                        {"kind": "customer", "user": customer_user},
+                    ),
                     imported_files_count=count_imported_files(account["account_number"]),
                 )
         except Exception:
@@ -9802,6 +11135,7 @@ def create_web_app() -> Flask:
                 password=request.form.get("password", ""),
                 account_number=request.form.get("account_number"),
                 energy_company=energy_company,
+                meter_value=request.form.get("meter_value"),
                 plan_id=selected_plan_id,
                 household_form=request.form,
                 accept_policies=accept_policies,
@@ -10042,68 +11376,52 @@ def create_web_app() -> Flask:
             target_id=customer_user["id"],
         )
         flash("Your password has been changed. Sign in with the new password.")
-        return redirect(url_for("customer_login"))
+        return redirect(url_for("login"))
 
     @app.get("/customer/login")
     def customer_login():
         if current_customer_user() is not None and current_staff_user() is None:
             return redirect(url_for("customer_dashboard"))
-        return render_template("customer_login.html", page_title="Customer Sign In", next_url=request.args.get("next", ""))
+        return redirect(url_for("login", next=request.args.get("next", "")))
 
     @app.post("/customer/login")
     def customer_login_post():
-        email = request.form.get("email", "")
-        identity_hash = auth_request_identity("customer_login", email)
-        limit_status = auth_rate_limit_status("customer_login", identity_hash)
-        if limit_status["blocked"]:
-            flash(auth_limit_message(int(limit_status["retry_after"])))
-            return (
-                render_template(
-                    "customer_login.html",
-                    page_title="Customer Sign In",
-                    next_url=request.form.get("next", ""),
-                ),
-                429,
-            )
-        try:
-            customer_user = authenticate_customer_user(
-                email,
-                request.form.get("password", ""),
-            )
-        except EmailVerificationRequired as exc:
-            clear_auth_failures("customer_login", identity_hash)
-            session.clear()
-            session.permanent = True
-            session["pending_verification_email"] = str(exc.customer_user["email"])
-            record_audit_event(
-                "customer.login_verification_required",
-                actor_type="customer",
-                actor_id=int(exc.customer_user["id"]),
-                target_type="customer_user",
-                target_id=exc.customer_user["id"],
-            )
-            return redirect(url_for("customer_verification_sent"))
-        except Exception as exc:
-            failed_status = record_auth_failure("customer_login", identity_hash)
-            record_audit_event(
-                "customer.login_failed",
-                actor_type="anonymous",
-                metadata={"rate_limited": bool(failed_status["blocked"])},
-            )
-            flash(str(exc))
-            if failed_status["blocked"]:
-                flash(auth_limit_message(int(failed_status["retry_after"])))
-                return (
-                    render_template(
-                        "customer_login.html",
-                        page_title="Customer Sign In",
-                        next_url=request.form.get("next", ""),
-                    ),
-                    429,
-                )
-            return redirect(url_for("customer_login", next=request.form.get("next", "")))
+        return login_post()
 
-        clear_auth_failures("customer_login", identity_hash)
+    @app.post("/customer/login/passkey/start")
+    def customer_passkey_start():
+        email = request.form.get("email", "")
+        customer_user = get_passkey_user("customer", email)
+        if customer_user is None:
+            return jsonify({"error": "That passkey sign in did not work."}), 400
+        try:
+            options = start_passkey_login(
+                "customer",
+                customer_user,
+                next_url=request.form.get("next", ""),
+                origin=build_public_base_url(request.url_root),
+            )
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+        record_audit_event(
+            "customer.passkey_challenge_started",
+            actor_type="anonymous",
+            target_type="customer_user",
+            target_id=customer_user["id"],
+        )
+        return jsonify({"publicKey": options})
+
+    @app.post("/customer/login/passkey/finish")
+    def customer_passkey_finish():
+        payload = request.get_json(silent=True) or {}
+        try:
+            customer_user, _, next_url = complete_passkey_login(
+                "customer",
+                payload if isinstance(payload, dict) else {},
+                origin=build_public_base_url(request.url_root),
+            )
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
         start_customer_session(customer_user)
         record_audit_event(
             "customer.login_succeeded",
@@ -10112,8 +11430,10 @@ def create_web_app() -> Flask:
             account_number=choose_customer_account_number(str(customer_user["email"])),
             target_type="customer_user",
             target_id=customer_user["id"],
+            metadata={"method": "passkey"},
         )
-        return redirect(next_destination(default_endpoint="customer_dashboard"))
+        safe_next = next_url if next_url.startswith("/") and not next_url.startswith("//") else url_for("customer_dashboard")
+        return jsonify({"redirect": safe_next})
 
     @app.get("/pricing")
     def pricing_page():
@@ -10228,7 +11548,7 @@ def create_web_app() -> Flask:
     def billing_success():
         customer_user = current_customer_user()
         if customer_user is None:
-            return redirect(url_for("customer_login"))
+            return redirect(url_for("login"))
         try:
             billing = refresh_customer_billing_from_stripe(customer_user, request.args.get("session_id"))
             record_audit_event(
@@ -10309,6 +11629,80 @@ def create_web_app() -> Flask:
         if not isinstance(customer_user, dict):
             return customer_user
         return render_customer_setup_page(customer_user, "Account", "account")
+
+    @app.post("/customer/passkeys/start")
+    def customer_passkey_enrollment_start():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        try:
+            options = start_passkey_enrollment(
+                "customer",
+                customer_user,
+                nickname=request.form.get("nickname", ""),
+                origin=build_public_base_url(request.url_root),
+            )
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+        record_audit_event(
+            "customer.passkey_enrollment_started",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=choose_customer_account_number(str(customer_user["email"])),
+            target_type="customer_user",
+            target_id=customer_user["id"],
+        )
+        return jsonify({"publicKey": options})
+
+    @app.post("/customer/passkeys/finish")
+    def customer_passkey_enrollment_finish():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        payload = request.get_json(silent=True) or {}
+        try:
+            credential = complete_passkey_enrollment(
+                "customer",
+                customer_user,
+                payload if isinstance(payload, dict) else {},
+                origin=build_public_base_url(request.url_root),
+            )
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+        updated_user = get_customer_user_by_id(int(customer_user["id"])) or customer_user
+        session["customer_auth_version"] = int(updated_user.get("auth_version") or 1)
+        record_audit_event(
+            "customer.passkey_enrolled",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=choose_customer_account_number(str(customer_user["email"])),
+            target_type="passkey_credential",
+            target_id=credential["id"],
+        )
+        return jsonify({"saved": True, "credential": credential})
+
+    @app.post("/customer/passkeys/<int:credential_id>/delete")
+    def customer_passkey_delete(credential_id: int):
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        try:
+            removed = remove_passkey_credential("customer", int(customer_user["id"]), credential_id)
+        except Exception as exc:
+            flash(str(exc))
+            return redirect(url_for("customer_account_page"))
+        updated_user = get_customer_user_by_id(int(customer_user["id"])) or customer_user
+        session["customer_auth_version"] = int(updated_user.get("auth_version") or 1)
+        record_audit_event(
+            "customer.passkey_deleted",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=choose_customer_account_number(str(customer_user["email"])),
+            target_type="passkey_credential",
+            target_id=removed["id"],
+        )
+        flash("Passkey removed.")
+        return redirect(url_for("customer_account_page"))
 
     @app.get("/customer/data-export.zip")
     def customer_data_export():
@@ -10443,11 +11837,78 @@ def create_web_app() -> Flask:
 
     @app.get("/login")
     def login():
-        if staff_bootstrap_needed():
-            return redirect(url_for("first_run"))
         if current_staff_user() is not None:
             return redirect(url_for("index"))
-        return render_template("login.html", page_title="Commission Sign In", next_url=request.args.get("next", ""))
+        if current_customer_user() is not None:
+            return redirect(url_for("customer_dashboard"))
+        return render_template("login.html", page_title="Sign In", next_url=request.args.get("next", ""))
+
+    @app.get("/forgot-password")
+    def forgot_password():
+        return render_template(
+            "customer_forgot_password.html",
+            page_title="Reset Your Password",
+            request_sent=False,
+        )
+
+    @app.post("/forgot-password")
+    def forgot_password_post():
+        email = request.form.get("email", "")
+        identity_hash = auth_request_identity("password_reset", email)
+        limit_status = auth_rate_limit_status("password_reset", identity_hash)
+        if limit_status["blocked"]:
+            return (
+                render_template(
+                    "customer_forgot_password.html",
+                    page_title="Reset Your Password",
+                    request_sent=True,
+                    rate_limited=True,
+                ),
+                429,
+            )
+
+        record_auth_failure("password_reset", identity_hash)
+        customer_user = get_customer_user_by_email(email)
+        staff_user = None if customer_user is not None else get_staff_user_by_email(email)
+        user_kind = None
+        user = None
+        if customer_user is not None and customer_user.get("is_active"):
+            user_kind = "customer"
+            user = customer_user
+        elif staff_user is not None and staff_user.get("is_active") and not staff_user.get("invite_pending"):
+            user_kind = "staff"
+            user = staff_user
+
+        delivered = False
+        delivery_error = None
+        if user is not None and user_kind is not None:
+            try:
+                if user_kind == "customer":
+                    send_customer_password_reset_email(user, build_public_base_url(request.url_root))
+                else:
+                    send_staff_password_reset_email(user, build_public_base_url(request.url_root))
+                delivered = True
+            except Exception as exc:
+                delivery_error = type(exc).__name__
+
+        record_audit_event(
+            "password_reset_requested",
+            actor_type=user_kind or "anonymous",
+            actor_id=None if user is None else int(user["id"]),
+            target_type=None if user_kind is None else f"{user_kind}_user",
+            target_id=None if user is None else user["id"],
+            metadata={
+                "delivery_attempted": delivered,
+                "delivery_error": delivery_error,
+                "user_kind": user_kind,
+            },
+        )
+        return render_template(
+            "customer_forgot_password.html",
+            page_title="Reset Your Password",
+            request_sent=True,
+            rate_limited=False,
+        )
 
     @app.get("/staff/forgot-password")
     def staff_forgot_password():
@@ -10543,30 +12004,41 @@ def create_web_app() -> Flask:
 
     @app.post("/login")
     def login_post():
-        if staff_bootstrap_needed():
-            return redirect(url_for("first_run"))
         email = request.form.get("email", "")
-        identity_hash = auth_request_identity("staff_login", email)
-        limit_status = auth_rate_limit_status("staff_login", identity_hash)
+        identity_hash = auth_request_identity("sign_in", email)
+        limit_status = auth_rate_limit_status("sign_in", identity_hash)
         if limit_status["blocked"]:
             flash(auth_limit_message(int(limit_status["retry_after"])))
             return (
                 render_template(
                     "login.html",
-                    page_title="Commission Sign In",
+                    page_title="Sign In",
                     next_url=request.form.get("next", ""),
                 ),
                 429,
             )
         try:
-            staff_user = authenticate_staff_user(
+            sign_in_kind, signed_in_user = resolve_sign_in_user(
                 email,
                 request.form.get("password", ""),
             )
-        except Exception as exc:
-            failed_status = record_auth_failure("staff_login", identity_hash)
+        except EmailVerificationRequired as exc:
+            clear_auth_failures("sign_in", identity_hash)
+            session.clear()
+            session.permanent = True
+            session["pending_verification_email"] = str(exc.customer_user["email"])
             record_audit_event(
-                "staff.login_failed",
+                "customer.login_verification_required",
+                actor_type="customer",
+                actor_id=int(exc.customer_user["id"]),
+                target_type="customer_user",
+                target_id=exc.customer_user["id"],
+            )
+            return redirect(url_for("customer_verification_sent"))
+        except Exception as exc:
+            failed_status = record_auth_failure("sign_in", identity_hash)
+            record_audit_event(
+                "auth.login_failed",
                 actor_type="anonymous",
                 metadata={"rate_limited": bool(failed_status["blocked"])},
             )
@@ -10576,15 +12048,30 @@ def create_web_app() -> Flask:
                 return (
                     render_template(
                         "login.html",
-                        page_title="Commission Sign In",
+                        page_title="Sign In",
                         next_url=request.form.get("next", ""),
                     ),
                     429,
                 )
             return redirect(url_for("login", next=request.form.get("next", "")))
 
-        clear_auth_failures("staff_login", identity_hash)
+        clear_auth_failures("sign_in", identity_hash)
         destination = next_destination()
+        if sign_in_kind == "customer":
+            customer_user = signed_in_user
+            start_customer_session(customer_user)
+            record_audit_event(
+                "customer.login_succeeded",
+                actor_type="customer",
+                actor_id=int(customer_user["id"]),
+                account_number=choose_customer_account_number(str(customer_user["email"])),
+                target_type="customer_user",
+                target_id=customer_user["id"],
+                metadata={"entrypoint": "unified"},
+            )
+            return redirect(destination if destination else next_destination(default_endpoint="customer_dashboard"))
+
+        staff_user = signed_in_user
         if staff_user.get("mfa_enabled"):
             establish_pending_staff_mfa_session(staff_user, destination)
             record_audit_event(
@@ -10604,9 +12091,73 @@ def create_web_app() -> Flask:
             actor_id=int(staff_user["id"]),
             target_type="staff_user",
             target_id=staff_user["id"],
-            metadata={"mfa": "not_enabled"},
+            metadata={"mfa": "not_enabled", "entrypoint": "unified"},
         )
         return redirect(destination)
+
+    @app.post("/login/passkey/start")
+    @app.post("/customer/login/passkey/start")
+    def sign_in_passkey_start():
+        email = request.form.get("email", "")
+        resolved = resolve_passkey_login(email)
+        if resolved is None:
+            return jsonify({"error": "That passkey sign in did not work."}), 400
+        kind, user = resolved
+        try:
+            options = start_passkey_login(
+                kind,
+                user,
+                next_url=request.form.get("next", ""),
+                origin=build_public_base_url(request.url_root),
+            )
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+        record_audit_event(
+            f"{kind}.passkey_challenge_started",
+            actor_type="anonymous",
+            target_type=f"{kind}_user",
+            target_id=user["id"],
+        )
+        return jsonify({"publicKey": options})
+
+    @app.post("/login/passkey/finish")
+    @app.post("/customer/login/passkey/finish")
+    def sign_in_passkey_finish():
+        payload = request.get_json(silent=True) or {}
+        try:
+            kind, signed_in_user, _, next_url = complete_sign_in_passkey(
+                payload if isinstance(payload, dict) else {},
+                origin=build_public_base_url(request.url_root),
+            )
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+        if kind == "customer":
+            start_customer_session(signed_in_user)
+            record_audit_event(
+                "customer.login_succeeded",
+                actor_type="customer",
+                actor_id=int(signed_in_user["id"]),
+                account_number=choose_customer_account_number(str(signed_in_user["email"])),
+                target_type="customer_user",
+                target_id=signed_in_user["id"],
+                metadata={"mfa": "passkey", "entrypoint": "unified"},
+            )
+            safe_next = next_url if next_url.startswith("/") and not next_url.startswith("//") else url_for("customer_dashboard")
+            return jsonify({"redirect": safe_next})
+
+        staff_user = signed_in_user
+        establish_staff_session(staff_user)
+        mark_staff_login_succeeded(int(staff_user["id"]))
+        record_audit_event(
+            "staff.login_succeeded",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=staff_user["id"],
+            metadata={"mfa": "passkey", "entrypoint": "unified"},
+        )
+        safe_next = next_url if next_url.startswith("/") and not next_url.startswith("//") else url_for("index")
+        return jsonify({"redirect": safe_next})
 
     @app.get("/staff/mfa/challenge")
     def staff_mfa_challenge():
@@ -10686,6 +12237,7 @@ def create_web_app() -> Flask:
             enrollment=load_staff_mfa_enrollment(int(staff_user["id"])),
             recovery_code_count=count_staff_mfa_recovery_codes(int(staff_user["id"])),
             mfa_required=staff_mfa_required(),
+            passkeys=list_passkey_credentials("staff", int(staff_user["id"])),
         )
 
     @app.post("/staff/security/mfa/start")
@@ -10807,6 +12359,77 @@ def create_web_app() -> Flask:
         flash("Authenticator protection was turned off.")
         return redirect(url_for("staff_security"))
 
+    @app.post("/staff/security/passkeys/start")
+    def staff_passkey_enrollment_start():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        try:
+            options = start_passkey_enrollment(
+                "staff",
+                staff_user,
+                nickname=request.form.get("nickname", ""),
+                origin=build_public_base_url(request.url_root),
+            )
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+        record_audit_event(
+            "staff.passkey_enrollment_started",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="staff_user",
+            target_id=staff_user["id"],
+        )
+        return jsonify({"publicKey": options})
+
+    @app.post("/staff/security/passkeys/finish")
+    def staff_passkey_enrollment_finish():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        payload = request.get_json(silent=True) or {}
+        try:
+            credential = complete_passkey_enrollment(
+                "staff",
+                staff_user,
+                payload if isinstance(payload, dict) else {},
+                origin=build_public_base_url(request.url_root),
+            )
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+        updated_user = get_staff_user_by_id(int(staff_user["id"])) or staff_user
+        session["staff_auth_version"] = int(updated_user.get("auth_version") or 1)
+        record_audit_event(
+            "staff.passkey_enrolled",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="passkey_credential",
+            target_id=credential["id"],
+        )
+        return jsonify({"saved": True, "credential": credential})
+
+    @app.post("/staff/security/passkeys/<int:credential_id>/delete")
+    def staff_passkey_delete(credential_id: int):
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        try:
+            removed = remove_passkey_credential("staff", int(staff_user["id"]), credential_id)
+        except Exception as exc:
+            flash(str(exc))
+            return redirect(url_for("staff_security"))
+        updated_user = get_staff_user_by_id(int(staff_user["id"])) or staff_user
+        session["staff_auth_version"] = int(updated_user.get("auth_version") or 1)
+        record_audit_event(
+            "staff.passkey_deleted",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="passkey_credential",
+            target_id=removed["id"],
+        )
+        flash("Passkey removed.")
+        return redirect(url_for("staff_security"))
+
     @app.post("/logout")
     def logout():
         customer_user = current_customer_user()
@@ -10830,7 +12453,7 @@ def create_web_app() -> Flask:
                 target_id=staff_user["id"],
             )
         session.clear()
-        return redirect(url_for("customer_login" if had_customer else "login"))
+        return redirect(url_for("login"))
 
     @app.get("/staff/setup/<token>")
     def accept_staff_invite_route(token: str):
@@ -11074,6 +12697,66 @@ def create_web_app() -> Flask:
             return staff_user
         return render_template("history_page.html", **build_staff_account_context("History"))
 
+    @app.post("/account/notes")
+    def create_account_note():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        account_number = request.form.get("account_number")
+        if not customer_can_manage_own_history_without_data_permission(account_number, customer_user):
+            flash("Manager access is required to add notes to this account.")
+            return redirect_back_or_account(account_number)
+        try:
+            note = add_customer_account_note(
+                account_number,
+                customer_user,
+                request.form.get("note_date"),
+                request.form.get("body"),
+            )
+        except Exception as exc:
+            flash(str(exc))
+            return redirect_back_or_account(account_number)
+        actor = {"kind": "customer", "user": customer_user}
+        record_actor_event(
+            actor,
+            "account.note_created",
+            account_number=account_number,
+            target_type="account_note",
+            target_id=note["id"],
+            metadata={"note_date": note["note_date"]},
+        )
+        flash("Note saved.")
+        return redirect_back_or_account(account_number)
+
+    @app.post("/account/notes/<int:note_id>/delete")
+    def delete_account_note(note_id: int):
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        account_number = request.form.get("account_number")
+        if not customer_can_manage_own_history_without_data_permission(account_number, customer_user):
+            flash("Manager access is required to delete notes from this account.")
+            return redirect_back_or_account(account_number)
+        try:
+            note = delete_customer_account_note(account_number, note_id, customer_user)
+        except PermissionError as exc:
+            flash(str(exc))
+            return redirect_back_or_account(account_number)
+        except Exception as exc:
+            flash(str(exc))
+            return redirect_back_or_account(account_number)
+        actor = {"kind": "customer", "user": customer_user}
+        record_actor_event(
+            actor,
+            "account.note_deleted",
+            account_number=account_number,
+            target_type="account_note",
+            target_id=note["id"],
+            metadata={"note_date": note["note_date"]},
+        )
+        flash("Note deleted.")
+        return redirect_back_or_account(account_number)
+
     @app.get("/staff")
     def staff_page():
         staff_user = require_staff_user()
@@ -11306,7 +12989,7 @@ def create_web_app() -> Flask:
 
         customer_user = current_customer_user()
         if customer_user is None:
-            return redirect(url_for("customer_login", next=request.path))
+            return redirect(url_for("login", next=request.path))
         try:
             artifact_account_number = get_report_artifact_account_number(filename)
         except ValueError:
@@ -11328,7 +13011,10 @@ def create_web_app() -> Flask:
             return actor
 
         try:
-            if not account_has_active_data_authorization(account_number):
+            if not account_has_active_data_authorization(account_number) and not customer_can_manage_own_history_without_data_permission(
+                account_number,
+                actor["user"] if actor["kind"] == "customer" else None,
+            ):
                 raise ValueError("Customer data permission is required before exports can be compared.")
             left_path = save_uploaded_file(request.files.get("left_file"))
             right_path = save_uploaded_file(request.files.get("right_file"))
@@ -11398,6 +13084,13 @@ def create_web_app() -> Flask:
         account = load_account(request.args.get("account_number"))
         load_items = list_load_items(account["account_number"])
         load_summary = build_load_inventory_summary(load_items)
+        load_overview = build_load_overview(load_items)
+        account_notes = (
+            list_account_notes(account["account_number"], {"kind": "customer", "user": actor["user"]})
+            if actor["kind"] == "customer"
+            else list_account_notes(account["account_number"])
+        )
+        note_index = build_note_date_index(account_notes)
         df, summary, baseline, alert_events = analyze_history_store(
             account_number=account["account_number"],
             tz_name=settings["tz"],
@@ -11413,11 +13106,13 @@ def create_web_app() -> Flask:
             alert_events,
             request.args.get("date"),
             baseline_date=account.get("baseline_date"),
+            notes_by_date=note_index,
         )
         if detail is None:
             return jsonify({"error": "That day is not available for this account."}), 404
 
         detail["load_summary"] = load_summary
+        detail["load_overview"] = load_overview
         detail["inventory_alignment"] = {
             "off_gap_kw": None
             if detail["current_day"]["night_avg_kw"] is None
@@ -11470,15 +13165,17 @@ def create_web_app() -> Flask:
             mounted_name = payload.get("input_file")
             if mounted_name:
                 input_path = resolve_input_file(mounted_name)
-                import_interval_file_to_db(
+                import_result = import_interval_file_to_db(
                     input_path,
                     account_number=account_number,
                     display_name=display_name,
                     energy_company=energy_company,
                     baseline_date=baseline_date,
                 )
+            else:
+                import_result = None
         else:
-            import_interval_file_to_db(
+            import_result = import_interval_file_to_db(
                 input_path,
                 account_number=account_number,
                 display_name=display_name,
@@ -11504,11 +13201,9 @@ def create_web_app() -> Flask:
             baseline_date=account.get("baseline_date"),
         )
         report_path = build_output_path(Path("combined-history.xml"))
-        weather_contexts = load_weather_contexts_for_suspicious_days(
-            summary,
-            account["account_number"],
-            settings["tz"],
-        )
+        # Keep upload/import synchronous only for local meter data. Historical
+        # weather is fetched on demand by the selected-day detail endpoint.
+        weather_contexts = {}
         report_summary = attach_weather_context_to_summary(summary, weather_contexts)
         report_summary.to_csv(report_path, index=True)
         visible_accounts = list_accounts()
@@ -11526,6 +13221,12 @@ def create_web_app() -> Flask:
             accounts=visible_accounts,
             household_profile=load_household_profile(account["account_number"]),
             load_items=list_load_items(account["account_number"]),
+            account_notes=list_account_notes(
+                account["account_number"],
+                {"kind": "customer", "user": actor["user"]},
+            )
+            if actor["kind"] == "customer"
+            else list_account_notes(account["account_number"]),
             imported_files_count=count_imported_files(account["account_number"]),
             weather_contexts=weather_contexts,
         )
@@ -11543,13 +13244,14 @@ def create_web_app() -> Flask:
 
     @app.post("/account")
     def save_account():
-        account_number = request.form.get("account_number")
-        actor = require_account_actor(account_number, write=True)
+        requested_account_number = clean_account_number(request.form.get("account_number"))
+        current_account_number = clean_account_number(request.form.get("original_account_number") or request.form.get("account_number"))
+        actor = require_account_actor(current_account_number, write=True)
         if not isinstance(actor, dict):
             return actor
         try:
-            existing_account = find_account(account_number)
-            existing_profile = None if existing_account is None else load_household_profile(account_number)
+            existing_account = find_account(current_account_number)
+            existing_profile = None if existing_account is None else load_household_profile(current_account_number)
             energy_company = resolve_energy_company_for_form(
                 request.form,
                 existing_account=existing_account,
@@ -11557,10 +13259,12 @@ def create_web_app() -> Flask:
                 require_zip=existing_account is None,
             )
             account = save_account_profile(
-                account_number,
+                requested_account_number,
                 display_name=request.form.get("display_name"),
                 energy_company=energy_company,
                 baseline_date=request.form.get("baseline_date"),
+                meter_value=request.form.get("meter_value"),
+                current_account_number=current_account_number,
             )
             save_household_profile(account["account_number"], request.form)
             record_actor_event(
@@ -11573,8 +13277,10 @@ def create_web_app() -> Flask:
             )
         except Exception as exc:
             flash(str(exc))
-            return redirect_back_or_account(request.form.get("account_number"))
+            return redirect_back_or_account(current_account_number)
 
+        if normalize_account_number(requested_account_number) != normalize_account_number(current_account_number):
+            return actor_redirect(account["account_number"])
         return redirect_back_or_account(account["account_number"])
 
     @app.post("/account-access")
@@ -11835,7 +13541,10 @@ def create_web_app() -> Flask:
             return actor
 
         try:
-            if not account_has_active_data_authorization(account_number):
+            if not account_has_active_data_authorization(account_number) and not customer_can_manage_own_history_without_data_permission(
+                account_number,
+                actor["user"] if actor["kind"] == "customer" else None,
+            ):
                 raise ValueError("Customer data permission is required before new history can be added.")
             existing_account = find_account(account_number)
             existing_profile = None if existing_account is None else load_household_profile(account_number)
@@ -11846,7 +13555,7 @@ def create_web_app() -> Flask:
                 require_zip=existing_account is None,
             )
             input_path = save_uploaded_file(request.files.get("xml_file"))
-            import_interval_file_to_db(
+            import_result = import_interval_file_to_db(
                 input_path,
                 account_number=account_number,
                 display_name=display_name,
@@ -11869,11 +13578,9 @@ def create_web_app() -> Flask:
                 baseline_date=account.get("baseline_date"),
             )
             report_path = build_output_path(Path("combined-history.xml"))
-            weather_contexts = load_weather_contexts_for_suspicious_days(
-                summary,
-                account["account_number"],
-                settings["tz"],
-            )
+            # Keep upload/import synchronous only for local meter data. Historical
+            # weather is fetched on demand by the selected-day detail endpoint.
+            weather_contexts = {}
             report_summary = attach_weather_context_to_summary(summary, weather_contexts)
             report_summary.to_csv(report_path, index=True)
         except Exception as exc:
@@ -11892,7 +13599,14 @@ def create_web_app() -> Flask:
             accounts=list_accounts(),
             household_profile=load_household_profile(account["account_number"]),
             load_items=list_load_items(account["account_number"]),
+            account_notes=list_account_notes(
+                account["account_number"],
+                {"kind": "customer", "user": actor["user"]},
+            )
+            if actor["kind"] == "customer"
+            else list_account_notes(account["account_number"]),
             imported_files_count=count_imported_files(account["account_number"]),
+            import_result=import_result,
             weather_contexts=weather_contexts,
         )
         account_page = list_account_page()
@@ -11952,6 +13666,17 @@ def print_scheduled_utility_sync_report(summary: dict[str, object]) -> None:
             print(f"[failed] {label}: {connection['error']}")
 
 
+def print_promotion_code_report(summary: dict[str, object]) -> None:
+    print(f"Promotion code: {summary['promotion_code']}")
+    print(f"Promotion code ID: {summary['promotion_code_id']}")
+    print(f"Active: {summary['active']}")
+    print(f"Mode: {summary['mode']}")
+    print(f"Discount percentage: {summary['discount_percentage']}")
+    print(f"Redemption limit: {summary['redemption_limit']}")
+    print(f"Redemptions used: {summary['redemptions_used']}")
+    print(f"Expiration: {summary['expiration'] or 'none'}")
+
+
 def main() -> None:
     parser = build_cli_parser()
     args = parser.parse_args()
@@ -11972,8 +13697,21 @@ def main() -> None:
             sys.exit(1)
         return
 
+    if args.ensure_owner_free_play_code:
+        try:
+            promotion_summary = ensure_owner_free_play_promotion_code(
+                code=args.promotion_code,
+                max_redemptions=args.promotion_max_redemptions,
+                valid_days=args.promotion_valid_days,
+            )
+        except Exception as exc:
+            print(f"Error ensuring promotion code: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print_promotion_code_report(promotion_summary)
+        return
+
     if not args.input:
-        parser.error("--input is required unless --serve or --sync-utilities is used")
+        parser.error("--input is required unless --serve, --sync-utilities, or --ensure-owner-free-play-code is used")
 
     try:
         if args.compare_to:

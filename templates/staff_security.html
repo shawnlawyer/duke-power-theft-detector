@@ -81,6 +81,64 @@
           <button type="submit">Set up an authenticator</button>
         </form>
       {% endif %}
+
+      <div class="section-divider"></div>
+
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Passkeys</p>
+          <h3>Sign in with your device.</h3>
+          <p class="plain-note">Add a passkey to open the commission workspace without typing a password.</p>
+        </div>
+      </div>
+
+      <form
+        class="account-form security-form"
+        action="{{ url_for('staff_passkey_enrollment_start') }}"
+        method="post"
+        data-passkey-enroll
+        data-passkey-finish-url="{{ url_for('staff_passkey_enrollment_finish') }}"
+      >
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <div class="field-grid">
+          <label class="wide-field">
+            <span>Passkey label</span>
+            <input type="text" name="nickname" placeholder="Work laptop, phone, security key">
+          </label>
+        </div>
+        <button type="button" class="button-secondary" data-passkey-enroll-button>Add passkey</button>
+        <p class="plain-note" data-passkey-status></p>
+      </form>
+
+      {% if passkeys %}
+        <div class="table-wrap compact-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Last used</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for passkey in passkeys %}
+                <tr>
+                  <td>{{ passkey.nickname or "Unnamed passkey" }}</td>
+                  <td>{{ passkey.last_used_at or "Not used yet" }}</td>
+                  <td class="action-cell">
+                    <form action="{{ url_for('staff_passkey_delete', credential_id=passkey.id) }}" method="post">
+                      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                      <button type="submit" class="button-secondary button-small">Remove</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="plain-note">No passkeys are saved for this account yet.</p>
+      {% endif %}
     </section>
   </main>
 {% endblock %}

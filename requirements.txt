@@ -9,4 +9,5 @@ pyotp>=2.9,<3.0
 pytest>=9.0.3,<10.0
 qrcode[pil]>=7.4,<9.0
 python-dateutil>=2.9,<3.0
+fido2>=2.2,<3.0
 stripe>=10.0,<12.0

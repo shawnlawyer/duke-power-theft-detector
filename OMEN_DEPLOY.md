@@ -39,7 +39,7 @@ Account-data deletion also defaults to paused. Leave `POWER_DATA_DELETION_ENABLE
 
 ## Billing on Omen
 
-Pricing has not been approved for Home Energy Watch, so Omen defaults to `POWER_BILLING_ENABLED=false`. Leave it off while evaluating the product. When pricing is approved, set the approved Stripe Price IDs and then explicitly enable checkout:
+Home Watch is $19.99 a month and Review Desk is $99 a month. Omen defaults to `POWER_BILLING_ENABLED=false` until the matching Stripe Price IDs are installed. Leave it off while evaluating the product. When the Stripe IDs are ready, set them and then explicitly enable checkout:
 
 ```bash
 POWER_BILLING_ENABLED=true
