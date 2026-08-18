@@ -145,23 +145,23 @@
               <h3>Measured against inventory</h3>
               <div class="detail-list">
                 <article class="detail-list-item">
-                  <span>Peak reading</span>
+                  <span>Peak meter reading</span>
                   <strong>{{ analysis.inventory_comparison.peak_kw if analysis.inventory_comparison.peak_kw is not none else "n/a" }} kW</strong>
                 </article>
                 <article class="detail-list-item">
-                  <span>All-on ceiling</span>
-                  <strong>{{ analysis.load_summary.all_on_kw }} kW</strong>
+                  <span>Listed loads at once</span>
+                  <strong>{{ analysis.load_summary.all_on_watts|round(0)|int }} W</strong>
                 </article>
                 <article class="detail-list-item">
-                  <span>Peak vs ceiling</span>
+                  <span>Meter above listed loads</span>
                   <strong>{{ analysis.inventory_comparison.all_on_gap_kw if analysis.inventory_comparison.all_on_gap_kw is not none else "n/a" }} kW</strong>
                 </article>
                 <article class="detail-list-item">
-                  <span>Always-on load</span>
-                  <strong>{{ analysis.load_summary.off_kw }} kW</strong>
+                  <span>Marked always-on loads</span>
+                  <strong>{{ analysis.load_summary.off_watts|round(0)|int }} W</strong>
                 </article>
                 <article class="detail-list-item">
-                  <span>Baseline vs always-on</span>
+                  <span>Overnight above always-on</span>
                   <strong>{{ analysis.inventory_comparison.off_gap_kw if analysis.inventory_comparison.off_gap_kw is not none else "n/a" }} kW</strong>
                 </article>
                 <article class="detail-list-item">
@@ -270,7 +270,7 @@
           <div>
             <p class="section-kicker">Alert moments</p>
             <h2>Interval-level jumps</h2>
-            <p class="plain-note">Readings that crossed the alert rules, with the jump from the previous interval.</p>
+            <p class="plain-note">Each item gives the readable time, the meter reading, the change from the reading before it, and the overnight level used for comparison.</p>
           </div>
         </div>
 
@@ -278,8 +278,9 @@
           {% if analysis.alert_events %}
             {% for event in analysis.alert_events[:10] %}
               <article class="detail-list-item">
-                <span>{{ event.timestamp }}</span>
-                <strong>{{ event.kw }} kW{% if event.delta_kw is not none %} &nbsp;&darr;&uarr; {{ event.delta_kw }}{% endif %}</strong>
+                <span>{{ event.timestamp_label or event.timestamp }}</span>
+                <strong>{{ event.kw }} kW{% if event.delta_kw is not none and event.delta_kw > 0 %}; up {{ event.delta_kw }} kW from the reading before{% endif %}</strong>
+                {% if event.expected_kw is not none %}<p class="plain-note">Normal overnight level: {{ event.expected_kw }} kW. This reading was {{ event.excess_kw }} kW above it.</p>{% endif %}
               </article>
             {% endfor %}
           {% else %}
