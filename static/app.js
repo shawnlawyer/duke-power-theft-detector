@@ -97,6 +97,56 @@
     });
   }
 
+  function setupLoadAutocomplete() {
+    document.querySelectorAll("[data-load-autocomplete]").forEach((form) => {
+      if (form.dataset.loadAutocompleteReady === "true") {
+        return;
+      }
+      form.dataset.loadAutocompleteReady = "true";
+
+      const labelInput = form.querySelector("[data-load-label]");
+      const wattsInput = form.querySelector("[data-load-watts]");
+      const alwaysOnInput = form.querySelector("[data-load-always-on]");
+      const options = Array.from(form.querySelectorAll("datalist option"));
+      if (!labelInput || !wattsInput || !options.length) {
+        return;
+      }
+
+      let suggestedWatts = "";
+      labelInput.addEventListener("input", () => {
+        const normalizedLabel = labelInput.value.trim().toLowerCase();
+        const match = options.find((option) => option.value.trim().toLowerCase() === normalizedLabel);
+        if (!match || !match.dataset.watts) {
+          return;
+        }
+
+        if (
+          !wattsInput.value ||
+          wattsInput.dataset.autofilled === "true" ||
+          wattsInput.value === suggestedWatts
+        ) {
+          wattsInput.value = match.dataset.watts;
+          wattsInput.dataset.autofilled = "true";
+          suggestedWatts = match.dataset.watts;
+        }
+
+        if (alwaysOnInput && alwaysOnInput.dataset.userChanged !== "true") {
+          alwaysOnInput.checked = match.dataset.alwaysOn === "true";
+        }
+      });
+
+      wattsInput.addEventListener("input", () => {
+        wattsInput.dataset.autofilled = "false";
+      });
+
+      if (alwaysOnInput) {
+        alwaysOnInput.addEventListener("change", () => {
+          alwaysOnInput.dataset.userChanged = "true";
+        });
+      }
+    });
+  }
+
   function bufferToBase64Url(buffer) {
     const bytes = new Uint8Array(buffer);
     let binary = "";
@@ -384,6 +434,7 @@
 
   setupUtilityLookups();
   setupPasswordToggles();
+  setupLoadAutocomplete();
   setupPasskeys();
   setupNoteTemplates();
 

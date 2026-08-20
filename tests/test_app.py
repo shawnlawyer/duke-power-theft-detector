@@ -1856,6 +1856,13 @@ def test_setup_sections_are_separate_menu_pages(tmp_path, monkeypatch):
         assert response.status_code == 200
         assert expected_text in response.data
 
+    inventory = client.get("/inventory")
+    assert b'datalist id="common-loads"' in inventory.data
+    assert b'value="Refrigerator"' in inventory.data
+    assert b'value="Stove light"' in inventory.data
+    assert b'value="Electric stove or range"' in inventory.data
+    assert b'data-watts="150"' in inventory.data
+
 
 def test_customer_account_page_only_lists_accessible_accounts_and_filters(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
