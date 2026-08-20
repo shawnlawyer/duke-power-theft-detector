@@ -485,18 +485,18 @@
     <div>
       <p class="section-kicker">Household load record</p>
       <h2>What should your meter be able to draw?</h2>
-      <p class="plain-note">Add each appliance, circuit, or always-on load with the wattage you expect.</p>
+      <p class="plain-note">Add appliances, lights, fans, chargers, and other household loads. Start typing a common item for a typical wattage, then replace it with the number on the device when you have it.</p>
     </div>
   </div>
 
   <div class="summary-strip inventory-strip">
     <div>
       <span class="label">Everything on</span>
-      <strong>{{ current_load_summary.all_on_kw }} kW</strong>
+      <strong>{{ current_load_summary.all_on_watts|round(0)|int }} W</strong>
     </div>
     <div>
       <span class="label">Mostly off</span>
-      <strong>{{ current_load_summary.off_kw }} kW</strong>
+      <strong>{{ current_load_summary.off_watts|round(0)|int }} W</strong>
     </div>
     <div>
       <span class="label">Loads tracked</span>
@@ -515,14 +515,15 @@
   </div>
 
   {% if can_manage_account %}
-    <form class="inventory-form" action="{{ url_for('create_load_item') }}" method="post">
+    <form class="inventory-form" action="{{ url_for('create_load_item') }}" method="post" data-load-autocomplete>
     <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
     <input type="hidden" name="return_to" value="{{ return_path }}">
     <div class="inventory-grid">
       <label>
         <span>Load</span>
-        <input type="text" name="label" placeholder="Water heater" required>
+        <input type="text" name="label" list="common-loads" data-load-label placeholder="Refrigerator" autocomplete="off" required>
+        <small>Choose a common load or enter your own.</small>
       </label>
       <label>
         <span>How many</span>
@@ -530,17 +531,22 @@
       </label>
       <label>
         <span>Watts each</span>
-        <input type="number" name="watts_each" min="1" step="1" placeholder="4500" required>
+        <input type="number" name="watts_each" data-load-watts min="1" step="1" placeholder="4500" required>
       </label>
       <label class="wide-field">
         <span>Notes</span>
         <input type="text" name="notes" placeholder="Two-stage heat strip, upstairs">
       </label>
       <label class="checkbox-field">
-        <input type="checkbox" name="include_when_off" value="1">
+        <input type="checkbox" name="include_when_off" data-load-always-on value="1">
         <span>Count this when the house should be mostly off</span>
       </label>
     </div>
+    <datalist id="common-loads">
+      {% for load in common_load_catalog %}
+        <option value="{{ load.label }}" label="{{ load.watts_each }} W typical" data-watts="{{ load.watts_each }}" data-always-on="{{ 'true' if load.include_when_off else 'false' }}"></option>
+      {% endfor %}
+    </datalist>
     <button type="submit">Add load</button>
     </form>
   {% else %}

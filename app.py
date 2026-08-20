@@ -7981,6 +7981,57 @@ LIGHTING_LOAD_TERMS = (
 )
 
 
+# These are starting points for the inventory form, not measurements. The
+# homeowner can replace any suggested wattage with the device label or a
+# measured value.
+COMMON_LOAD_CATALOG = (
+    {"label": "Refrigerator", "watts_each": 150, "include_when_off": True},
+    {"label": "Small refrigerator", "watts_each": 100, "include_when_off": True},
+    {"label": "Freezer", "watts_each": 200, "include_when_off": True},
+    {"label": "Router", "watts_each": 15, "include_when_off": True},
+    {"label": "Modem", "watts_each": 15, "include_when_off": True},
+    {"label": "Security camera", "watts_each": 10, "include_when_off": True},
+    {"label": "LED light bulb", "watts_each": 10, "include_when_off": False},
+    {"label": "Ceiling light fixture", "watts_each": 60, "include_when_off": False},
+    {"label": "Kitchen light", "watts_each": 60, "include_when_off": False},
+    {"label": "Bathroom light", "watts_each": 40, "include_when_off": False},
+    {"label": "Bedroom light", "watts_each": 40, "include_when_off": False},
+    {"label": "Garage light", "watts_each": 60, "include_when_off": False},
+    {"label": "Outdoor light", "watts_each": 60, "include_when_off": False},
+    {"label": "Stove light", "watts_each": 40, "include_when_off": False},
+    {"label": "Range hood fan", "watts_each": 150, "include_when_off": False},
+    {"label": "Ceiling fan", "watts_each": 75, "include_when_off": False},
+    {"label": "Bathroom exhaust fan", "watts_each": 50, "include_when_off": False},
+    {"label": "Box fan", "watts_each": 75, "include_when_off": False},
+    {"label": "Electric stove or range", "watts_each": 3000, "include_when_off": False},
+    {"label": "Electric oven", "watts_each": 2500, "include_when_off": False},
+    {"label": "Microwave", "watts_each": 1200, "include_when_off": False},
+    {"label": "Dishwasher", "watts_each": 1200, "include_when_off": False},
+    {"label": "Toaster", "watts_each": 1200, "include_when_off": False},
+    {"label": "Coffee maker", "watts_each": 1000, "include_when_off": False},
+    {"label": "Electric kettle", "watts_each": 1500, "include_when_off": False},
+    {"label": "Washing machine", "watts_each": 500, "include_when_off": False},
+    {"label": "Electric dryer", "watts_each": 5000, "include_when_off": False},
+    {"label": "Washer-dryer combo", "watts_each": 1200, "include_when_off": False},
+    {"label": "Television", "watts_each": 100, "include_when_off": False},
+    {"label": "Desktop computer", "watts_each": 150, "include_when_off": False},
+    {"label": "Laptop computer", "watts_each": 65, "include_when_off": False},
+    {"label": "Computer monitor", "watts_each": 40, "include_when_off": False},
+    {"label": "Phone charger", "watts_each": 10, "include_when_off": False},
+    {"label": "Game console", "watts_each": 200, "include_when_off": False},
+    {"label": "Space heater", "watts_each": 1500, "include_when_off": False},
+    {"label": "Electric water heater", "watts_each": 4500, "include_when_off": False},
+    {"label": "Sump pump", "watts_each": 1000, "include_when_off": False},
+    {"label": "Well pump", "watts_each": 1000, "include_when_off": False},
+    {"label": "Dehumidifier", "watts_each": 500, "include_when_off": False},
+    {"label": "Central air conditioner", "watts_each": 3500, "include_when_off": False},
+    {"label": "Heat pump", "watts_each": 4000, "include_when_off": False},
+    {"label": "EV charger", "watts_each": 7200, "include_when_off": False},
+    {"label": "Hot tub", "watts_each": 6000, "include_when_off": False},
+    {"label": "Greenhouse grow light", "watts_each": 360, "include_when_off": False},
+)
+
+
 def list_load_items(account_number: str | None = None) -> list[dict[str, object]]:
     with get_db_connection() as conn:
         account = get_or_create_account(conn, account_number)
@@ -10869,6 +10920,7 @@ def create_web_app() -> Flask:
             "household_profile": scaffold["household_profile"],
             "load_items": scaffold["load_items"],
             "load_summary": scaffold["load_summary"],
+            "common_load_catalog": COMMON_LOAD_CATALOG,
             "account_access": scaffold["account_access"],
             "utility_connections": scaffold["utility_connections"],
             "data_authorizations": scaffold["data_authorizations"],
@@ -10900,6 +10952,7 @@ def create_web_app() -> Flask:
             "household_profile": scaffold["household_profile"],
             "load_items": scaffold["load_items"],
             "load_summary": scaffold["load_summary"],
+            "common_load_catalog": COMMON_LOAD_CATALOG,
             "account_access": scaffold["account_access"],
             "customer_account_access": scaffold["customer_account_access"],
             "utility_connections": scaffold["utility_connections"],
