@@ -221,6 +221,7 @@ def test_compute_alert_events_finds_midnight_spike():
     assert events[0]["date"] == "2024-01-01"
     assert events[0]["timestamp_label"].startswith("Jan 01, 2024 at ")
     assert any(event["previous_timestamp_label"] for event in events)
+    assert any(event["previous_kw"] is not None for event in events)
     assert events[0]["expected_kw"] is not None
     assert events[0]["excess_kw"] >= 0
     assert "midnight" in events[0]["reasons"] or "overnight" in events[0]["reasons"]
@@ -4485,6 +4486,7 @@ def test_web_routes_render_and_analyze(tmp_path, monkeypatch):
     assert b"Day inspector" in response.data
     assert b"Pick a day in the table to load its curve" in response.data
     assert b"All-on check" in response.data
+    assert b"Spike intervals" in response.data
     assert b"Download CSV" in response.data
     assert b"Download JSON" in response.data
     assert b"Readings added" in response.data
@@ -4530,6 +4532,40 @@ def test_web_analyze_does_not_fetch_weather_during_upload(tmp_path, monkeypatch)
     assert response.status_code == 200
     assert b'"pending": true' in response.data
     assert b"Weather loads when you open a day." in response.data
+
+
+def test_spike_table_renders_from_and_to_readings(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    stub_utility_lookup(monkeypatch)
+    app.web_app.config["TESTING"] = True
+    authorize_account("acct-1")
+    app.save_household_profile("acct-1", {"address": "1 Main Street, Raleigh, NC", "zip_code": "27601"})
+
+    client = app.web_app.test_client()
+    sign_in(client)
+    with DUKE_FIXTURE.open("rb") as handle:
+        response = client.post(
+            "/analyze",
+            data={
+                "account_number": "acct-1",
+                "xml_file": (handle, "duke_interval_block.xml"),
+                "tz": "America/New_York",
+                "night_start": "02:00",
+                "night_end": "04:00",
+                "min_night_kw": "1.0",
+                "night_multiplier": "2.0",
+            },
+            content_type="multipart/form-data",
+        )
+
+    assert response.status_code == 200
+    assert b"From kW" in response.data
+    assert b"To kW" in response.data
+    assert b"12:15 a.m." in response.data
+    assert b"12:30 a.m." in response.data
+    assert b"1.32 kW" in response.data
+    assert b"3.28 kW" in response.data
+    assert b"Normal overnight level:" not in response.data
 
 
 def test_index_shows_latest_analysis_for_default_account(tmp_path, monkeypatch):

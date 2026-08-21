@@ -268,23 +268,41 @@
       <section class="section-block">
         <div class="section-header">
           <div>
-            <p class="section-kicker">Alert moments</p>
+            <p class="section-kicker">Spike intervals</p>
             <h2>Interval-level jumps</h2>
-            <p class="plain-note">Each item gives the readable time, the meter reading, the change from the reading before it, and the overnight level used for comparison.</p>
+            <p class="plain-note">The largest flagged jumps are shown in date order, with the two meter readings that make up each spike.</p>
           </div>
         </div>
 
-        <div class="detail-list timeline-list">
-          {% if analysis.alert_events %}
-            {% for event in analysis.alert_events[:10] %}
-              <article class="detail-list-item">
-                <span>{{ event.timestamp_label or event.timestamp }}</span>
-                <strong>{{ event.kw }} kW{% if event.delta_kw is not none and event.delta_kw > 0 %}; up {{ event.delta_kw }} kW from the reading before{% if event.previous_timestamp_label %} at {{ event.previous_timestamp_label }}{% endif %}{% endif %}</strong>
-                {% if event.expected_kw is not none %}<p class="plain-note">Normal overnight level: {{ event.expected_kw }} kW. This reading was {{ event.excess_kw }} kW above it.</p>{% endif %}
-              </article>
-            {% endfor %}
+        {% set spike_events = analysis.alert_events[:10] | selectattr("is_spike") | sort(attribute="timestamp") | list %}
+        <div class="table-wrap spike-table-wrap">
+          {% if spike_events %}
+            <table class="spike-table">
+              <thead>
+                <tr>
+                  <th>From</th>
+                  <th>From kW</th>
+                  <th>To</th>
+                  <th>To kW</th>
+                  <th>Change</th>
+                  <th>Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for event in spike_events %}
+                  <tr>
+                    <td>{{ event.previous_timestamp_full or "Earlier interval" }}</td>
+                    <td>{{ event.previous_kw if event.previous_kw is not none else "n/a" }}{% if event.previous_kw is not none %} kW{% endif %}</td>
+                    <td>{{ event.timestamp_label or event.timestamp }}</td>
+                    <td>{{ event.kw }} kW</td>
+                    <td>+{{ event.delta_kw }} kW</td>
+                    <td><span class="pill danger">Spike</span></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
           {% else %}
-            <div class="empty-note">No reading crossed the current alert rules.</div>
+            <div class="empty-note">No interval jump stood out on this history with the current rules.</div>
           {% endif %}
         </div>
       </section>

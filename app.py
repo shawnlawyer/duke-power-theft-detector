@@ -8983,9 +8983,14 @@ def compute_alert_events(
                 "previous_timestamp_label": (
                     None if pd.isna(row.prev_start) else format_timestamp_label(row.prev_start)
                 ),
+                "previous_timestamp_full": (
+                    None if pd.isna(row.prev_start) else format_event_timestamp(row.prev_start)
+                ),
                 "date": row.start.date().isoformat(),
                 "kw": round(float(row.kw), 3),
+                "previous_kw": None if pd.isna(row.prev_kw) else round(float(row.prev_kw), 3),
                 "delta_kw": None if pd.isna(row.delta_kw) else round(float(row.delta_kw), 3),
+                "is_spike": bool(pd.notna(row.delta_kw) and row.delta_kw > 0),
                 "expected_kw": round(expected, 3),
                 "excess_kw": round(excess_kw, 3),
                 "reasons": "; ".join(reasons),
@@ -9141,6 +9146,7 @@ def find_top_jumps(df: pd.DataFrame, reading_date: ddate) -> list[dict[str, obje
                     None if pd.isna(row.previous_start) else format_timestamp_label(row.previous_start)
                 ),
                 "kw": round(float(row.kw), 3),
+                "previous_kw": None if pd.isna(row.prev_kw) else round(float(row.prev_kw), 3),
                 "delta_kw": round(float(row.delta_kw), 3),
             }
         )
