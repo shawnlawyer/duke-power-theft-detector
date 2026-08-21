@@ -933,45 +933,67 @@
   }
 
   function renderSpikes(detail) {
-    const rows = [];
-    (detail.top_jumps || []).forEach((jump) => {
-      rows.push({
-        title: `${jump.time}`,
-        body: `${formatNumber(jump.kw, " kW")}; up ${formatNumber(jump.delta_kw, " kW")} from the reading before${jump.previous_time ? ` at ${jump.previous_time}` : ""}.`,
-      });
-    });
-    (detail.alert_events || []).forEach((event) => {
-      const details = [];
-      if (event.expected_kw !== null && event.expected_kw !== undefined) {
-        details.push(
-          `${formatNumber(event.excess_kw, " kW")} above the normal overnight level of ${formatNumber(event.expected_kw, " kW")}`
-        );
-      }
-      if (event.delta_kw !== null && event.delta_kw !== undefined && Number(event.delta_kw) > 0) {
-        details.push(`up ${formatNumber(event.delta_kw, " kW")} from the reading before${event.previous_timestamp_label ? ` at ${event.previous_timestamp_label}` : ""}`);
-      }
-      rows.push({
-        title: event.timestamp_label || event.timestamp,
-        body: `${formatNumber(event.kw, " kW")}${details.length ? `; ${details.join("; ")}.` : "."}`,
-      });
-    });
+    const alertRows = (detail.alert_events || [])
+      .filter((event) => event.is_spike && event.previous_kw !== null && event.previous_kw !== undefined)
+      .map((event) => ({
+        sortKey: event.timestamp,
+        from: event.previous_timestamp_full || event.previous_timestamp_label || "Earlier interval",
+        fromKw: event.previous_kw,
+        to: event.timestamp_label || event.timestamp,
+        toKw: event.kw,
+        change: event.delta_kw,
+      }));
+    const jumpRows = (detail.top_jumps || [])
+      .filter((jump) => jump.previous_kw !== null && jump.previous_kw !== undefined)
+      .map((jump) => ({
+        sortKey: jump.timestamp || jump.time,
+        from: jump.previous_timestamp_full || jump.previous_time || "Earlier interval",
+        fromKw: jump.previous_kw,
+        to: jump.timestamp_label || jump.time,
+        toKw: jump.kw,
+        change: jump.delta_kw,
+      }));
+    const rows = (alertRows.length ? alertRows : jumpRows)
+      .sort((left, right) => String(left.sortKey).localeCompare(String(right.sortKey)))
+      .slice(0, 10);
 
     if (!rows.length) {
-      spikesTarget.innerHTML = '<div class="empty-note">No sharp jump stood out on this day with the current rules.</div>';
+      spikesTarget.innerHTML = '<div class="empty-note">No interval jump stood out on this day with the current rules.</div>';
       return;
     }
 
-    spikesTarget.innerHTML = rows
-      .slice(0, 8)
-      .map(
-        (row) => `
-          <article class="detail-list-item">
-            <span>${escapeHtml(row.title)}</span>
-            <strong>${escapeHtml(row.body)}</strong>
-          </article>
-        `
-      )
-      .join("");
+    spikesTarget.innerHTML = `
+      <div class="table-wrap spike-table-wrap">
+        <table class="spike-table">
+          <thead>
+            <tr>
+              <th>From</th>
+              <th>From kW</th>
+              <th>To</th>
+              <th>To kW</th>
+              <th>Change</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td>${escapeHtml(row.from)}</td>
+                    <td>${escapeHtml(formatNumber(row.fromKw, " kW"))}</td>
+                    <td>${escapeHtml(row.to)}</td>
+                    <td>${escapeHtml(formatNumber(row.toKw, " kW"))}</td>
+                    <td>${escapeHtml(formatSigned(row.change, " kW"))}</td>
+                    <td><span class="pill danger">Spike</span></td>
+                  </tr>
+                `
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
   }
 
   function renderWeather(detail) {
