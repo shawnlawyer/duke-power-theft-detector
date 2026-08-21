@@ -4530,8 +4530,7 @@ def test_web_analyze_does_not_fetch_weather_during_upload(tmp_path, monkeypatch)
         )
 
     assert response.status_code == 200
-    assert b'"pending": true' in response.data
-    assert b"Weather loads when you open a day." in response.data
+    assert b"Weather loads when you open a day." not in response.data
 
 
 def test_spike_table_renders_from_and_to_readings(tmp_path, monkeypatch):

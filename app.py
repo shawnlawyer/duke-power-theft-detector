@@ -10390,11 +10390,7 @@ def build_report_context(
         }
         # Weather is deliberately loaded by /api/day-detail after the user
         # chooses a day. Do not make an upload wait on external weather APIs.
-        initial_day_detail["weather"] = {
-            "available": False,
-            "pending": True,
-            "reason": "Weather loads when you open a day.",
-        }
+        initial_day_detail["weather"] = None
     return {
         **snapshot,
         "baseline_date": account.get("baseline_date"),
