@@ -220,9 +220,19 @@ def test_compute_alert_events_finds_midnight_spike():
     assert events
     assert events[0]["date"] == "2024-01-01"
     assert events[0]["timestamp_label"].startswith("Jan 01, 2024 at ")
+    assert any(event["previous_timestamp_label"] for event in events)
     assert events[0]["expected_kw"] is not None
     assert events[0]["excess_kw"] >= 0
     assert "midnight" in events[0]["reasons"] or "overnight" in events[0]["reasons"]
+
+
+def test_find_top_jumps_includes_previous_reading_time():
+    frame = app.parse_duke_xml(DUKE_FIXTURE)
+
+    jumps = app.find_top_jumps(frame, ddate(2023, 7, 10))
+
+    assert jumps
+    assert jumps[0]["previous_time"]
 
 
 def test_parse_duke_interval_block_uses_block_duration_and_kwh_units():
@@ -4518,6 +4528,7 @@ def test_web_analyze_does_not_fetch_weather_during_upload(tmp_path, monkeypatch)
         )
 
     assert response.status_code == 200
+    assert b'"pending": true' in response.data
     assert b"Weather loads when you open a day." in response.data
 
 
