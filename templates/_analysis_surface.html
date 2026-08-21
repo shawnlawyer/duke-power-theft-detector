@@ -279,7 +279,7 @@
             {% for event in analysis.alert_events[:10] %}
               <article class="detail-list-item">
                 <span>{{ event.timestamp_label or event.timestamp }}</span>
-                <strong>{{ event.kw }} kW{% if event.delta_kw is not none and event.delta_kw > 0 %}; up {{ event.delta_kw }} kW from the reading before{% endif %}</strong>
+                <strong>{{ event.kw }} kW{% if event.delta_kw is not none and event.delta_kw > 0 %}; up {{ event.delta_kw }} kW from the reading before{% if event.previous_timestamp_label %} at {{ event.previous_timestamp_label }}{% endif %}{% endif %}</strong>
                 {% if event.expected_kw is not none %}<p class="plain-note">Normal overnight level: {{ event.expected_kw }} kW. This reading was {{ event.excess_kw }} kW above it.</p>{% endif %}
               </article>
             {% endfor %}
@@ -376,7 +376,7 @@
             <h3>Spike times</h3>
             <div class="detail-list" id="detail-spikes"></div>
           </div>
-          <div class="detail-column">
+          <div class="detail-column" id="detail-weather-column">
             <h3>Weather</h3>
             <div id="detail-weather"></div>
           </div>

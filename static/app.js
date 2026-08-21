@@ -447,6 +447,7 @@
   const comparisonTarget = document.getElementById("detail-comparison");
   const spikesTarget = document.getElementById("detail-spikes");
   const weatherTarget = document.getElementById("detail-weather");
+  const weatherColumn = document.getElementById("detail-weather-column");
   const chartTarget = document.getElementById("detail-chart");
   const legendTarget = document.getElementById("detail-legend");
   const headingTarget = document.getElementById("detail-heading");
@@ -936,7 +937,7 @@
     (detail.top_jumps || []).forEach((jump) => {
       rows.push({
         title: `${jump.time}`,
-        body: `${formatNumber(jump.kw, " kW")}; up ${formatNumber(jump.delta_kw, " kW")} from the reading before.`,
+        body: `${formatNumber(jump.kw, " kW")}; up ${formatNumber(jump.delta_kw, " kW")} from the reading before${jump.previous_time ? ` at ${jump.previous_time}` : ""}.`,
       });
     });
     (detail.alert_events || []).forEach((event) => {
@@ -947,7 +948,7 @@
         );
       }
       if (event.delta_kw !== null && event.delta_kw !== undefined && Number(event.delta_kw) > 0) {
-        details.push(`up ${formatNumber(event.delta_kw, " kW")} from the reading before`);
+        details.push(`up ${formatNumber(event.delta_kw, " kW")} from the reading before${event.previous_timestamp_label ? ` at ${event.previous_timestamp_label}` : ""}`);
       }
       rows.push({
         title: event.timestamp_label || event.timestamp,
@@ -978,8 +979,18 @@
     if (!weatherTarget) {
       return;
     }
+    if (weatherColumn) {
+      weatherColumn.hidden = false;
+    }
     if (!weather || !weather.available) {
-      weatherTarget.innerHTML = `<div class="empty-note">${escapeHtml(weather?.reason || "Weather is not available for this day yet.")}</div>`;
+      if (weather?.pending) {
+        weatherTarget.innerHTML = '<div class="empty-note">Weather loads when you open a day.</div>';
+      } else {
+        weatherTarget.innerHTML = "";
+        if (weatherColumn) {
+          weatherColumn.hidden = true;
+        }
+      }
       return;
     }
 
@@ -1047,6 +1058,9 @@
       spikesTarget.innerHTML = "";
       if (weatherTarget) {
         weatherTarget.innerHTML = "";
+      }
+      if (weatherColumn) {
+        weatherColumn.hidden = true;
       }
       chartTarget.innerHTML = '<div class="chart-empty">Pick a day to see the meter curve.</div>';
       legendTarget.innerHTML = "";

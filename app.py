@@ -8944,6 +8944,7 @@ def compute_alert_events(
 
     working = df.copy().sort_values("start").reset_index(drop=True)
     working["hour"] = working["start"].dt.hour
+    working["prev_start"] = working["start"].shift(1)
     working["prev_kw"] = working["kw"].shift(1)
     working["delta_kw"] = working["kw"] - working["prev_kw"]
 
@@ -8976,6 +8977,12 @@ def compute_alert_events(
             {
                 "timestamp": row.start.isoformat(),
                 "timestamp_label": format_event_timestamp(row.start),
+                "previous_timestamp": (
+                    None if pd.isna(row.prev_start) else row.prev_start.isoformat()
+                ),
+                "previous_timestamp_label": (
+                    None if pd.isna(row.prev_start) else format_timestamp_label(row.prev_start)
+                ),
                 "date": row.start.date().isoformat(),
                 "kw": round(float(row.kw), 3),
                 "delta_kw": None if pd.isna(row.delta_kw) else round(float(row.delta_kw), 3),
@@ -9119,6 +9126,7 @@ def find_top_jumps(df: pd.DataFrame, reading_date: ddate) -> list[dict[str, obje
     if df.empty:
         return []
     working = df.sort_values("start").copy()
+    working["previous_start"] = working["start"].shift(1)
     working["prev_kw"] = working["kw"].shift(1)
     working["delta_kw"] = working["kw"] - working["prev_kw"]
     top = working[
@@ -9129,6 +9137,9 @@ def find_top_jumps(df: pd.DataFrame, reading_date: ddate) -> list[dict[str, obje
         jumps.append(
             {
                 "time": format_timestamp_label(row.start),
+                "previous_time": (
+                    None if pd.isna(row.previous_start) else format_timestamp_label(row.previous_start)
+                ),
                 "kw": round(float(row.kw), 3),
                 "delta_kw": round(float(row.delta_kw), 3),
             }
@@ -9259,7 +9270,9 @@ def build_key_findings(
         top_event = alert_events[0]
         jump_text = ""
         if top_event["delta_kw"] is not None and top_event["delta_kw"] > 0:
-            jump_text = f" after a {top_event['delta_kw']:.2f} kW jump"
+            previous_time = top_event.get("previous_timestamp_label")
+            previous_text = f" from the reading at {previous_time}" if previous_time else ""
+            jump_text = f" after a {top_event['delta_kw']:.2f} kW jump{previous_text}"
         findings.append(
             {
                 "title": "Sharpest alert moment",
@@ -10373,6 +10386,7 @@ def build_report_context(
         # chooses a day. Do not make an upload wait on external weather APIs.
         initial_day_detail["weather"] = {
             "available": False,
+            "pending": True,
             "reason": "Weather loads when you open a day.",
         }
     return {
