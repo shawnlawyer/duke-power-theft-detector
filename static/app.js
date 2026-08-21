@@ -1005,13 +1005,9 @@
       weatherColumn.hidden = false;
     }
     if (!weather || !weather.available) {
-      if (weather?.pending) {
-        weatherTarget.innerHTML = '<div class="empty-note">Weather loads when you open a day.</div>';
-      } else {
-        weatherTarget.innerHTML = "";
-        if (weatherColumn) {
-          weatherColumn.hidden = true;
-        }
+      weatherTarget.innerHTML = "";
+      if (weatherColumn) {
+        weatherColumn.hidden = true;
       }
       return;
     }
@@ -1218,4 +1214,15 @@
   renderDetail(initialDetail);
   applyDayExplorerState();
   updateLoadTest();
+  if (initialDetail?.date) {
+    loadDetail(initialDetail.date)
+      .then((detail) => {
+        renderDetail(detail);
+        applyDayExplorerState();
+        updateLoadTest();
+      })
+      .catch(() => {
+        // Keep the weather column hidden when the initial detail refresh is unavailable.
+      });
+  }
 })();
