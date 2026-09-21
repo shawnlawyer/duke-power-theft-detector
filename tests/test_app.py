@@ -227,6 +227,50 @@ def test_compute_alert_events_finds_midnight_spike():
     assert "midnight" in events[0]["reasons"] or "overnight" in events[0]["reasons"]
 
 
+def test_build_spike_intervals_keeps_all_spikes_sorted_by_jump():
+    intervals = app.build_spike_intervals(
+        [
+            {
+                "timestamp": "2024-01-01T02:15:00",
+                "timestamp_label": "Jan 01, 2024 at 2:15 a.m.",
+                "previous_timestamp_full": "Jan 01, 2024 at 2:00 a.m.",
+                "date": "2024-01-01",
+                "kw": 3.2,
+                "previous_kw": 1.0,
+                "delta_kw": 2.2,
+                "expected_kw": 1.1,
+                "excess_kw": 2.1,
+                "is_spike": True,
+            },
+            {
+                "timestamp": "2024-01-02T02:15:00",
+                "timestamp_label": "Jan 02, 2024 at 2:15 a.m.",
+                "previous_timestamp_full": "Jan 02, 2024 at 2:00 a.m.",
+                "date": "2024-01-02",
+                "kw": 5.5,
+                "previous_kw": 1.0,
+                "delta_kw": 4.5,
+                "expected_kw": 1.1,
+                "excess_kw": 4.4,
+                "is_spike": True,
+            },
+            {
+                "timestamp": "2024-01-03T02:15:00",
+                "timestamp_label": "Jan 03, 2024 at 2:15 a.m.",
+                "date": "2024-01-03",
+                "kw": 6.0,
+                "previous_kw": 4.8,
+                "delta_kw": 1.2,
+                "is_spike": False,
+            },
+        ]
+    )
+
+    assert [interval["date"] for interval in intervals] == ["2024-01-02", "2024-01-01"]
+    assert intervals[0]["delta_kw"] == 4.5
+    assert intervals[0]["previous_timestamp_full"] == "Jan 02, 2024 at 2:00 a.m."
+
+
 def test_find_top_jumps_includes_previous_reading_time():
     frame = app.parse_duke_xml(DUKE_FIXTURE)
 
@@ -1339,40 +1383,190 @@ def test_customer_can_withdraw_and_restore_utility_data_permission(tmp_path, mon
     assert "utility.authorization_granted" in audit_actions
 
 
-def test_customer_utility_page_does_not_offer_chrome_helper_duke_flow(tmp_path, monkeypatch):
+def test_customer_can_connect_duke_with_helper_without_exposing_tokens(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
 
-    app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
     app.save_account_profile(
         "acct-1",
         display_name="Allowed home",
         energy_company="Duke Energy Carolinas, LLC",
     )
     app.add_account_access_email("acct-1", "owner@example.com", full_name="Home Owner", access_level="Manager")
+    app.grant_account_data_authorization("acct-1", int(customer["id"]))
+    monkeypatch.setattr(
+        app,
+        "build_duke_authorization_flow",
+        lambda: {
+            "authorization_url": "https://login.duke-energy.com/authorize-test",
+            "state": "state-value",
+            "code_verifier": "pkce-verifier-value",
+        },
+    )
+    secret_payload = app.serialize_duke_oauth_secret(
+        {
+            "access_token": "access-token-value",
+            "refresh_token": "refresh-token-value",
+            "id_token": "id-token-value",
+        },
+        "acct-1",
+    )
+
+    def fake_exchange(authorization_code, code_verifier, expected_account_number):
+        assert authorization_code == "duke-code-123"
+        assert code_verifier == "pkce-verifier-value"
+        assert expected_account_number == "acct-1"
+        return {
+            "duke_account_number": "acct-1",
+            "meter_count": 1,
+            "secret_payload": secret_payload,
+        }
+
+    monkeypatch.setattr(app, "exchange_duke_authorization_code", fake_exchange)
 
     client = app.web_app.test_client()
     customer_sign_in(client)
     response = client.get("/customer/utility", query_string={"account_number": "acct-1"})
-    start_response = client.get(
+    start_response = client.post(
         "/utility-connection/duke/start",
-        query_string={"account_number": "acct-1"},
+        data={
+            "account_number": "acct-1",
+            "return_to": "/customer/utility?account_number=acct-1",
+        },
     )
     finish_response = client.post(
         "/utility-connection/duke/complete",
-        data={"account_number": "acct-1", "authorization_code": "duke-code-123"},
+        data={
+            "account_number": "acct-1",
+            "authorization_code": "duke-code-123",
+            "return_to": "/customer/utility?account_number=acct-1",
+        },
+        follow_redirects=True,
     )
+    connections = app.list_utility_connections("acct-1")
+    with app.get_db_connection() as conn:
+        stored_secret = conn.execute(
+            "SELECT secret_token FROM utility_connections WHERE id = ?",
+            (connections[0]["id"],),
+        ).fetchone()["secret_token"]
 
     assert response.status_code == 200
+    assert b"Keep Duke history updated" in response.data
+    assert b"Download the Chrome helper" in response.data
+    assert app.DUKE_OAUTH_HELPER_DOWNLOAD_URL.encode() in response.data
+    assert b"Start Duke sign-in" in response.data
+    assert b"One-time Duke code" in response.data
     assert b"Download your Duke history" in response.data
     assert b"Open Duke Usage Details" in response.data
     assert b"my-account/usage?tab=day" in response.data
     assert b"Green Button customer connection" in response.data
     assert b"North Carolina data-access track" in response.data
-    assert b"Open Duke sign-in" not in response.data
-    assert b"Duke sign-in code" not in response.data
-    assert start_response.status_code == 404
-    assert finish_response.status_code == 404
+    assert b"Upload it from History" in response.data
+    assert start_response.status_code == 302
+    assert start_response.headers["Location"] == "https://login.duke-energy.com/authorize-test"
+    assert finish_response.status_code == 200
+    assert b"Duke is connected" in finish_response.data
+    assert connections[0]["access_method"] == app.DUKE_OAUTH_ACCESS_METHOD
+    assert connections[0]["access_identifier"] == "Duke account ending CCT1"
+    assert connections[0]["secret_last4"] is None
+    assert "access-token-value" not in json.dumps(connections)
+    assert "access-token-value" not in stored_secret
+    assert json.loads(app.unseal_secret_value(stored_secret))["tokens"]["refresh_token"] == "refresh-token-value"
+
+
+def test_duke_connection_rejects_expired_sign_in_flow(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.save_account_profile("acct-1", energy_company="Duke Energy Progress, LLC")
+    app.add_account_access_email("acct-1", "owner@example.com", access_level="Manager")
+    app.grant_account_data_authorization("acct-1", int(customer["id"]))
+    monkeypatch.setattr(
+        app,
+        "exchange_duke_authorization_code",
+        lambda *args: pytest.fail("expired flows must not exchange a code"),
+    )
+
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+    with client.session_transaction() as session_state:
+        session_state[app.DUKE_OAUTH_PENDING_SESSION_KEY] = {
+            "account_number": "acct-1",
+            "code_verifier": "pkce-verifier-value",
+            "state": "state-value",
+            "started_at": (datetime.now() - timedelta(minutes=11)).isoformat(timespec="seconds"),
+        }
+    response = client.post(
+        "/utility-connection/duke/complete",
+        data={"account_number": "acct-1", "authorization_code": "duke-code-123"},
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert b"sign-in code has expired" in response.data
+    assert app.list_utility_connections("acct-1") == []
+
+
+def test_duke_meter_usage_combines_meters_and_sync_is_idempotent(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.save_account_profile("acct-1", energy_company="Duke Energy Progress, LLC")
+    authorize_account("acct-1")
+    original_secret = app.serialize_duke_oauth_secret(
+        {
+            "access_token": "old-access-token",
+            "refresh_token": "old-refresh-token",
+            "id_token": "old-id-token",
+        },
+        "acct-1",
+    )
+    refreshed_secret = app.serialize_duke_oauth_secret(
+        {
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token",
+            "id_token": "new-id-token",
+        },
+        "acct-1",
+    )
+    connection = app.save_duke_oauth_connection("acct-1", original_secret, "acct-1")
+    eastern = app.tz.gettz("America/New_York")
+    first_hour = datetime(2026, 9, 19, 1, 0, tzinfo=eastern)
+    readings = {}
+    app.merge_duke_meter_usage(readings, {first_hour: {"energy": 1.25}}, eastern)
+    app.merge_duke_meter_usage(
+        readings,
+        {
+            first_hour: {"energy": 0.75},
+            first_hour + timedelta(hours=1): {"energy": 0.5},
+        },
+        eastern,
+    )
+    combined_frame = app.build_duke_usage_frame({moment: energy for moment, energy in readings.values()})
+
+    def fake_fetch(connection_for_sync):
+        assert connection_for_sync["access_method"] == app.DUKE_OAUTH_ACCESS_METHOD
+        return {
+            "frame": combined_frame,
+            "secret_payload": refreshed_secret,
+            "duke_account_number": "acct-1",
+            "meter_count": 2,
+            "start_date": first_hour,
+            "end_date": first_hour + timedelta(days=1),
+        }
+
+    monkeypatch.setattr(app, "fetch_duke_usage", fake_fetch)
+    first_sync = app.sync_utility_connection("acct-1", int(connection["id"]))
+    second_sync = app.sync_utility_connection("acct-1", int(connection["id"]))
+    stored_connection = app.load_utility_connection_for_sync("acct-1", int(connection["id"]))
+    stored_payload = app.parse_duke_oauth_secret(str(stored_connection["access_secret"]))
+
+    assert list(combined_frame["wh"]) == [2000.0, 500.0]
+    assert first_sync["added_count"] == 2
+    assert first_sync["already_present_count"] == 0
+    assert second_sync["added_count"] == 0
+    assert second_sync["already_present_count"] == 2
+    assert stored_payload["tokens"]["refresh_token"] == "new-refresh-token"
+    assert len(app.load_intervals_from_db("acct-1")) == 2
 
 
 def test_account_page_filters_by_name_or_address_and_paginates(tmp_path, monkeypatch):
@@ -1928,6 +2122,65 @@ def test_customer_account_page_only_lists_accessible_accounts_and_filters(tmp_pa
     assert dashboard.status_code == 200
     assert b"17 Pine Commission Road" in dashboard.data
     assert b"24 Oak Street" not in dashboard.data
+
+
+def test_customer_administration_manages_account_access(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.save_account_profile("acct-admin", display_name="Admin home")
+    app.add_account_access_email("acct-admin", "owner@example.com", full_name="Home Owner", access_level="Manager")
+
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+
+    page = client.get("/customer/admin", query_string={"account_number": "acct-admin"})
+    assert page.status_code == 200
+    assert b"Administration" in page.data
+    assert b"People with access to this account" in page.data
+    assert b"Add account access" in page.data
+
+    added = client.post(
+        "/customer/account-access",
+        data={
+            "account_number": "acct-admin",
+            "email": "jeff.thomas@psncuc.gov",
+            "full_name": "Jeff Thomas",
+            "access_level": "Viewer",
+            "return_to": "/customer/admin?account_number=acct-admin",
+        },
+        follow_redirects=False,
+    )
+    assert added.status_code == 302
+    assert added.headers["Location"].endswith("/customer/admin?account_number=acct-admin")
+    assert app.get_customer_account_access("jeff.thomas@psncuc.gov", "acct-admin")["access_level"] == "Viewer"
+
+
+def test_customer_viewer_cannot_manage_account_access(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    app.create_customer_user("viewer@example.com", "Account Viewer", "customer-password-123")
+    app.save_account_profile("acct-view-admin", display_name="View-only home")
+    app.add_account_access_email("acct-view-admin", "viewer@example.com", access_level="Viewer")
+
+    client = app.web_app.test_client()
+    customer_sign_in(client, "viewer@example.com")
+    page = client.get("/customer/admin", query_string={"account_number": "acct-view-admin"})
+    response = client.post(
+        "/customer/account-access",
+        data={
+            "account_number": "acct-view-admin",
+            "email": "another@example.com",
+            "full_name": "Another Person",
+            "access_level": "Viewer",
+        },
+        follow_redirects=False,
+    )
+
+    assert page.status_code == 200
+    assert b"Manager access is required" in page.data
+    assert response.status_code == 403
+    assert app.get_customer_account_access("another@example.com", "acct-view-admin") is None
 
 
 def test_customer_cannot_access_unshared_account_data(tmp_path, monkeypatch):
@@ -2586,7 +2839,8 @@ def test_marketing_host_renders_public_homepage(tmp_path, monkeypatch):
     assert b"$99 / month" in response.data
     assert b"Unlimited saved reports while the subscription is active" in response.data
     # The public page must keep stating the limits the product is honest about.
-    assert b"It does not connect to your utility for you." in response.data
+    assert b"Duke automatic updates require a one-time setup." in response.data
+    assert b"It never receives your Duke password." in response.data
     assert b"It is not live monitoring." in response.data
     assert b">Homeowners</a>" in response.data
     assert b">Review desk</a>" in response.data
@@ -3854,10 +4108,14 @@ def test_utility_access_guides_cover_manual_connect_and_ncuc_paths():
     guides = app.list_utility_access_guides()
 
     assert {guide["id"] for guide in guides} == {
+        "duke_automatic",
         "duke_download",
         "green_button_connect",
         "ncuc_data_access",
     }
+    automatic_guide = next(guide for guide in guides if guide["id"] == "duke_automatic")
+    assert automatic_guide["action_label"] == "Download the Chrome helper"
+    assert automatic_guide["action_url"] == app.DUKE_OAUTH_HELPER_DOWNLOAD_URL
     duke_guide = next(guide for guide in guides if guide["id"] == "duke_download")
     assert duke_guide["action_label"] == "Open Duke Usage Details"
     assert duke_guide["action_url"] == "https://www.duke-energy.com/my-account/usage?tab=day"
@@ -4090,6 +4348,59 @@ def test_day_detail_api_returns_series_and_inventory(tmp_path, monkeypatch):
     assert payload["previous_day"] is None
     assert payload["baseline_day"]["date"] == "2024-01-02"
     assert payload["load_summary"]["all_on_kw"] == 4.515
+
+
+def test_day_detail_api_loads_weather_for_selected_date(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+
+    history = tmp_path / "input" / "history.xml"
+    history.write_bytes(FIXTURE.read_bytes())
+    app.import_interval_file_to_db(history, account_number="acct-1", display_name="Test Home")
+    app.save_account_profile("acct-1", display_name="Test Home")
+
+    calls = []
+
+    def fake_load_day_weather(account_number, weather_date, tz_name):
+        calls.append((account_number, weather_date, tz_name))
+        return {
+            "available": True,
+            "date": weather_date,
+            "location_name": "Charlotte, North Carolina, United States",
+            "summary": {
+                "high_temp_f": 47.8,
+                "low_temp_f": 27.7,
+                "high_apparent_f": 42.2,
+                "precipitation_in": 0.0,
+                "max_wind_mph": 8.7,
+                "conditions": "Clear",
+            },
+            "hourly": [{"hour": "02:00", "temperature_f": 33.3, "weather_label": "Clear"}],
+        }
+
+    monkeypatch.setattr(app, "load_day_weather", fake_load_day_weather)
+
+    client = app.web_app.test_client()
+    sign_in(client)
+    response = client.get(
+        "/api/day-detail",
+        query_string={
+            "account_number": "acct-1",
+            "date": "2024-01-02",
+            "tz": "America/New_York",
+            "night_start": "02:00",
+            "night_end": "04:00",
+            "min_night_kw": "1.0",
+            "night_multiplier": "2.0",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert calls == [("acct-1", "2024-01-02", "America/New_York")]
+    assert payload["date"] == "2024-01-02"
+    assert payload["weather"]["date"] == "2024-01-02"
+    assert payload["weather"]["summary"]["low_temp_f"] == 27.7
 
 
 def test_day_detail_api_includes_notes_for_selected_day(tmp_path, monkeypatch):
@@ -4560,6 +4871,12 @@ def test_spike_table_renders_from_and_to_readings(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert b"From kW" in response.data
     assert b"To kW" in response.data
+    assert b"Above normal" in response.data
+    assert b"Largest jump" in response.data
+    assert b"Highest ending kW" in response.data
+    assert b"Most above normal" in response.data
+    assert b"id=\"spike-next\"" in response.data
+    assert b"id=\"spike-interval-data\"" in response.data
     assert b"12:15 a.m." in response.data
     assert b"12:30 a.m." in response.data
     assert b"1.32 kW" in response.data

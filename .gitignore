@@ -6,4 +6,5 @@ __pycache__/
 deploy/ec2/.env.production
 data/input/
 data/output/
+.tmp-deploy/
 .tmp-*.png

@@ -266,36 +266,67 @@
       </section>
 
       <section class="section-block">
+        {% set spike_events = analysis.spike_intervals|default(analysis.alert_events|selectattr("is_spike")|list) %}
+        {% set initial_spike_count = 25 if spike_events|length > 25 else spike_events|length %}
         <div class="section-header">
           <div>
             <p class="section-kicker">Spike intervals</p>
             <h2>Interval-level jumps</h2>
-            <p class="plain-note">The largest flagged jumps are shown in date order, with the two meter readings that make up each spike.</p>
+            <p class="plain-note">Sort and page through every flagged jump. Each row shows the two meter readings that make up the change.</p>
           </div>
         </div>
 
-        {% set spike_events = analysis.alert_events[:10] | selectattr("is_spike") | sort(attribute="timestamp") | list %}
+        <div class="table-toolbar spike-interval-toolbar" data-spike-controls{% if not spike_events %} hidden{% endif %}>
+          <label class="sort-field">
+            <span>Sort</span>
+            <select id="spike-sort">
+              <option value="change_desc">Largest jump</option>
+              <option value="to_kw_desc">Highest ending kW</option>
+              <option value="from_kw_desc">Highest starting kW</option>
+              <option value="excess_desc">Most above normal</option>
+              <option value="date_desc">Newest first</option>
+              <option value="date_asc">Oldest first</option>
+            </select>
+          </label>
+          <label class="sort-field">
+            <span>Rows</span>
+            <select id="spike-page-size">
+              <option value="25">25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="all">All</option>
+            </select>
+          </label>
+          <div class="pagination-row spike-pagination" aria-live="polite">
+            <button type="button" class="button-secondary button-small" id="spike-prev" disabled>Previous</button>
+            <span id="spike-status">{% if spike_events %}1-{{ initial_spike_count }} of {{ spike_events|length }} jump{% if spike_events|length != 1 %}s{% endif %}{% else %}No jumps{% endif %}</span>
+            <button type="button" class="button-secondary button-small" id="spike-next"{% if spike_events|length <= 25 %} disabled{% endif %}>Next</button>
+          </div>
+        </div>
+
         <div class="table-wrap spike-table-wrap">
           {% if spike_events %}
             <table class="spike-table">
               <thead>
                 <tr>
                   <th>From</th>
-                  <th>From kW</th>
+                  <th class="num">From kW</th>
                   <th>To</th>
-                  <th>To kW</th>
-                  <th>Change</th>
+                  <th class="num">To kW</th>
+                  <th class="num">Change</th>
+                  <th class="num">Above normal</th>
                   <th>Result</th>
                 </tr>
               </thead>
-              <tbody>
-                {% for event in spike_events %}
+              <tbody id="spike-table-body">
+                {% for event in spike_events[:25] %}
                   <tr>
                     <td>{{ event.previous_timestamp_full or "Earlier interval" }}</td>
-                    <td>{{ event.previous_kw if event.previous_kw is not none else "n/a" }}{% if event.previous_kw is not none %} kW{% endif %}</td>
+                    <td class="num">{{ event.previous_kw if event.previous_kw is not none else "n/a" }}{% if event.previous_kw is not none %} kW{% endif %}</td>
                     <td>{{ event.timestamp_label or event.timestamp }}</td>
-                    <td>{{ event.kw }} kW</td>
-                    <td>+{{ event.delta_kw }} kW</td>
+                    <td class="num">{{ event.kw }} kW</td>
+                    <td class="num">+{{ event.delta_kw }} kW</td>
+                    <td class="num">{% if event.excess_kw is not none %}{% if event.excess_kw > 0 %}+{% endif %}{{ event.excess_kw }} kW{% else %}n/a{% endif %}</td>
                     <td><span class="pill danger">Spike</span></td>
                   </tr>
                 {% endfor %}
@@ -305,6 +336,7 @@
             <div class="empty-note">No interval jump stood out on this history with the current rules.</div>
           {% endif %}
         </div>
+        <script id="spike-interval-data" type="application/json">{{ spike_events|tojson }}</script>
       </section>
 
       {% if staff_user and analysis.accounts and analysis.accounts|length > 1 %}

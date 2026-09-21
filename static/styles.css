@@ -503,6 +503,7 @@ td strong { font-weight: 600; }
 /* Sticky headers only where the wrapper actually scrolls — otherwise the
    header detaches and floats over the rest of the page. */
 .day-browser-table thead th,
+.spike-table-wrap thead th,
 .review-queue-table thead th,
 .data-request-table thead th,
 .legal-hold-table thead th,
@@ -529,6 +530,13 @@ td.num { white-space: nowrap; }
   letter-spacing: 0.04em;
   color: var(--ink-3);
 }
+
+.spike-interval-toolbar { justify-content: space-between; }
+.spike-pagination {
+  margin-left: auto;
+  padding-top: 0;
+}
+.spike-table-wrap { max-height: 470px; }
 
 /* -- 5. Panels + section chrome ------------------------------------------ */
 
@@ -1463,6 +1471,58 @@ strong.value-flag { color: var(--flag); }
 .permission-panel,
 .permission-detail { display: grid; gap: 10px; min-width: 0; }
 
+.connection-workflow {
+  display: grid;
+  gap: 12px;
+  padding: 14px 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+
+.workflow-steps {
+  display: grid;
+  gap: 0;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  counter-reset: utility-step;
+}
+
+.workflow-steps > li {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(150px, 0.6fr) minmax(240px, 1.4fr) minmax(180px, 0.8fr);
+  gap: 8px 16px;
+  align-items: start;
+  padding: 11px 0 11px 34px;
+  border-bottom: 1px solid var(--rule-soft);
+  counter-increment: utility-step;
+}
+
+.workflow-steps > li:last-child { border-bottom: 0; }
+
+.workflow-steps > li::before {
+  content: counter(utility-step);
+  position: absolute;
+  top: 10px;
+  left: 0;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.workflow-steps strong { font-size: 12.5px; }
+.workflow-steps span { font-size: 11.5px; line-height: 1.45; color: var(--ink-2); }
+.workflow-steps code { overflow-wrap: anywhere; }
+.workflow-steps form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.duke-code-form label { min-width: min(240px, 100%); }
+.connection-form-heading { margin-top: 2px; }
+
 .utility-match {
   display: block;
   min-height: 30px;
@@ -1707,4 +1767,5 @@ label > small {
   .app-brand .plain-note { display: none; }
   .detail-grid.triple { grid-template-columns: minmax(0, 1fr); }
   .day-date-cell { min-width: 140px; }
+  .workflow-steps > li { grid-template-columns: minmax(0, 1fr); }
 }

@@ -296,13 +296,91 @@
 </section>
 {% endif %}
 
+{% if is_customer and current_section in ["all", "admin"] %}
+<section class="section-block">
+  <div class="section-header">
+    <div>
+      <p class="section-kicker">Administration</p>
+      <h2>People with access to this account</h2>
+      <p class="plain-note">Add a family member, advisor, or reviewer to this account. This controls access to this account only.</p>
+    </div>
+  </div>
+
+  {% if can_manage_account %}
+    <form class="account-form" action="{{ url_for('customer_create_account_access') }}" method="post">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+      <input type="hidden" name="return_to" value="{{ return_path }}">
+      <div class="field-grid">
+        <label>
+          <span>Email</span>
+          <input type="email" name="email" placeholder="name@example.com" required>
+        </label>
+        <label>
+          <span>Name</span>
+          <input type="text" name="full_name" placeholder="Family member, advisor, or reviewer">
+        </label>
+        <label>
+          <span>Access</span>
+          <select name="access_level">
+            {% for level in customer_access_levels %}
+              <option value="{{ level }}">{{ level }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <p class="plain-note">Viewer access is read-only. Manager access allows account updates, uploads, notes, and data-permission actions for this account.</p>
+      <button type="submit">Add account access</button>
+    </form>
+  {% else %}
+    <p class="plain-note">Manager access is required to change who can access this account.</p>
+  {% endif %}
+
+  {% if current_account_access %}
+    <div class="table-wrap compact-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Email</th>
+            <th>Name</th>
+            <th>Access</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for person in current_account_access %}
+            <tr>
+              <td>{{ person.email }}</td>
+              <td>{{ person.full_name or 'Not set' }}</td>
+              <td>{{ person.access_level }}</td>
+              <td class="action-cell">
+                {% if person.email|lower != customer_user.email|lower and can_manage_account %}
+                  <form action="{{ url_for('customer_remove_account_access', access_id=person.id) }}" method="post">
+                    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+                    <input type="hidden" name="return_to" value="{{ return_path }}">
+                    <button type="submit" class="button-secondary button-small">Remove</button>
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="plain-note">No shared access has been added for this account yet.</p>
+  {% endif %}
+</section>
+{% endif %}
+
 {% if current_section in ["all", "utility"] %}
 <section class="section-block">
   <div class="section-header">
     <div>
       <p class="section-kicker">Utility connection</p>
       <h2>Keep the data source clear.</h2>
-      <p class="plain-note">Use the utility export today. Save a customer-approved connection only when the utility provides an official refresh path.</p>
+      <p class="plain-note">Connect Duke for daily updates, or download and upload a utility file whenever you prefer. Both paths stay available.</p>
     </div>
   </div>
 
@@ -367,7 +445,72 @@
     {% endfor %}
   </div>
 
+  {% set provider_is_duke = 'duke' in ((selected_connection_provider or '')|lower) %}
+  {% if provider_is_duke %}
+    <div class="connection-workflow">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Duke automatic updates</p>
+          <h3>Connect once, then refresh new readings each day.</h3>
+          <p class="plain-note">Your Duke password stays with Duke. The helper captures a one-time sign-in code; Home Energy Watch stores the resulting connection credentials in encrypted form.</p>
+        </div>
+      </div>
+
+      <ol class="workflow-steps">
+        <li>
+          <strong>Install the Duke Energy OAuth Helper.</strong>
+          <span>Download and unzip it. In Chrome, open <code>chrome://extensions</code>, turn on Developer mode, choose Load unpacked, and select the unzipped folder.</span>
+          <a class="inline-link" href="{{ duke_oauth_helper_download_url }}" target="_blank" rel="noopener">Download the helper</a>
+        </li>
+        <li>
+          <strong>Start Duke sign-in.</strong>
+          <span>Duke opens in a new tab. Sign in and complete Duke's verification steps. The helper will show a one-time code after Duke approves the connection.</span>
+          {% if can_manage_account %}
+            <form action="{{ url_for('start_duke_connection') }}" method="post" target="_blank">
+              <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+              <input type="hidden" name="return_to" value="{{ return_path }}">
+              <button type="submit" class="button-secondary" {% if not data_permission_active %}disabled{% endif %}>Start Duke sign-in</button>
+            </form>
+          {% endif %}
+        </li>
+        <li>
+          <strong>Finish the connection.</strong>
+          <span>Copy the one-time code from the helper and paste it below. The code expires quickly and is not saved.</span>
+          {% if can_manage_account %}
+            <form class="duke-code-form" action="{{ url_for('complete_duke_connection') }}" method="post">
+              <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+              <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+              <input type="hidden" name="return_to" value="{{ return_path }}">
+              <label>
+                <span>One-time Duke code</span>
+                <input type="password" name="authorization_code" autocomplete="one-time-code" required>
+              </label>
+              <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Connect Duke</button>
+            </form>
+          {% endif %}
+        </li>
+      </ol>
+
+      <p class="plain-note">Automatic updates bring in completed hourly readings and recheck the last 30 days for corrections. Duke may occasionally require you to connect again.</p>
+      <p class="plain-note">
+        Prefer a file, or need older history?
+        {% if is_customer %}
+          <a class="inline-link" href="{{ url_for('customer_history_page', account_number=current_account.account_number) }}">Upload it from History</a>.
+        {% else %}
+          <a class="inline-link" href="{{ url_for('history_page', account_number=current_account.account_number) }}">Upload it from History</a>.
+        {% endif %}
+      </p>
+    </div>
+  {% endif %}
+
   {% if can_manage_account %}
+    <div class="section-header connection-form-heading">
+      <div>
+        <p class="section-kicker">Other approved feeds</p>
+        <h3>Save a utility-issued export connection.</h3>
+      </div>
+    </div>
     <form class="account-form" action="{{ url_for('save_connection') }}" method="post">
     <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
@@ -419,7 +562,7 @@
             <th>Connection</th>
             <th>Status</th>
             <th>Recent sync</th>
-            <th>Key</th>
+            <th>Credentials</th>
             <th></th>
           </tr>
         </thead>
@@ -451,7 +594,15 @@
                   Not synced yet
                 {% endif %}
               </td>
-              <td>{% if connection.secret_last4 %}Ending {{ connection.secret_last4 }}{% else %}Not saved{% endif %}</td>
+              <td>
+                {% if connection.access_method == 'duke_oauth' %}
+                  Encrypted connection
+                {% elif connection.secret_last4 %}
+                  Ending {{ connection.secret_last4 }}
+                {% else %}
+                  Not saved
+                {% endif %}
+              </td>
               <td class="action-cell">
                 {% if can_manage_account %}
                 <form action="{{ url_for('sync_connection', connection_id=connection.id) }}" method="post">
