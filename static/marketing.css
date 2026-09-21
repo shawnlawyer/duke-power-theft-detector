@@ -229,8 +229,13 @@ svg { display: block; max-width: 100%; }
   grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
   gap: 40px;
   align-items: start;
-  padding: 54px 0 46px;
+  /* Keep the horizontal gutter from .wb-wrap when both classes share the
+     same element. Without it, the hero touches the viewport edge at the
+     widths where it stacks into one column. */
+  padding: 54px var(--pad) 46px;
 }
+
+.wb-hero > * { min-width: 0; }
 
 .wb-hero h1 {
   margin: 14px 0 0;
@@ -661,7 +666,7 @@ svg { display: block; max-width: 100%; }
   background: var(--rule-strong);
 }
 
-.wb-close { padding: 56px 0 64px; }
+.wb-close { padding: 56px var(--pad) 64px; }
 
 .wb-close-inner {
   display: grid;
