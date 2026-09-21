@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Home Energy Watch utility history daily
+
+[Timer]
+OnCalendar=*-*-* 02:15:00 America/New_York
+Persistent=true
+RandomizedDelaySec=5m
+Unit=home-energy-watch-utility-sync.service
+
+[Install]
+WantedBy=timers.target

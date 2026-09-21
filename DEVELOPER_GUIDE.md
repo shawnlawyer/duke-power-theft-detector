@@ -4,9 +4,9 @@ This is the shortest path to making a safe change in Home Energy Watch. The appl
 
 ## Product boundary
 
-Home Energy Watch stores account-scoped electricity history, household context, notes, weather, reports, and review activity. It supports manual utility exports and customer-approved utility connections where an official feed exists.
+Home Energy Watch stores account-scoped electricity history, household context, notes, weather, reports, and review activity. It supports manual utility exports, customer-approved utility connections, and an optional Duke automatic connection.
 
-It does **not** log into Duke on behalf of a customer, scrape passwords, capture mobile-app callbacks, or imply that automatic utility refresh is available nationwide. Manual setup is the supported path for every U.S. household.
+It does **not** collect a Duke password or imply that automatic utility refresh is available nationwide. Duke customers complete Duke's own interactive sign-in with the open-source OAuth helper; the backend stores the resulting tokens in encrypted form. Manual setup and file upload remain supported for every U.S. household.
 
 ## Five-minute start
 
@@ -113,6 +113,14 @@ Adapters are selected by `select_utility_feed_adapter()` and return a common int
 
 Keep utility-specific parsing out of route handlers and analysis functions.
 
+### Duke automatic connection
+
+`POST /utility-connection/duke/start` creates a short-lived PKCE flow for an account manager. `POST /utility-connection/duke/complete` exchanges the one-time code, confirms that Duke returned the selected account and an electric meter, and stores only encrypted OAuth material. Never log the authorization code, verifier, access token, refresh token, or ID token.
+
+Connections use `access_method=duke_oauth`. `sync_utility_connection()` dispatches those records to `sync_duke_oauth_connection()`; all other saved export connections keep the existing fetch-and-parse path. Duke sync fetches completed hourly readings for a rolling 30-day window, combines multiple electric meters at the same timestamp, refreshes the encrypted token bundle, and passes the frame through `import_interval_frame_to_db()`. This overlap is intentional: identical readings are idempotent and conflicts preserve the stored value.
+
+Production must run `python app.py --sync-utilities` daily. A failed or expired Duke token should mark the connection failed and tell the customer to connect again; it must not remove existing readings. Keep the manual Duke Usage Details link and History upload UI available even when a Duke automatic connection exists.
+
 ## Weather, inventory, and baselines
 
 Household inventory is stored through `account_load_items`; the all-on check compares inventory wattage assumptions with measured load. Weather is fetched and cached through the account weather helpers, then added to suspicious-day and hourly views.
@@ -174,6 +182,8 @@ Test first upload, overlapping upload, exact re-upload, and conflicting reading 
 ## Production deployment
 
 Production is **one EC2 instance running one Docker container supervised by systemd**, backed by RDS Postgres. It is not ECS/Fargate.
+
+Production packages must come from a clean local `main` branch whose commit exactly matches `origin/main`. The deployment helper archives the Git commit itself, so local uncommitted and untracked files are never deployed.
 
 Read `deploy/ec2/README.md` before changing deployment. The canonical runtime files are:
 

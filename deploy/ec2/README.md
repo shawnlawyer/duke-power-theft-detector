@@ -27,12 +27,15 @@ The current control status and remaining enterprise gates are tracked in `ENTERP
 4. Create the host folders:
    - `/opt/home-energy-watch/input`
    - `/opt/home-energy-watch/output`
-5. Install the production systemd unit and launch production:
+5. Install the production systemd units and launch production:
 
 ```bash
 sudo install -m 0644 deploy/ec2/home-energy-watch.service /etc/systemd/system/home-energy-watch.service
+sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.service /etc/systemd/system/home-energy-watch-utility-sync.service
+sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.timer /etc/systemd/system/home-energy-watch-utility-sync.timer
 sudo systemctl daemon-reload
 sudo systemctl enable --now home-energy-watch
+sudo systemctl enable --now home-energy-watch-utility-sync.timer
 ```
 
 6. Point your DNS at the EC2 public IP:
@@ -74,7 +77,14 @@ curl -fsS https://app.homeenergywatch.com/health
 
 ## Scheduled utility sync
 
-Run the saved utility-connection sync once from the EC2 checkout:
+The production timer runs the saved utility-connection sync every day at about 2:15 a.m. Eastern time. Install and verify it with:
+
+```bash
+sudo systemctl enable --now home-energy-watch-utility-sync.timer
+systemctl list-timers home-energy-watch-utility-sync.timer
+```
+
+Run the saved utility-connection sync once from the EC2 checkout when an immediate operational check is needed:
 
 ```bash
 sudo docker run --rm \
@@ -94,13 +104,7 @@ sudo docker run --rm \
   home-energy-watch:latest python app.py --sync-utilities --account-number primary
 ```
 
-Cron example for a daily 2:15 a.m. sync:
-
-```cron
-15 2 * * * cd /home/ubuntu/home-energy-watch && sudo docker run --rm --env-file deploy/ec2/.env.production -v /opt/home-energy-watch/input:/srv/home-energy-watch/input -v /opt/home-energy-watch/output:/srv/home-energy-watch/output home-energy-watch:latest python app.py --sync-utilities >> /var/log/home-energy-watch-utility-sync.log 2>&1
-```
-
-The command exits `0` when all saved connections sync and exits `1` when any connection fails. The app still records per-connection status, last attempt time, last successful sync time, and the latest error so the account page shows what happened after the cron run.
+The command exits `0` when all saved connections sync and exits `1` when any connection fails. The app still records per-connection status, last attempt time, last successful sync time, and the latest error so the account page shows what happened after the timer run. Use `journalctl -u home-energy-watch-utility-sync.service` for the job log; do not print environment values while troubleshooting.
 
 ## Operational logging
 

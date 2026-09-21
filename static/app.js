@@ -474,8 +474,16 @@
   const loadTestAllOn = document.getElementById("load-test-all-on");
   const loadTestClear = document.getElementById("load-test-clear");
   const loadTestInputs = Array.from(document.querySelectorAll(".load-test-count"));
+  const spikeDataEl = document.getElementById("spike-interval-data");
+  const spikeTableBody = document.getElementById("spike-table-body");
+  const spikeSortSelect = document.getElementById("spike-sort");
+  const spikePageSizeSelect = document.getElementById("spike-page-size");
+  const spikePrevButton = document.getElementById("spike-prev");
+  const spikeNextButton = document.getElementById("spike-next");
+  const spikeStatusTarget = document.getElementById("spike-status");
   let currentDetail = null;
   let activeDayFilter = "all";
+  let spikePageIndex = 0;
 
   const settings = {
     account_number: root.dataset.accountNumber,
@@ -491,6 +499,15 @@
       accountNotes = JSON.parse(notesEl.textContent);
     } catch (error) {
       accountNotes = [];
+    }
+  }
+  let spikeIntervals = [];
+  if (spikeDataEl?.textContent) {
+    try {
+      const parsedSpikes = JSON.parse(spikeDataEl.textContent);
+      spikeIntervals = Array.isArray(parsedSpikes) ? parsedSpikes : [];
+    } catch (error) {
+      spikeIntervals = [];
     }
   }
 
@@ -517,6 +534,103 @@
     const numeric = Number(value);
     const prefix = numeric > 0 ? "+" : "";
     return `${prefix}${numeric.toFixed(3).replace(/\.?0+$/, "")}${suffix || ""}`;
+  }
+
+  function numericValue(value, fallback = Number.NEGATIVE_INFINITY) {
+    if (value === null || value === undefined || value === "") {
+      return fallback;
+    }
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : fallback;
+  }
+
+  function compareSpikeIntervals(left, right, mode) {
+    const newestFirst = String(right.timestamp || "").localeCompare(String(left.timestamp || ""));
+    const oldestFirst = String(left.timestamp || "").localeCompare(String(right.timestamp || ""));
+    switch (mode) {
+      case "date_asc":
+        return oldestFirst;
+      case "date_desc":
+        return newestFirst;
+      case "to_kw_desc": {
+        const ending = numericValue(right.kw) - numericValue(left.kw);
+        return ending || newestFirst;
+      }
+      case "from_kw_desc": {
+        const starting = numericValue(right.previous_kw) - numericValue(left.previous_kw);
+        return starting || newestFirst;
+      }
+      case "excess_desc": {
+        const excess = numericValue(right.excess_kw) - numericValue(left.excess_kw);
+        return excess || newestFirst;
+      }
+      case "change_desc":
+      default: {
+        const change = numericValue(right.delta_kw) - numericValue(left.delta_kw);
+        if (change !== 0) {
+          return change;
+        }
+        const ending = numericValue(right.kw) - numericValue(left.kw);
+        return ending || newestFirst;
+      }
+    }
+  }
+
+  function renderSpikeIntervals() {
+    if (!spikeTableBody) {
+      return;
+    }
+
+    const total = spikeIntervals.length;
+    if (!total) {
+      if (spikeStatusTarget) {
+        spikeStatusTarget.textContent = "No jumps";
+      }
+      if (spikePrevButton) {
+        spikePrevButton.disabled = true;
+      }
+      if (spikeNextButton) {
+        spikeNextButton.disabled = true;
+      }
+      return;
+    }
+
+    const sortedSpikes = [...spikeIntervals].sort((left, right) =>
+      compareSpikeIntervals(left, right, spikeSortSelect?.value || "change_desc")
+    );
+    const pageSizeValue = spikePageSizeSelect?.value || "25";
+    const pageSize = pageSizeValue === "all" ? total : Math.max(1, Number(pageSizeValue) || 25);
+    const pageCount = Math.max(1, Math.ceil(total / pageSize));
+    spikePageIndex = Math.max(0, Math.min(spikePageIndex, pageCount - 1));
+    const start = spikePageIndex * pageSize;
+    const pageRows = sortedSpikes.slice(start, start + pageSize);
+    const end = start + pageRows.length;
+
+    spikeTableBody.innerHTML = pageRows
+      .map(
+        (row) => `
+          <tr>
+            <td>${escapeHtml(row.previous_timestamp_full || row.previous_timestamp_label || "Earlier interval")}</td>
+            <td class="num">${escapeHtml(formatNumber(row.previous_kw, " kW"))}</td>
+            <td>${escapeHtml(row.timestamp_label || row.timestamp || "Later interval")}</td>
+            <td class="num">${escapeHtml(formatNumber(row.kw, " kW"))}</td>
+            <td class="num">${escapeHtml(formatSigned(row.delta_kw, " kW"))}</td>
+            <td class="num">${escapeHtml(formatSigned(row.excess_kw, " kW"))}</td>
+            <td><span class="pill danger">Spike</span></td>
+          </tr>
+        `
+      )
+      .join("");
+
+    if (spikeStatusTarget) {
+      spikeStatusTarget.textContent = `${start + 1}-${end} of ${total} jump${total === 1 ? "" : "s"}`;
+    }
+    if (spikePrevButton) {
+      spikePrevButton.disabled = spikePageIndex <= 0;
+    }
+    if (spikeNextButton) {
+      spikeNextButton.disabled = spikePageIndex >= pageCount - 1;
+    }
   }
 
   function describeChange(value, suffix) {
@@ -996,6 +1110,16 @@
     `;
   }
 
+  function renderWeatherMessage(message) {
+    if (!weatherTarget) {
+      return;
+    }
+    if (weatherColumn) {
+      weatherColumn.hidden = false;
+    }
+    weatherTarget.innerHTML = `<div class="empty-note">${escapeHtml(message)}</div>`;
+  }
+
   function renderWeather(detail) {
     const weather = detail.weather;
     if (!weatherTarget) {
@@ -1004,11 +1128,12 @@
     if (weatherColumn) {
       weatherColumn.hidden = false;
     }
+    if (!weather) {
+      renderWeatherMessage("Weather is loading for this day.");
+      return;
+    }
     if (!weather || !weather.available) {
-      weatherTarget.innerHTML = "";
-      if (weatherColumn) {
-        weatherColumn.hidden = true;
-      }
+      renderWeatherMessage(weather.reason || "Weather is not available for this day.");
       return;
     }
 
@@ -1116,11 +1241,13 @@
       const original = button.textContent;
       button.disabled = true;
       button.textContent = "Loading...";
+      renderWeatherMessage("Weather is loading for this day.");
       try {
         const detail = await loadDetail(button.dataset.date);
         renderDetail(detail);
       } catch (error) {
         subheadingTarget.textContent = error.message;
+        renderWeatherMessage("Weather could not be loaded for this day.");
       } finally {
         button.disabled = false;
         button.textContent = original;
@@ -1176,6 +1303,34 @@
     daySortSelect.addEventListener("change", applyDayExplorerState);
   }
 
+  if (spikeSortSelect) {
+    spikeSortSelect.addEventListener("change", () => {
+      spikePageIndex = 0;
+      renderSpikeIntervals();
+    });
+  }
+
+  if (spikePageSizeSelect) {
+    spikePageSizeSelect.addEventListener("change", () => {
+      spikePageIndex = 0;
+      renderSpikeIntervals();
+    });
+  }
+
+  if (spikePrevButton) {
+    spikePrevButton.addEventListener("click", () => {
+      spikePageIndex -= 1;
+      renderSpikeIntervals();
+    });
+  }
+
+  if (spikeNextButton) {
+    spikeNextButton.addEventListener("click", () => {
+      spikePageIndex += 1;
+      renderSpikeIntervals();
+    });
+  }
+
   if (loadTestInterval) {
     loadTestInterval.addEventListener("change", updateLoadTest);
   }
@@ -1212,6 +1367,7 @@
   }
 
   renderDetail(initialDetail);
+  renderSpikeIntervals();
   applyDayExplorerState();
   updateLoadTest();
   if (initialDetail?.date) {

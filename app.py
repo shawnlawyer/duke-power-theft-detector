@@ -12,6 +12,7 @@ Web example:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import csv
 from dataclasses import dataclass
@@ -34,6 +35,8 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+import aiohttp
+from aiodukeenergy import Auth0Client, DukeEnergy, DukeEnergyAuth
 from dateutil import tz
 from cryptography.fernet import Fernet, InvalidToken
 from flask import Flask, flash, g, has_request_context, jsonify, redirect, render_template, request, send_from_directory, session, url_for
@@ -337,10 +340,29 @@ ENERGY_COMPANY_BY_EIA_ID = {
     "20785": "Wilson Energy",
 }
 DUKE_USAGE_DETAILS_URL = "https://www.duke-energy.com/my-account/usage?tab=day"
+DUKE_OAUTH_HELPER_DOWNLOAD_URL = (
+    "https://github.com/hunterjm/aiodukeenergy/releases/latest/download/chrome-extension.zip"
+)
+DUKE_OAUTH_HELPER_SOURCE_URL = "https://github.com/hunterjm/aiodukeenergy"
+DUKE_OAUTH_ACCESS_METHOD = "duke_oauth"
+DUKE_OAUTH_CONNECTION_LABEL = "Duke automatic feed"
+DUKE_OAUTH_PENDING_SESSION_KEY = "pending_duke_oauth"
+DUKE_OAUTH_EXPIRY_MINUTES = 10
+DUKE_SYNC_LOOKBACK_DAYS = 30
 GREEN_BUTTON_CONNECT_URL = "https://www.greenbuttonalliance.org/green-button-connect-my-data-cmd"
 GREEN_BUTTON_DOWNLOAD_URL = "https://www.greenbuttonalliance.org/green-button-download-my-data-dmd"
 NCUC_DATA_ACCESS_ORDER_URL = "https://starw1.ncuc.gov/NCUC/ViewFile.aspx?Id=b18eb0c3-6968-47d0-adbf-9f1b6ea8f680"
 UTILITY_ACCESS_GUIDES = (
+    {
+        "id": "duke_automatic",
+        "name": "Keep Duke history updated",
+        "status": "Optional automatic updates",
+        "summary": "Install the Duke sign-in helper once, approve access through Duke, and Home Energy Watch can refresh completed usage readings each day.",
+        "action_label": "Download the Chrome helper",
+        "action_url": DUKE_OAUTH_HELPER_DOWNLOAD_URL,
+        "secondary_label": "View the helper source",
+        "secondary_url": DUKE_OAUTH_HELPER_SOURCE_URL,
+    },
     {
         "id": "duke_download",
         "name": "Download your Duke history",
@@ -6687,6 +6709,220 @@ def build_secret_last4(value: str | None) -> str | None:
     return secret_value[-4:]
 
 
+def normalize_duke_account_number(value: object) -> str:
+    return re.sub(r"[^0-9A-Za-z]", "", str(value or "")).upper()
+
+
+def mask_duke_account_number(value: object) -> str:
+    normalized = normalize_duke_account_number(value)
+    return f"Duke account ending {normalized[-4:]}" if normalized else "Duke account"
+
+
+def select_duke_account(
+    accounts: dict[str, dict[str, Any]],
+    expected_account_number: str,
+) -> tuple[str, dict[str, Any]]:
+    expected = normalize_duke_account_number(expected_account_number)
+    for account_number, account in accounts.items():
+        candidates = (
+            account_number,
+            account.get("accountNumber"),
+            account.get("srcAcctId"),
+            account.get("srcAcctId2"),
+        )
+        if any(normalize_duke_account_number(candidate) == expected for candidate in candidates if candidate):
+            return str(account_number), account
+    raise ValueError(
+        "Duke did not return the selected Home Energy Watch account. Confirm the account number on the Account page, then try again."
+    )
+
+
+def duke_meter_account_number(meter: dict[str, Any]) -> str:
+    account = meter.get("account") or {}
+    return str(
+        account.get("accountNumber")
+        or account.get("srcAcctId")
+        or account.get("srcAcctId2")
+        or ""
+    )
+
+
+def select_duke_electric_meters(
+    meters: dict[str, dict[str, Any]],
+    duke_account_number: str,
+) -> list[dict[str, Any]]:
+    selected_account = normalize_duke_account_number(duke_account_number)
+    selected = [
+        meter
+        for meter in meters.values()
+        if normalize_duke_account_number(duke_meter_account_number(meter)) == selected_account
+        and str(meter.get("serviceType") or "").upper() == "ELECTRIC"
+        and str(meter.get("serialNum") or "").strip()
+    ]
+    if not selected:
+        raise ValueError("Duke did not return an active electric meter for this account.")
+    return selected
+
+
+def serialize_duke_oauth_secret(token_data: dict[str, Any], duke_account_number: str) -> str:
+    tokens = {
+        "access_token": token_data.get("access_token"),
+        "refresh_token": token_data.get("refresh_token"),
+        "id_token": token_data.get("id_token"),
+    }
+    if not tokens["access_token"] or not tokens["refresh_token"] or not tokens["id_token"]:
+        raise ValueError("Duke did not provide the credentials needed for automatic updates. Try connecting again.")
+    return json.dumps(
+        {
+            "version": 1,
+            "duke_account_number": str(duke_account_number),
+            "tokens": tokens,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def parse_duke_oauth_secret(value: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("The saved Duke connection could not be read. Connect Duke again.") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("tokens"), dict):
+        raise ValueError("The saved Duke connection could not be read. Connect Duke again.")
+    if not payload.get("duke_account_number"):
+        raise ValueError("The saved Duke account is missing. Connect Duke again.")
+    return payload
+
+
+async def build_duke_authorization_flow_async() -> dict[str, str]:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as client_session:
+        auth0_client = Auth0Client(client_session, timeout=30)
+        authorization_url, state, code_verifier = auth0_client.get_authorization_url()
+    return {
+        "authorization_url": authorization_url,
+        "state": state,
+        "code_verifier": code_verifier,
+    }
+
+
+def build_duke_authorization_flow() -> dict[str, str]:
+    return asyncio.run(build_duke_authorization_flow_async())
+
+
+async def exchange_duke_authorization_code_async(
+    authorization_code: str,
+    code_verifier: str,
+    expected_account_number: str,
+) -> dict[str, Any]:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as client_session:
+        auth0_client = Auth0Client(client_session, timeout=30)
+        auth = DukeEnergyAuth(client_session, auth0_client, timeout=30)
+        await auth.authenticate_with_code(authorization_code, code_verifier)
+        client = DukeEnergy(auth)
+        accounts = await client.get_accounts(fresh=True)
+        duke_account_number, _ = select_duke_account(accounts, expected_account_number)
+        meters = await client.get_meters(fresh=True)
+        selected_meters = select_duke_electric_meters(meters, duke_account_number)
+        token_data = auth.token or {}
+    return {
+        "duke_account_number": duke_account_number,
+        "meter_count": len(selected_meters),
+        "secret_payload": serialize_duke_oauth_secret(token_data, duke_account_number),
+    }
+
+
+def exchange_duke_authorization_code(
+    authorization_code: str,
+    code_verifier: str,
+    expected_account_number: str,
+) -> dict[str, Any]:
+    return asyncio.run(
+        exchange_duke_authorization_code_async(
+            authorization_code,
+            code_verifier,
+            expected_account_number,
+        )
+    )
+
+
+def save_duke_oauth_connection(
+    account_number: str | None,
+    secret_payload: str,
+    duke_account_number: str,
+) -> dict[str, object]:
+    parsed = parse_duke_oauth_secret(secret_payload)
+    if normalize_duke_account_number(parsed["duke_account_number"]) != normalize_duke_account_number(duke_account_number):
+        raise ValueError("The Duke account and saved authorization do not match.")
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        provider_name = str(account.get("energy_company") or "Duke Energy")
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM utility_connections
+            WHERE account_id = ? AND access_method = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (account["id"], DUKE_OAUTH_ACCESS_METHOD),
+        ).fetchone()
+        sealed_secret = seal_secret_value(secret_payload)
+        secret_hash = build_secret_hash(secret_payload)
+        if existing is None:
+            cursor = conn.execute(
+                """
+                INSERT INTO utility_connections (
+                    account_id, provider_name, connection_label, access_method, access_identifier,
+                    secret_hash, secret_token, secret_last4, status, last_sync_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)
+                """,
+                (
+                    account["id"],
+                    provider_name,
+                    DUKE_OAUTH_CONNECTION_LABEL,
+                    DUKE_OAUTH_ACCESS_METHOD,
+                    mask_duke_account_number(duke_account_number),
+                    secret_hash,
+                    sealed_secret,
+                    "Ready to sync",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection_id = int(cursor.lastrowid)
+        else:
+            connection_id = int(existing["id"])
+            conn.execute(
+                """
+                UPDATE utility_connections
+                SET provider_name = ?, connection_label = ?, access_identifier = ?,
+                    secret_hash = ?, secret_token = ?, secret_last4 = NULL,
+                    status = ?, last_sync_error = NULL, updated_at = ?
+                WHERE account_id = ? AND id = ?
+                """,
+                (
+                    provider_name,
+                    DUKE_OAUTH_CONNECTION_LABEL,
+                    mask_duke_account_number(duke_account_number),
+                    secret_hash,
+                    sealed_secret,
+                    "Ready to sync",
+                    timestamp,
+                    account["id"],
+                    connection_id,
+                ),
+            )
+        conn.commit()
+    return next(
+        connection
+        for connection in list_utility_connections(account_number)
+        if int(connection["id"]) == connection_id
+    )
+
+
 def serialize_utility_connection_row(row: sqlite3.Row | None) -> dict[str, object] | None:
     if row is None:
         return None
@@ -6764,6 +7000,8 @@ def save_utility_connection(account_number: str | None, form_like) -> dict[str, 
     provider_name = clean_optional_text(form_like.get("provider_name")) or "Duke Energy"
     connection_label = clean_optional_text(form_like.get("connection_label")) or provider_name
     access_method = clean_optional_text(form_like.get("access_method")) or "customer_api_key"
+    if access_method == DUKE_OAUTH_ACCESS_METHOD:
+        raise ValueError("Use the Duke sign-in steps to create an automatic Duke connection.")
     access_identifier = clean_optional_text(form_like.get("access_identifier"))
     access_secret = form_like.get("access_secret")
     secret_hash = build_secret_hash(access_secret)
@@ -6849,6 +7087,8 @@ def load_utility_connection_for_sync(account_number: str | None, connection_id: 
     mapping = dict(row)
     access_secret = unseal_secret_value(mapping.get("secret_token"))
     if not access_secret:
+        if mapping.get("access_method") == DUKE_OAUTH_ACCESS_METHOD:
+            raise ValueError("Connect Duke again before syncing.")
         raise ValueError("Save the customer-approved access key before syncing.")
     return {
         "id": int(mapping["id"]),
@@ -6862,6 +7102,147 @@ def load_utility_connection_for_sync(account_number: str | None, connection_id: 
         "status": mapping.get("status") or "Not connected",
         "last_sync_at": mapping.get("last_sync_at"),
     }
+
+
+def update_duke_oauth_connection_secret(
+    account_number: str | None,
+    connection_id: int,
+    secret_payload: str,
+) -> None:
+    parse_duke_oauth_secret(secret_payload)
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        cursor = conn.execute(
+            """
+            UPDATE utility_connections
+            SET secret_hash = ?, secret_token = ?, secret_last4 = NULL, updated_at = ?
+            WHERE account_id = ? AND id = ? AND access_method = ?
+            """,
+            (
+                build_secret_hash(secret_payload),
+                seal_secret_value(secret_payload),
+                timestamp,
+                account["id"],
+                int(connection_id),
+                DUKE_OAUTH_ACCESS_METHOD,
+            ),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError("That Duke connection could not be updated.")
+        conn.commit()
+
+
+def build_duke_usage_frame(readings: dict[datetime, float]) -> pd.DataFrame:
+    rows = [
+        {
+            "start_epoch": int(start.timestamp()),
+            "duration_s": 3600,
+            "wh": round(float(energy_kwh) * 1000.0, 9),
+        }
+        for start, energy_kwh in sorted(readings.items())
+    ]
+    return pd.DataFrame(rows, columns=["start_epoch", "duration_s", "wh"])
+
+
+def merge_duke_meter_usage(
+    readings_by_epoch: dict[int, tuple[datetime, float]],
+    usage_data: dict[object, dict[str, object]],
+    default_timezone,
+) -> None:
+    for reading_time, reading in usage_data.items():
+        if not isinstance(reading_time, datetime):
+            reading_time = pd.Timestamp(reading_time).to_pydatetime()
+        if reading_time.tzinfo is None:
+            reading_time = reading_time.replace(tzinfo=default_timezone)
+        energy_kwh = float((reading or {}).get("energy") or 0.0)
+        if energy_kwh < 0:
+            continue
+        reading_epoch = int(reading_time.timestamp())
+        existing = readings_by_epoch.get(reading_epoch)
+        combined_energy = energy_kwh + (existing[1] if existing is not None else 0.0)
+        readings_by_epoch[reading_epoch] = (reading_time, combined_energy)
+
+
+async def fetch_duke_usage_async(connection: dict[str, object]) -> dict[str, object]:
+    payload = parse_duke_oauth_secret(str(connection.get("access_secret") or ""))
+    token_data = payload["tokens"]
+    configured_account_number = str(payload["duke_account_number"])
+    duke_timezone = tz.gettz("America/New_York")
+    if duke_timezone is None:  # pragma: no cover - system timezone data is required by the app.
+        raise RuntimeError("The Duke service timezone is unavailable.")
+    end_date = datetime.now(duke_timezone).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+    start_date = end_date - timedelta(days=DUKE_SYNC_LOOKBACK_DAYS - 1)
+    readings_by_epoch: dict[int, tuple[datetime, float]] = {}
+
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as client_session:
+        auth0_client = Auth0Client(client_session, timeout=30)
+        auth = DukeEnergyAuth(client_session, auth0_client, timeout=30)
+        auth.restore_token(token_data)
+        client = DukeEnergy(auth)
+        accounts = await client.get_accounts(fresh=True)
+        duke_account_number, _ = select_duke_account(accounts, configured_account_number)
+        meters = await client.get_meters(fresh=True)
+        selected_meters = select_duke_electric_meters(meters, duke_account_number)
+        for meter in selected_meters:
+            usage = await client.get_energy_usage(
+                str(meter["serialNum"]),
+                "HOURLY",
+                "DAY",
+                start_date,
+                end_date,
+                include_temperature=False,
+            )
+            merge_duke_meter_usage(readings_by_epoch, usage.get("data") or {}, duke_timezone)
+        refreshed_tokens = auth.token or token_data
+
+    readings = {reading_time: energy for reading_time, energy in readings_by_epoch.values()}
+    return {
+        "frame": build_duke_usage_frame(readings),
+        "secret_payload": serialize_duke_oauth_secret(refreshed_tokens, duke_account_number),
+        "duke_account_number": duke_account_number,
+        "meter_count": len(selected_meters),
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+
+
+def fetch_duke_usage(connection: dict[str, object]) -> dict[str, object]:
+    return asyncio.run(fetch_duke_usage_async(connection))
+
+
+def sync_duke_oauth_connection(connection: dict[str, object]) -> dict[str, object]:
+    fetched = fetch_duke_usage(connection)
+    update_duke_oauth_connection_secret(
+        str(connection["account_number"]),
+        int(connection["id"]),
+        str(fetched["secret_payload"]),
+    )
+    frame = fetched["frame"]
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return {
+            "path": f"duke-api://connection/{int(connection['id'])}",
+            "imported": False,
+            "interval_count": 0,
+            "added_count": 0,
+            "already_present_count": 0,
+            "conflicts_skipped_count": 0,
+            "account_number": connection["account_number"],
+            "adapter_id": "duke_oauth",
+            "adapter_name": "Duke automatic connection",
+        }
+    end_date = fetched["end_date"]
+    source_path = f"duke-api://connection/{int(connection['id'])}"
+    return import_interval_frame_to_db(
+        frame,
+        source_path=source_path,
+        account_number=str(connection["account_number"]),
+        energy_company=str(connection["provider_name"]),
+        modified_time=end_date.timestamp(),
+        adapter_id="duke_oauth",
+        adapter_name="Duke automatic connection",
+    )
 
 
 def fetch_utility_connection_export(connection: dict[str, object]) -> dict[str, object]:
@@ -6929,20 +7310,23 @@ def sync_utility_connection(account_number: str | None, connection_id: int) -> d
     if not account_has_active_data_authorization(account_number):
         raise ValueError("Customer authorization is required before utility data can be synced.")
     connection = load_utility_connection_for_sync(account_number, connection_id)
-    exported = fetch_utility_connection_export(connection)
-    filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
-    if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
-        filename = f"{Path(filename).stem or 'utility-history'}.xml"
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    destination = INPUT_DIR / f"utility-sync-{connection_id}-{timestamp}-{filename}"
-    content = exported.get("content") or b""
-    if isinstance(content, str):
-        content = content.encode("utf-8")
-    destination.write_bytes(content)
-    imported = import_interval_file_to_db(
-        destination,
-        account_number=connection["account_number"],
-    )
+    if connection["access_method"] == DUKE_OAUTH_ACCESS_METHOD:
+        imported = sync_duke_oauth_connection(connection)
+    else:
+        exported = fetch_utility_connection_export(connection)
+        filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
+        if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
+            filename = f"{Path(filename).stem or 'utility-history'}.xml"
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        destination = INPUT_DIR / f"utility-sync-{connection_id}-{timestamp}-{filename}"
+        content = exported.get("content") or b""
+        if isinstance(content, str):
+            content = content.encode("utf-8")
+        destination.write_bytes(content)
+        imported = import_interval_file_to_db(
+            destination,
+            account_number=connection["account_number"],
+        )
     sync_time = record_utility_connection_sync_success(connection["account_number"], connection_id)
     return {**imported, "status": "Synced", "last_sync_at": sync_time}
 
@@ -9197,6 +9581,56 @@ def attach_alert_counts_to_rows(
     return rows
 
 
+def build_spike_intervals(alert_events: list[dict[str, object]]) -> list[dict[str, object]]:
+    spike_intervals: list[dict[str, object]] = []
+    for event in alert_events:
+        previous_kw = event.get("previous_kw")
+        delta_kw = event.get("delta_kw")
+        if not event.get("is_spike") or previous_kw is None or delta_kw is None:
+            continue
+        try:
+            if float(delta_kw) <= 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        spike_intervals.append(
+            {
+                "timestamp": event.get("timestamp"),
+                "timestamp_label": event.get("timestamp_label"),
+                "previous_timestamp": event.get("previous_timestamp"),
+                "previous_timestamp_label": event.get("previous_timestamp_label"),
+                "previous_timestamp_full": event.get("previous_timestamp_full"),
+                "date": event.get("date"),
+                "kw": event.get("kw"),
+                "previous_kw": previous_kw,
+                "delta_kw": delta_kw,
+                "expected_kw": event.get("expected_kw"),
+                "excess_kw": event.get("excess_kw"),
+                "reasons": event.get("reasons", ""),
+            }
+        )
+
+    def sort_value(event: dict[str, object], key: str) -> float:
+        value = event.get(key)
+        if value in (None, ""):
+            return float("-inf")
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float("-inf")
+
+    spike_intervals.sort(
+        key=lambda event: (
+            sort_value(event, "delta_kw"),
+            sort_value(event, "kw"),
+            str(event.get("timestamp") or ""),
+        ),
+        reverse=True,
+    )
+    return spike_intervals
+
+
 def attach_ranked_metadata_to_rows(
     rows: list[dict[str, object]],
     ranked_rows: list[dict[str, object]],
@@ -9567,6 +10001,7 @@ def build_analysis_snapshot(
         "suspicious_rows": suspicious_rows,
         "ranked_suspicious_days": ranked_suspicious_days,
         "alert_events": alert_events,
+        "spike_intervals": build_spike_intervals(alert_events),
         "hourly_profile": compute_hourly_profile(df),
         "key_findings": build_key_findings(df, summary, alert_events, baseline),
         "days_analyzed": int(summary.shape[0]),
@@ -11069,6 +11504,7 @@ def create_web_app() -> Flask:
             "billing_plans": list_billing_plans(),
             "supported_feeds": list_supported_utility_adapters(),
             "utility_access_guides": list_utility_access_guides(),
+            "duke_oauth_helper_download_url": DUKE_OAUTH_HELPER_DOWNLOAD_URL,
             "csrf_token": get_csrf_token,
             "today_iso": ddate.today().isoformat(),
             "app_base_url": build_public_base_url(),
@@ -11712,6 +12148,13 @@ def create_web_app() -> Flask:
         if not isinstance(customer_user, dict):
             return customer_user
         return render_customer_setup_page(customer_user, "Account", "account")
+
+    @app.get("/customer/admin")
+    def customer_admin_page():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        return render_customer_setup_page(customer_user, "Administration", "admin")
 
     @app.post("/customer/passkeys/start")
     def customer_passkey_enrollment_start():
@@ -13391,6 +13834,36 @@ def create_web_app() -> Flask:
             flash(str(exc))
         return redirect_back_or_account(account_number)
 
+    @app.post("/customer/account-access")
+    def customer_create_account_access():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        account_number = request.form.get("account_number")
+        manager_access = get_customer_account_access(str(customer_user["email"]), account_number)
+        if manager_access is None or manager_access["access_level"] != "Manager":
+            return "Manager access is required to change who can access this account.", 403
+        try:
+            access = add_account_access_email(
+                account_number,
+                request.form.get("email", ""),
+                full_name=request.form.get("full_name"),
+                access_level=request.form.get("access_level", "Viewer"),
+            )
+            record_audit_event(
+                "account.access_granted",
+                actor_type="customer",
+                actor_id=int(customer_user["id"]),
+                account_number=account_number,
+                target_type="account_access",
+                target_id=access["id"],
+                metadata={"access_level": str(access["access_level"])},
+            )
+            flash("Account access was added.")
+        except Exception as exc:
+            flash(str(exc))
+        return redirect_back_or_account(account_number)
+
     @app.post("/account-access/<int:access_id>/delete")
     def remove_account_access(access_id: int):
         staff_user = require_staff_user()
@@ -13421,6 +13894,40 @@ def create_web_app() -> Flask:
                     "authorization_ids": removal["authorization_ids"],
                 },
             )
+        return redirect_back_or_account(account_number)
+
+    @app.post("/customer/account-access/<int:access_id>/delete")
+    def customer_remove_account_access(access_id: int):
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        account_number = request.form.get("account_number")
+        manager_access = get_customer_account_access(str(customer_user["email"]), account_number)
+        if manager_access is None or manager_access["access_level"] != "Manager":
+            return "Manager access is required to change who can access this account.", 403
+        try:
+            access_rows = list_account_access_emails(account_number)
+            target = next((item for item in access_rows if int(item["id"]) == int(access_id)), None)
+            if target is None:
+                raise ValueError("That account access record could not be found.")
+            if clean_email(str(target["email"])) == clean_email(str(customer_user["email"])):
+                raise ValueError("You cannot remove your own account access here.")
+            removal = delete_account_access_email(account_number, access_id)
+            record_audit_event(
+                "account.access_revoked",
+                actor_type="customer",
+                actor_id=int(customer_user["id"]),
+                account_number=account_number,
+                target_type="account_access",
+                target_id=access_id,
+                metadata={
+                    "authorization_count": len(removal["authorization_ids"]),
+                    "credentials_cleared": bool(removal["credentials_cleared"]),
+                },
+            )
+            flash("Account access was removed.")
+        except Exception as exc:
+            flash(str(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/account/data-authorization")
@@ -13479,6 +13986,97 @@ def create_web_app() -> Flask:
                 metadata={"authorization_version": str(authorization["authorization_version"])},
             )
             flash("Permission was withdrawn. Saved utility access details were removed.")
+        except Exception as exc:
+            flash(str(exc))
+        return redirect_back_or_account(account_number)
+
+    @app.post("/utility-connection/duke/start")
+    def start_duke_connection():
+        account_number = request.form.get("account_number")
+        actor = require_account_actor(account_number, write=True)
+        if not isinstance(actor, dict):
+            return actor
+        try:
+            account = find_account(account_number)
+            if account is None or "duke" not in str(account.get("energy_company") or "").lower():
+                raise ValueError("Select a Duke Energy account before starting Duke sign-in.")
+            if not account_has_active_data_authorization(account_number):
+                raise ValueError("Customer authorization is required before connecting Duke.")
+            flow = build_duke_authorization_flow()
+            return_to = (request.form.get("return_to") or "").strip()
+            if not return_to.startswith("/") or return_to.startswith("//"):
+                return_to = ""
+            session[DUKE_OAUTH_PENDING_SESSION_KEY] = {
+                "account_number": str(account["account_number"]),
+                "code_verifier": flow["code_verifier"],
+                "state": flow["state"],
+                "started_at": timestamp_now(),
+                "return_to": return_to,
+            }
+            record_actor_event(
+                actor,
+                "utility.duke_connection_started",
+                account_number=account_number,
+                target_type="utility_connection",
+                metadata={"access_method": DUKE_OAUTH_ACCESS_METHOD},
+            )
+            return redirect(flow["authorization_url"])
+        except Exception as exc:
+            flash(str(exc))
+            return redirect_back_or_account(account_number)
+
+    @app.post("/utility-connection/duke/complete")
+    def complete_duke_connection():
+        account_number = request.form.get("account_number")
+        actor = require_account_actor(account_number, write=True)
+        if not isinstance(actor, dict):
+            return actor
+        try:
+            account = find_account(account_number)
+            if account is None or "duke" not in str(account.get("energy_company") or "").lower():
+                raise ValueError("Select a Duke Energy account before connecting Duke.")
+            if not account_has_active_data_authorization(account_number):
+                raise ValueError("Customer authorization is required before connecting Duke.")
+            pending = session.get(DUKE_OAUTH_PENDING_SESSION_KEY)
+            if not isinstance(pending, dict):
+                raise ValueError("Start Duke sign-in again before entering the one-time code.")
+            if normalize_account_number(str(pending.get("account_number") or "")) != normalize_account_number(account_number):
+                raise ValueError("The Duke sign-in was started for a different account. Start again.")
+            try:
+                expired = datetime.fromisoformat(str(pending.get("started_at") or "")) + timedelta(
+                    minutes=DUKE_OAUTH_EXPIRY_MINUTES
+                ) <= datetime.now()
+            except ValueError:
+                expired = True
+            if expired:
+                session.pop(DUKE_OAUTH_PENDING_SESSION_KEY, None)
+                raise ValueError("The Duke sign-in code has expired. Start Duke sign-in again.")
+            authorization_code = (request.form.get("authorization_code") or "").strip()
+            if not 8 <= len(authorization_code) <= 4096:
+                raise ValueError("Paste the complete one-time code shown by the Duke helper.")
+            completed = exchange_duke_authorization_code(
+                authorization_code,
+                str(pending.get("code_verifier") or ""),
+                str(account["account_number"]),
+            )
+            connection = save_duke_oauth_connection(
+                account_number,
+                str(completed["secret_payload"]),
+                str(completed["duke_account_number"]),
+            )
+            session.pop(DUKE_OAUTH_PENDING_SESSION_KEY, None)
+            record_actor_event(
+                actor,
+                "utility.duke_connection_completed",
+                account_number=account_number,
+                target_type="utility_connection",
+                target_id=connection["id"],
+                metadata={
+                    "access_method": DUKE_OAUTH_ACCESS_METHOD,
+                    "meter_count": int(completed["meter_count"]),
+                },
+            )
+            flash("Duke is connected. Use Sync now for an immediate refresh; daily updates will continue automatically.")
         except Exception as exc:
             flash(str(exc))
         return redirect_back_or_account(account_number)
