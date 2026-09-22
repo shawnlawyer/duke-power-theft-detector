@@ -12,7 +12,7 @@
 {% set current_customer_passkeys = customer_passkeys if customer_passkeys is defined else [] %}
 {% set data_permission_active = has_active_data_authorization|default(false) %}
 {% set is_customer = customer_mode|default(false) %}
-{% set can_manage_account = not is_customer or (customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager") %}
+{% set can_manage_account = (not is_customer and not commission_read_only|default(false)) or (is_customer and customer_account_access is defined and customer_account_access and customer_account_access.access_level == "Manager") %}
 {% set account_list_endpoint = "customer_dashboard" if is_customer else "index" %}
 {% set selected_energy_company = current_account.energy_company or '' %}
 {% set selected_connection_provider = selected_energy_company %}

@@ -42,7 +42,7 @@ This ledger separates implemented controls from production proof and approval-ga
 - The hardened production image `sha256:e0f23c3e4f10590f6fc2b0d822b826d2485e446fda94c9bfd7a1c1b2c72dddae` passed all 120 tests on EC2 before promotion. The running container is healthy, required MFA remains active, its audit chain is valid, and all three existing staff accounts are present.
 - The live signup contains no utility dropdown or submitted energy-company field. Its ZIP/address endpoint resolved a Raleigh service address to Duke Energy Progress using the matching service territory.
 - `POWER_DATA_DELETION_ENABLED=false` is active on Omen and production, and `POWER_DATA_DELETION_POLICY_VERSION` is blank. No account-data deletion can execute until an approved policy version is deliberately configured.
-- `POWER_BILLING_ENABLED=false` is active on Omen and production. The live pricing and signup pages show the approved monthly prices, and the public pricing page exposes no checkout action until the Stripe IDs are connected.
+- `POWER_BILLING_ENABLED=false` is active on Omen and production. The live pricing and signup pages show the approved annual account price, and the public pricing page exposes no checkout action until the annual Stripe Price ID is connected.
 - The architecture-matched x86 Omen image passed the high and critical Trivy gate with zero Debian or Python findings.
 - GitHub release-security run `29820086282` passed on pull request 1, and run `29820188538` passed after merge to `main`. Both executed the complete test, dependency-audit, and container-scan gate.
 - Customer-consent run `29822323048` passed on pull request 3, and run `29822409301` passed after merge to `main`.
@@ -71,7 +71,7 @@ Requires Shawn's approval for the maintenance window and the estimated increase 
 
 ### Live payment verification
 
-Home Watch is $19.99 a month and Review Desk is $99 a month. The matching Stripe Price IDs must be installed before enabling checkout. A later live test also requires explicit approval for the exact charge and refund. Automated tests use Stripe fakes and do not move money.
+Each account is billed $239.88 per year. The annual Stripe Price ID must be installed before enabling checkout. A later live test also requires explicit approval for the exact charge and refund. Automated tests use Stripe fakes and do not move money.
 
 ### Customer-data retention policy
 

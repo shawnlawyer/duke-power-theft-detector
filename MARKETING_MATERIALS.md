@@ -4,7 +4,7 @@
 
 Home Energy Watch helps people turn utility interval data into a clear, reviewable record of how a home is using electricity.
 
-The strongest first audience is a homeowner who feels that the bill no longer matches the household. The next audiences are advocates or reviewers handling several accounts, and commissions or agencies that need a consistent record for follow-up.
+The strongest first audience is a homeowner who feels that the bill no longer matches the household. The next audiences are people managing more than one electric account, and commissions that need a consistent record for follow-up.
 
 Use this language consistently:
 
@@ -59,25 +59,25 @@ Speak to the moment when the bill feels out of step with the house:
 
 Invite the reader to start with one account and the latest utility export. Do not make the reader understand kilowatts before they begin.
 
-### Audience two: reviewers and advocates
+### Audience two: people managing more than one account
 
-Speak to the work of keeping several cases organized:
+Speak to the work of keeping home and business records separate:
 
 - “Keep each account’s files, thresholds, notes, and reports together.”
 - “Compare periods without losing the date alignment.”
-- “Give the next conversation a record people can read.”
+- “Move between connected accounts without losing the record you are viewing.”
 
-Send this audience to the Review Desk page and ask them to request a conversation when they need several accounts.
+Each electric account has its own annual plan. One person can connect more than one account, and more than one person can share access to the same account.
 
-### Audience three: commissions and agencies
+### Audience three: commissions
 
-Speak to consistency and follow-up:
+Speak to consistency, jurisdiction, and follow-up:
 
 - “Start with the source file.”
 - “Show which rule produced each flag.”
-- “Keep the record clear enough to revisit later.”
+- “View the accounts in your commission’s jurisdiction without changing the underlying record.”
 
-Use a direct conversation request rather than pushing a self-serve subscription before the agency offer is defined.
+Commission access is free and read-only. A verified commission email address receives a one-time sign-in link; there is no commission subscription or workspace administrator to manage.
 
 ## First 30 days
 
@@ -149,11 +149,11 @@ Look closely. Ask better questions. Keep the evidence organized.
 
 ### Post 6
 
-Reviewing several electric accounts becomes harder when every file lives in a different place.
+Managing a home account and a business account becomes harder when every file lives in a different place.
 
-Review Desk gives advocates and reviewers one place to keep account history, comparisons, notes, thresholds, and reports together.
+Home Energy Watch gives each electric account its own record, then lets you move between the accounts connected to your email address.
 
-When the next conversation comes, the record is ready.
+When the next conversation comes, the right record is ready.
 
 ### Post 7
 
@@ -179,7 +179,7 @@ If you work with customer usage questions, a clean record can save a great deal 
 
 Home Energy Watch keeps the source export, comparison periods, household context, notes, and report trail together for review.
 
-For reviewer and agency conversations, visit HomeEnergyWatch.com.
+Commission staff can view records in their jurisdiction at no charge. Visit HomeEnergyWatch.com to learn how the review works.
 
 ### Post 10
 
@@ -207,13 +207,13 @@ Look beyond the monthly total. Home Energy Watch turns utility interval history 
 
 **Button text:** See how it works
 
-### Reviewer ad
+### Account-management ad
 
 **Primary text:**
 
-Keep several electric-account reviews organized. Compare periods, retain the source files, record the context, and show which rule produced each flag.
+Keep more than one electric account organized. Compare periods, retain the source files, record the context, and show which rule produced each flag.
 
-**Button text:** Review the workspace
+**Button text:** See how it works
 
 ## Welcome email
 
@@ -233,8 +233,8 @@ For the first month, I would judge this by useful behavior rather than follower 
 - Qualified visitors reach the correct audience page.
 - Homeowners create accounts and upload a utility export.
 - A small number of people pay for Home Watch because the record is useful.
-- Reviewers or advocates ask about the multi-account workspace.
-- At least one commission or agency conversation begins with a real review need.
+- People managing more than one account understand why each account has its own plan.
+- At least one commission conversation begins with a real review need.
 - Questions from visitors reveal exactly where the product or copy is unclear.
 
 The first practical target is ten real users who complete the path from interest to upload, followed by three to five paid homeowner accounts and one or two serious reviewer or agency conversations. Treat those as validation goals, not promises.
@@ -249,7 +249,7 @@ Track:
 - Utility-export uploads.
 - Pricing-page visits.
 - Paid subscriptions.
-- Reviewer and agency inquiries.
+- Commission inquiries.
 - The question or objection that appears most often.
 
 The most important question each week is: **Did the content bring in someone who had a real usage question and help that person take the next step?**

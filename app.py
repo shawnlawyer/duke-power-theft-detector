@@ -121,8 +121,9 @@ PASSKEY_ISSUER = "Home Energy Watch"
 PASSKEY_USER_KINDS = ("staff", "customer")
 PASSKEY_SESSION_KEY_PREFIX = "pending_passkey_"
 PASSKEY_USER_VERIFICATION = UserVerificationRequirement.PREFERRED
-CUSTOMER_AUTH_TOKEN_PURPOSES = ("verify_email", "password_reset")
-STAFF_AUTH_TOKEN_PURPOSES = ("password_reset",)
+CUSTOMER_AUTH_TOKEN_PURPOSES = ("verify_email", "password_reset", "login")
+STAFF_AUTH_TOKEN_PURPOSES = ("password_reset", "login")
+LOGIN_TOKEN_EXPIRY_MINUTES = 15
 EMAIL_OUTBOX: list[dict[str, str]] = []
 CUSTOMER_ACCESS_LEVELS = ("Viewer", "Manager")
 APP_LOGGER_NAME = "home_energy_watch"
@@ -420,29 +421,21 @@ BILLING_PLAN_DEFINITIONS = (
     {
         "id": "home",
         "name": "Home Watch",
-        "monthly_price_label": "$19.99 / month",
+        "annual_price_label": "$239.88 / year",
+        "billing_interval": "year",
         "account_limit": 1,
         "checkout_supported": True,
         "stripe_price_env": "STRIPE_PRICE_HOME",
-        "summary": "For one household watching its own electric account with unlimited saved reports.",
+        "summary": "For one electric account with unlimited saved reports.",
     },
+)
+COMMISSION_REGISTRY_SEED = (
     {
-        "id": "review",
-        "name": "Review Desk",
-        "monthly_price_label": "$99 / month",
-        "account_limit": 20,
-        "checkout_supported": True,
-        "stripe_price_env": "STRIPE_PRICE_REVIEW",
-        "summary": "For advocates and reviewers working across a small set of accounts with unlimited reports.",
-    },
-    {
-        "id": "agency",
-        "name": "Agency Pilot",
-        "monthly_price_label": "Talk with us",
-        "account_limit": None,
-        "checkout_supported": False,
-        "stripe_price_env": "STRIPE_PRICE_AGENCY",
-        "summary": "For a commission or agency review workspace.",
+        "key": "nc-state",
+        "name": "North Carolina Utilities Commission",
+        "jurisdiction_code": "NC",
+        "jurisdiction_type": "state",
+        "domains": ("psncuc.gov", "ncuc.gov"),
     },
 )
 DEFAULT_MARKETING_HOSTS = ("homeenergywatch.com", "www.homeenergywatch.com")
@@ -750,6 +743,88 @@ def table_columns(conn: DatabaseConnection, name: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({name})").fetchall()}
 
 
+def create_customer_billing_table(conn: DatabaseConnection, table_name: str = "customer_billing") -> None:
+    numeric_type = "BIGINT" if conn.kind == "postgres" else "INTEGER"
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {table_name} (
+            account_id {numeric_type} PRIMARY KEY,
+            customer_user_id {numeric_type} NOT NULL,
+            plan_id TEXT NOT NULL,
+            subscription_status TEXT NOT NULL,
+            checkout_session_id TEXT,
+            stripe_customer_id TEXT,
+            stripe_subscription_id TEXT,
+            stripe_payment_intent_id TEXT,
+            stripe_payment_reference TEXT,
+            stripe_receipt_url TEXT,
+            stripe_amount_total {numeric_type},
+            stripe_currency TEXT,
+            payments_customer_id TEXT,
+            payments_order_id TEXT,
+            payments_checkout_session_id TEXT,
+            payments_receipt_id TEXT,
+            current_period_end TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id),
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+
+
+def migrate_legacy_customer_billing(conn: DatabaseConnection, default_account_id: int) -> None:
+    """Migrate only unambiguous billing mappings, retaining the original records."""
+    legacy_table = "customer_billing_legacy"
+    if table_exists(conn, legacy_table):
+        raise RuntimeError(
+            "A previous billing migration left customer_billing_legacy in place; review it before restarting."
+        )
+    legacy_columns = table_columns(conn, "customer_billing")
+    if table_exists(conn, "customer_billing_account_migration"):
+        raise RuntimeError("An unfinished billing migration exists; review it before restarting.")
+    mappings = []
+    mapped_accounts = set()
+    for row in conn.execute("SELECT * FROM customer_billing").fetchall():
+        explicit_account = row["account_id"] if "account_id" in legacy_columns else None
+        if explicit_account is not None:
+            accounts = conn.execute("SELECT id AS account_id FROM accounts WHERE id = ?", (explicit_account,)).fetchall()
+        else:
+            accounts = conn.execute(
+                "SELECT DISTINCT access.account_id FROM account_access_emails access "
+                "JOIN customer_users users ON users.email = access.email "
+                "WHERE users.id = ?", (row["customer_user_id"],)
+            ).fetchall()
+        if len(accounts) != 1:
+            raise RuntimeError("Legacy billing needs exactly one verified account mapping per payer; no billing records were discarded.")
+        account_id = int(accounts[0]["account_id"])
+        if account_id in mapped_accounts:
+            raise RuntimeError("Multiple billing rows map to one electric account; resolve the mapping before migration.")
+        mapped_accounts.add(account_id)
+        mappings.append((account_id, row["customer_user_id"]))
+
+    # Keep the legacy table and its constraints intact as a recovery record.
+    # A distinct new table name also avoids PostgreSQL primary-key index collisions.
+    create_customer_billing_table(conn, "customer_billing_account_migration")
+    destination_columns = [
+        "account_id", "customer_user_id", "plan_id", "subscription_status", "checkout_session_id",
+        "stripe_customer_id", "stripe_subscription_id", "stripe_payment_intent_id",
+        "stripe_payment_reference", "stripe_receipt_url", "stripe_amount_total", "stripe_currency",
+        "payments_customer_id", "payments_order_id", "payments_checkout_session_id",
+        "payments_receipt_id", "current_period_end", "created_at", "updated_at",
+    ]
+    source_columns = ["?"] + [name if name in legacy_columns else "NULL" for name in destination_columns[1:]]
+    for account_id, customer_user_id in mappings:
+        conn.execute(
+            f"INSERT INTO customer_billing_account_migration ({', '.join(destination_columns)}) "
+            f"SELECT {', '.join(source_columns)} FROM customer_billing WHERE customer_user_id = ?",
+            (account_id, customer_user_id),
+        )
+    conn.execute("ALTER TABLE customer_billing RENAME TO customer_billing_legacy")
+    conn.execute("ALTER TABLE customer_billing_account_migration RENAME TO customer_billing")
+
+
 def ensure_accounts_table(conn: DatabaseConnection) -> int:
     id_column = "BIGSERIAL PRIMARY KEY" if conn.kind == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
     conn.execute(
@@ -788,7 +863,7 @@ def ensure_accounts_table(conn: DatabaseConnection) -> int:
 
 
 def migrate_database_postgres(conn: DatabaseConnection) -> None:
-    ensure_accounts_table(conn)
+    default_account_id = ensure_accounts_table(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS imported_files (
@@ -870,6 +945,7 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
     conn.execute("ALTER TABLE household_profiles ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION")
     conn.execute("ALTER TABLE household_profiles ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION")
     conn.execute("ALTER TABLE household_profiles ADD COLUMN IF NOT EXISTS weather_location TEXT")
+    conn.execute("ALTER TABLE household_profiles ADD COLUMN IF NOT EXISTS jurisdiction_code TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS weather_daily_cache (
@@ -905,6 +981,47 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_account_access_emails_account_id
         ON account_access_emails (account_id, email)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS commission_organizations (
+            id BIGSERIAL PRIMARY KEY,
+            registry_key TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            jurisdiction_code TEXT NOT NULL,
+            jurisdiction_type TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS commission_domains (
+            id BIGSERIAL PRIMARY KEY,
+            commission_id BIGINT NOT NULL,
+            domain TEXT NOT NULL UNIQUE,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(commission_id) REFERENCES commission_organizations(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_commission_access (
+            account_id BIGINT NOT NULL,
+            commission_id BIGINT NOT NULL,
+            access_scope TEXT NOT NULL DEFAULT 'read_only',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(account_id, commission_id),
+            FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+            FOREIGN KEY(commission_id) REFERENCES commission_organizations(id) ON DELETE CASCADE
+        )
         """
     )
     conn.execute(
@@ -1019,6 +1136,18 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS staff_commission_access (
+            staff_user_id BIGINT PRIMARY KEY,
+            commission_id BIGINT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(staff_user_id) REFERENCES staff_users(id) ON DELETE CASCADE,
+            FOREIGN KEY(commission_id) REFERENCES commission_organizations(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_staff_auth_tokens_user_purpose
         ON staff_auth_tokens (staff_user_id, purpose, created_at)
         """
@@ -1072,7 +1201,7 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
             id BIGSERIAL PRIMARY KEY,
             email TEXT NOT NULL UNIQUE,
             full_name TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
+            password_hash TEXT,
             is_active INTEGER NOT NULL DEFAULT 1,
             email_verified_at TEXT,
             auth_version INTEGER NOT NULL DEFAULT 1,
@@ -1292,31 +1421,11 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         """
     )
     backfill_audit_event_hashes(conn)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS customer_billing (
-            customer_user_id BIGINT PRIMARY KEY,
-            plan_id TEXT NOT NULL,
-            subscription_status TEXT NOT NULL,
-            checkout_session_id TEXT,
-            stripe_customer_id TEXT,
-            stripe_subscription_id TEXT,
-            stripe_payment_intent_id TEXT,
-            stripe_payment_reference TEXT,
-            stripe_receipt_url TEXT,
-            stripe_amount_total BIGINT,
-            stripe_currency TEXT,
-            payments_customer_id TEXT,
-            payments_order_id TEXT,
-            payments_checkout_session_id TEXT,
-            payments_receipt_id TEXT,
-            current_period_end TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id)
-        )
-        """
-    )
+    billing_columns = table_columns(conn, "customer_billing")
+    if not billing_columns:
+        create_customer_billing_table(conn)
+    elif "account_id" not in billing_columns:
+        migrate_legacy_customer_billing(conn, default_account_id)
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS payments_customer_id TEXT")
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS payments_order_id TEXT")
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS payments_checkout_session_id TEXT")
@@ -1328,6 +1437,38 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_receipt_url TEXT")
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_amount_total BIGINT")
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_currency TEXT")
+    conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS account_id BIGINT")
+    conn.execute(
+        """
+        UPDATE customer_billing
+        SET account_id = COALESCE(
+            (
+                SELECT MIN(account_access_emails.account_id)
+                FROM account_access_emails
+                JOIN customer_users ON customer_users.email = account_access_emails.email
+                WHERE customer_users.id = customer_billing.customer_user_id
+            ),
+            ?
+        )
+        WHERE account_id IS NULL
+        """,
+        (default_account_id,),
+    )
+    duplicate_account = conn.execute(
+        """
+        SELECT account_id
+        FROM customer_billing
+        WHERE account_id IS NOT NULL
+        GROUP BY account_id
+        HAVING COUNT(*) > 1
+        LIMIT 1
+        """
+    ).fetchone()
+    if duplicate_account is not None:
+        raise RuntimeError(
+            "Multiple billing rows map to one electric account; resolve the account mapping before restarting."
+        )
+    seed_commission_registry(conn)
 
 
 def migrate_database(conn: DatabaseConnection) -> None:
@@ -1487,6 +1628,8 @@ def migrate_database(conn: DatabaseConnection) -> None:
         conn.execute("ALTER TABLE household_profiles ADD COLUMN longitude REAL")
     if "weather_location" not in household_columns:
         conn.execute("ALTER TABLE household_profiles ADD COLUMN weather_location TEXT")
+    if "jurisdiction_code" not in table_columns(conn, "household_profiles"):
+        conn.execute("ALTER TABLE household_profiles ADD COLUMN jurisdiction_code TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS weather_daily_cache (
@@ -1522,6 +1665,47 @@ def migrate_database(conn: DatabaseConnection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_account_access_emails_account_id
         ON account_access_emails (account_id, email)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS commission_organizations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            registry_key TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            jurisdiction_code TEXT NOT NULL,
+            jurisdiction_type TEXT NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS commission_domains (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            commission_id INTEGER NOT NULL,
+            domain TEXT NOT NULL UNIQUE,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(commission_id) REFERENCES commission_organizations(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS account_commission_access (
+            account_id INTEGER NOT NULL,
+            commission_id INTEGER NOT NULL,
+            access_scope TEXT NOT NULL DEFAULT 'read_only',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(account_id, commission_id),
+            FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+            FOREIGN KEY(commission_id) REFERENCES commission_organizations(id) ON DELETE CASCADE
+        )
         """
     )
     conn.execute(
@@ -1655,6 +1839,18 @@ def migrate_database(conn: DatabaseConnection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS staff_commission_access (
+            staff_user_id INTEGER PRIMARY KEY,
+            commission_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(staff_user_id) REFERENCES staff_users(id) ON DELETE CASCADE,
+            FOREIGN KEY(commission_id) REFERENCES commission_organizations(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS staff_mfa_recovery_codes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             staff_user_id INTEGER NOT NULL,
@@ -1702,7 +1898,7 @@ def migrate_database(conn: DatabaseConnection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL UNIQUE,
             full_name TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
+            password_hash TEXT,
             is_active INTEGER NOT NULL DEFAULT 1,
             email_verified_at TEXT,
             auth_version INTEGER NOT NULL DEFAULT 1,
@@ -1925,32 +2121,13 @@ def migrate_database(conn: DatabaseConnection) -> None:
         """
     )
     backfill_audit_event_hashes(conn)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS customer_billing (
-            customer_user_id INTEGER PRIMARY KEY,
-            plan_id TEXT NOT NULL,
-            subscription_status TEXT NOT NULL,
-            checkout_session_id TEXT,
-            stripe_customer_id TEXT,
-            stripe_subscription_id TEXT,
-            stripe_payment_intent_id TEXT,
-            stripe_payment_reference TEXT,
-            stripe_receipt_url TEXT,
-            stripe_amount_total INTEGER,
-            stripe_currency TEXT,
-            payments_customer_id TEXT,
-            payments_order_id TEXT,
-            payments_checkout_session_id TEXT,
-            payments_receipt_id TEXT,
-            current_period_end TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id)
-        )
-        """
-    )
     billing_columns = table_columns(conn, "customer_billing")
+    if not billing_columns:
+        create_customer_billing_table(conn)
+        billing_columns = table_columns(conn, "customer_billing")
+    elif "account_id" not in billing_columns:
+        migrate_legacy_customer_billing(conn, default_account_id)
+        billing_columns = table_columns(conn, "customer_billing")
     if "payments_customer_id" not in billing_columns:
         conn.execute("ALTER TABLE customer_billing ADD COLUMN payments_customer_id TEXT")
     if "payments_order_id" not in billing_columns:
@@ -1973,6 +2150,26 @@ def migrate_database(conn: DatabaseConnection) -> None:
         conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_amount_total INTEGER")
     if "stripe_currency" not in billing_columns:
         conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_currency TEXT")
+    if "account_id" not in billing_columns:
+        conn.execute("ALTER TABLE customer_billing ADD COLUMN account_id INTEGER")
+        conn.execute(
+            """
+            UPDATE customer_billing
+            SET account_id = COALESCE(
+                (
+                    SELECT MIN(account_access_emails.account_id)
+                    FROM account_access_emails
+                    JOIN customer_users ON customer_users.email = account_access_emails.email
+                    WHERE customer_users.id = customer_billing.customer_user_id
+                ),
+                ?
+            )
+            WHERE account_id IS NULL
+            """,
+            (default_account_id,),
+        )
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_billing_account_id ON customer_billing (account_id)")
+    seed_commission_registry(conn)
 
 
 def clean_email(value: str | None) -> str:
@@ -1987,6 +2184,218 @@ def clean_password(value: str | None) -> str:
     if len(password) < 10:
         raise ValueError("Use at least 10 characters for the password.")
     return password
+
+
+def seed_commission_registry(conn: DatabaseConnection) -> None:
+    timestamp = timestamp_now()
+    for entry in COMMISSION_REGISTRY_SEED:
+        conn.execute(
+            """
+            INSERT INTO commission_organizations (
+                registry_key, name, jurisdiction_code, jurisdiction_type,
+                is_active, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(registry_key) DO UPDATE SET
+                name = excluded.name,
+                jurisdiction_code = excluded.jurisdiction_code,
+                jurisdiction_type = excluded.jurisdiction_type,
+                is_active = 1,
+                updated_at = excluded.updated_at
+            """,
+            (
+                str(entry["key"]),
+                str(entry["name"]),
+                str(entry["jurisdiction_code"]),
+                str(entry["jurisdiction_type"]),
+                timestamp,
+                timestamp,
+            ),
+        )
+        commission_row = conn.execute(
+            "SELECT id FROM commission_organizations WHERE registry_key = ?",
+            (str(entry["key"]),),
+        ).fetchone()
+        if commission_row is None:
+            continue
+        for domain in entry.get("domains", ()):
+            conn.execute(
+                """
+                INSERT INTO commission_domains (
+                    commission_id, domain, is_active, created_at, updated_at
+                )
+                VALUES (?, ?, 1, ?, ?)
+                ON CONFLICT(domain) DO UPDATE SET
+                    commission_id = excluded.commission_id,
+                    is_active = 1,
+                    updated_at = excluded.updated_at
+                """,
+                (int(commission_row["id"]), str(domain).lower(), timestamp, timestamp),
+            )
+    for account_row in conn.execute(
+        "SELECT account_id, jurisdiction_code FROM household_profiles WHERE jurisdiction_code IS NOT NULL"
+    ).fetchall():
+        refresh_account_commission_access(
+            conn,
+            int(account_row["account_id"]),
+            str(account_row["jurisdiction_code"]),
+        )
+
+
+def commission_domain_for_email(email: str | None) -> str:
+    normalized = clean_email(email)
+    return normalized.rsplit("@", 1)[1]
+
+
+def get_commission_for_email(email: str | None) -> dict[str, object] | None:
+    try:
+        domain = commission_domain_for_email(email)
+    except ValueError:
+        return None
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT commission_organizations.id, commission_organizations.registry_key,
+                   commission_organizations.name, commission_organizations.jurisdiction_code,
+                   commission_organizations.jurisdiction_type
+            FROM commission_domains
+            JOIN commission_organizations ON commission_organizations.id = commission_domains.commission_id
+            WHERE commission_domains.domain = ?
+              AND commission_domains.is_active = 1
+              AND commission_organizations.is_active = 1
+            """,
+            (domain,),
+        ).fetchone()
+    return None if row is None else dict(row)
+
+
+def get_staff_commission_access(staff_user_id: int | None) -> dict[str, object] | None:
+    if staff_user_id is None:
+        return None
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT commission_organizations.id, commission_organizations.registry_key,
+                   commission_organizations.name, commission_organizations.jurisdiction_code,
+                   commission_organizations.jurisdiction_type
+            FROM staff_commission_access
+            JOIN commission_organizations ON commission_organizations.id = staff_commission_access.commission_id
+            WHERE staff_commission_access.staff_user_id = ?
+              AND commission_organizations.is_active = 1
+            """,
+            (int(staff_user_id),),
+        ).fetchone()
+    return None if row is None else dict(row)
+
+
+def infer_jurisdiction_code(address: str | None, energy_company: str | None = None) -> str | None:
+    text = f"{address or ''} {energy_company or ''}".lower()
+    if re.search(r"(?:^|[\s,])(?:nc|north carolina)(?:$|[\s,.-])", text):
+        return "NC"
+    return None
+
+
+def refresh_account_commission_access(conn: DatabaseConnection, account_id: int, jurisdiction_code: str | None) -> None:
+    if not jurisdiction_code:
+        return
+    rows = conn.execute(
+        """
+        SELECT id FROM commission_organizations
+        WHERE is_active = 1 AND jurisdiction_code = ?
+        """,
+        (str(jurisdiction_code).upper(),),
+    ).fetchall()
+    timestamp = timestamp_now()
+    for row in rows:
+        conn.execute(
+            """
+            INSERT INTO account_commission_access (
+                account_id, commission_id, access_scope, created_at, updated_at
+            )
+            VALUES (?, ?, 'read_only', ?, ?)
+            ON CONFLICT(account_id, commission_id) DO UPDATE SET
+                access_scope = 'read_only', updated_at = excluded.updated_at
+            """,
+            (int(account_id), int(row["id"]), timestamp, timestamp),
+        )
+
+
+def commission_can_view_account(staff_user_id: int, account_number: str | None) -> bool:
+    commission = get_staff_commission_access(int(staff_user_id))
+    normalized = normalize_account_number(account_number)
+    if commission is None or not normalized:
+        return False
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM account_commission_access
+            JOIN accounts ON accounts.id = account_commission_access.account_id
+            WHERE account_commission_access.commission_id = ?
+              AND accounts.account_number = ?
+              AND account_commission_access.access_scope = 'read_only'
+            """,
+            (int(commission["id"]), normalized),
+        ).fetchone()
+    return row is not None
+
+
+def list_commission_accounts(staff_user_id: int) -> list[dict[str, object]]:
+    commission = get_staff_commission_access(int(staff_user_id))
+    if commission is None:
+        return []
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT accounts.id, accounts.account_number, accounts.display_name,
+                   accounts.energy_company, accounts.baseline_date, accounts.meter_value,
+                   household_profiles.address
+            FROM account_commission_access
+            JOIN accounts ON accounts.id = account_commission_access.account_id
+            LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
+            WHERE account_commission_access.commission_id = ?
+              AND account_commission_access.access_scope = 'read_only'
+            ORDER BY accounts.display_name, accounts.account_number
+            """,
+            (int(commission["id"]),),
+        ).fetchall()
+    return [serialized for row in rows if (serialized := serialize_account_row(row)) is not None]
+
+
+def ensure_commission_staff_user(email: str, full_name: str | None = None) -> dict[str, object] | None:
+    commission = get_commission_for_email(email)
+    if commission is None:
+        return None
+    normalized_email = clean_email(email)
+    normalized_name = (full_name or "").strip() or normalized_email
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT id FROM staff_users WHERE email = ?", (normalized_email,)).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO staff_users (
+                    email, full_name, role, password_hash, is_active,
+                    invite_token, invite_token_hash, invite_expires_at,
+                    auth_version, created_at, updated_at, last_login_at
+                )
+                VALUES (?, ?, 'Auditor', NULL, 1, NULL, NULL, NULL, 1, ?, ?, NULL)
+                """,
+                (normalized_email, normalized_name, timestamp, timestamp),
+            )
+            row = conn.execute("SELECT id FROM staff_users WHERE email = ?", (normalized_email,)).fetchone()
+        staff_id = int(row["id"])
+        conn.execute(
+            """
+            INSERT INTO staff_commission_access (staff_user_id, commission_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(staff_user_id) DO UPDATE SET
+                commission_id = excluded.commission_id, updated_at = excluded.updated_at
+            """,
+            (staff_id, int(commission["id"]), timestamp, timestamp),
+        )
+        conn.commit()
+    return get_staff_user_by_id(staff_id)
 
 
 class EmailVerificationRequired(ValueError):
@@ -2842,7 +3251,7 @@ def authenticate_staff_user(email: str, password: str) -> dict[str, object]:
         ).fetchone()
         if row is None or not row["password_hash"] or not bool(row["is_active"]):
             raise ValueError("That sign-in did not work.")
-        if not check_password_hash(row["password_hash"], password or ""):
+        if not row["password_hash"] or not check_password_hash(row["password_hash"], password or ""):
             raise ValueError("That sign-in did not work.")
     return get_staff_user_by_id(int(row["id"])) or {}
 
@@ -3122,7 +3531,7 @@ def load_valid_staff_auth_token(token: str | None, purpose: str) -> dict[str, ob
             """,
             (token_hash, purpose),
         ).fetchone()
-    if row is None or not bool(row["is_active"]) or not row["password_hash"]:
+    if row is None or not bool(row["is_active"]) or (purpose != "login" and not row["password_hash"]):
         return None
     if datetime.fromisoformat(str(row["expires_at"])) <= datetime.now():
         return None
@@ -3242,10 +3651,10 @@ def get_customer_user_by_id(customer_user_id: int | None) -> dict[str, object] |
     return serialize_customer_user_row(row)
 
 
-def create_customer_user(email: str, full_name: str, password: str) -> dict[str, object]:
+def create_customer_user(email: str, full_name: str, password: str | None = None) -> dict[str, object]:
+    # Empty hashes disable password authentication and support legacy NOT NULL schemas.
     normalized_email = clean_email(email)
     normalized_name = (full_name or "").strip() or normalized_email
-    normalized_password = clean_password(password)
     timestamp = timestamp_now()
     email_verified_at = None if email_verification_required() else timestamp
     with get_db_connection() as conn:
@@ -3261,12 +3670,11 @@ def create_customer_user(email: str, full_name: str, password: str) -> dict[str,
                 email, full_name, password_hash, is_active, email_verified_at, auth_version,
                 created_at, updated_at, last_login_at
             )
-            VALUES (?, ?, ?, 1, ?, 1, ?, ?, NULL)
+            VALUES (?, ?, '', 1, ?, 1, ?, ?, NULL)
             """,
             (
                 normalized_email,
                 normalized_name,
-                generate_password_hash(normalized_password),
                 email_verified_at,
                 timestamp,
                 timestamp,
@@ -3297,7 +3705,7 @@ def authenticate_customer_user(email: str, password: str) -> dict[str, object]:
         ).fetchone()
         if row is None or not bool(row["is_active"]):
             raise ValueError("That sign-in did not work.")
-        if not check_password_hash(row["password_hash"], password or ""):
+        if not row["password_hash"] or not check_password_hash(row["password_hash"], password or ""):
             raise ValueError("That sign-in did not work.")
         customer_user = serialize_customer_user_row(row) or {}
         if email_verification_required() and not customer_user.get("email_verified"):
@@ -3558,6 +3966,112 @@ def send_customer_password_reset_email(customer_user: dict[str, object], base_ur
             "If you did not request it, you can ignore this message.\n"
         ),
     )
+
+
+def ensure_customer_user_for_email(email: str, full_name: str | None = None) -> dict[str, object] | None:
+    normalized_email = clean_email(email)
+    customer = get_customer_user_by_email(normalized_email)
+    if customer is not None:
+        return customer
+    with get_db_connection() as conn:
+        access = conn.execute(
+            "SELECT 1 FROM account_access_emails WHERE email = ? LIMIT 1",
+            (normalized_email,),
+        ).fetchone()
+        if access is None:
+            return None
+        timestamp = timestamp_now()
+        conn.execute(
+            """
+            INSERT INTO customer_users (
+                email, full_name, password_hash, is_active, email_verified_at,
+                auth_version, created_at, updated_at, last_login_at
+            )
+            VALUES (?, ?, '', 1, NULL, 1, ?, ?, NULL)
+            """,
+            (normalized_email, (full_name or "").strip() or normalized_email, timestamp, timestamp),
+        )
+        conn.commit()
+    return get_customer_user_by_email(normalized_email)
+
+
+def send_customer_login_link_email(customer_user: dict[str, object], base_url: str) -> None:
+    token = create_customer_auth_token(
+        int(customer_user["id"]),
+        "login",
+        timedelta(minutes=LOGIN_TOKEN_EXPIRY_MINUTES),
+    )
+    login_url = build_absolute_url(base_url, f"/login/token?{urlencode({'token': token})}")
+    send_transactional_email(
+        str(customer_user["email"]),
+        "Your Home Energy Watch sign-in link",
+        (
+            f"Hello {customer_user['full_name']},\n\n"
+            "Use this one-time link to open Home Energy Watch.\n\n"
+            f"{login_url}\n\n"
+            f"This link expires in {LOGIN_TOKEN_EXPIRY_MINUTES} minutes and works once. "
+            "If you did not request it, you can ignore this message.\n"
+        ),
+    )
+
+
+def send_staff_login_link_email(staff_user: dict[str, object], base_url: str) -> None:
+    token = create_staff_auth_token(
+        int(staff_user["id"]),
+        "login",
+        timedelta(minutes=LOGIN_TOKEN_EXPIRY_MINUTES),
+    )
+    login_url = build_absolute_url(base_url, f"/login/token?{urlencode({'token': token})}")
+    send_transactional_email(
+        str(staff_user["email"]),
+        "Your Home Energy Watch commission sign-in link",
+        (
+            f"Hello {staff_user['full_name']},\n\n"
+            "Use this one-time link to open the commission records available to your organization.\n\n"
+            f"{login_url}\n\n"
+            f"This link expires in {LOGIN_TOKEN_EXPIRY_MINUTES} minutes and works once. "
+            "If you did not request it, you can ignore this message.\n"
+        ),
+    )
+
+
+def consume_customer_login_token(token: str | None) -> dict[str, object]:
+    record = load_valid_customer_auth_token(token, "login")
+    if record is None:
+        raise ValueError("That sign-in link is no longer available.")
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE customer_auth_tokens SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
+            (timestamp, int(record["token_id"])),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError("That sign-in link is no longer available.")
+        conn.execute(
+            "UPDATE customer_users SET email_verified_at = COALESCE(email_verified_at, ?), last_login_at = ?, updated_at = ? WHERE id = ?",
+            (timestamp, timestamp, timestamp, int(record["customer_user"]["id"])),
+        )
+        conn.commit()
+    return get_customer_user_by_id(int(record["customer_user"]["id"])) or {}
+
+
+def consume_staff_login_token(token: str | None) -> dict[str, object]:
+    record = load_valid_staff_auth_token(token, "login")
+    if record is None:
+        raise ValueError("That sign-in link is no longer available.")
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE staff_auth_tokens SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
+            (timestamp, int(record["token_id"])),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError("That sign-in link is no longer available.")
+        conn.execute("UPDATE staff_users SET last_login_at = ?, updated_at = ? WHERE id = ?", (timestamp, timestamp, int(record["staff_user"]["id"])))
+        conn.commit()
+    return get_staff_user_by_id(int(record["staff_user"]["id"])) or {}
 
 
 def audit_event_hash(
@@ -4214,17 +4728,51 @@ def get_billing_plan(plan_id: str | None) -> dict[str, object]:
     for plan in list_billing_plans():
         if plan["id"] == normalized_plan_id:
             return plan
+    if normalized_plan_id in {"review", "agency"}:
+        return next(plan for plan in list_billing_plans() if plan["id"] == "home")
     raise ValueError("Choose a valid plan.")
 
 
-def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: int) -> dict[str, object]:
+def resolve_customer_account_id(customer_user_id: int, account_number: str | None = None) -> int | None:
+    customer = get_customer_user_by_id(int(customer_user_id))
+    if customer is None:
+        return None
+    normalized_account = normalize_account_number(account_number) if account_number else None
+    with get_db_connection() as conn:
+        if normalized_account:
+            row = conn.execute(
+                """
+                SELECT accounts.id
+                FROM accounts
+                JOIN account_access_emails ON account_access_emails.account_id = accounts.id
+                WHERE accounts.account_number = ? AND account_access_emails.email = ?
+                """,
+                (normalized_account, str(customer["email"])),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT account_access_emails.account_id
+                FROM account_access_emails
+                WHERE account_access_emails.email = ?
+                ORDER BY account_access_emails.account_id
+                LIMIT 1
+                """,
+                (str(customer["email"]),),
+            ).fetchone()
+    return None if row is None else int(row["id"] if "id" in row.keys() else row["account_id"])
+
+
+def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: int, account_id: int | None = None) -> dict[str, object]:
     if row is None:
         plan = get_billing_plan("home")
         return {
             "customer_user_id": int(customer_user_id),
+            "account_id": int(account_id or 0),
             "plan_id": plan["id"],
             "plan_name": plan["name"],
-            "monthly_price_label": plan["monthly_price_label"],
+            "annual_price_label": plan["annual_price_label"],
+            "billing_interval": plan["billing_interval"],
             "payment_ready": plan["payment_ready"],
             "status": "not_started",
             "status_label": "Not started",
@@ -4256,9 +4804,11 @@ def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: in
     }
     return {
         "customer_user_id": int(mapping["customer_user_id"]),
+        "account_id": int(mapping.get("account_id") or account_id or 0),
         "plan_id": plan["id"],
         "plan_name": plan["name"],
-        "monthly_price_label": plan["monthly_price_label"],
+        "annual_price_label": plan["annual_price_label"],
+        "billing_interval": plan["billing_interval"],
         "payment_ready": plan["payment_ready"],
         "status": status,
         "status_label": status_labels.get(str(status), str(status).replace("_", " ").title()),
@@ -4278,28 +4828,30 @@ def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: in
     }
 
 
-def load_customer_billing(customer_user_id: int) -> dict[str, object]:
+def load_customer_billing(customer_user_id: int, account_number: str | None = None, account_id: int | None = None) -> dict[str, object]:
+    resolved_account_id = int(account_id) if account_id is not None else resolve_customer_account_id(int(customer_user_id), account_number)
     with get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT customer_user_id, plan_id, subscription_status, checkout_session_id,
+            SELECT account_id, customer_user_id, plan_id, subscription_status, checkout_session_id,
                    stripe_customer_id, stripe_subscription_id, stripe_payment_intent_id,
                    stripe_payment_reference, stripe_receipt_url, stripe_amount_total,
                    stripe_currency,
                    payments_customer_id, payments_order_id, payments_checkout_session_id,
                    payments_receipt_id, current_period_end
             FROM customer_billing
-            WHERE customer_user_id = ?
+            WHERE account_id = ?
             """,
-            (int(customer_user_id),),
+            (int(resolved_account_id or 0),),
         ).fetchone()
-    return serialize_customer_billing_row(row, int(customer_user_id))
+    return serialize_customer_billing_row(row, int(customer_user_id), resolved_account_id)
 
 
 def upsert_customer_billing(
     customer_user_id: int,
     plan_id: str,
     status: str,
+    account_id: int | None = None,
     checkout_session_id: str | None = None,
     stripe_customer_id: str | None = None,
     stripe_subscription_id: str | None = None,
@@ -4315,21 +4867,24 @@ def upsert_customer_billing(
     current_period_end: str | None = None,
 ) -> dict[str, object]:
     plan = get_billing_plan(plan_id)
-    existing = load_customer_billing(int(customer_user_id))
+    resolved_account_id = int(account_id or 0) or resolve_customer_account_id(int(customer_user_id))
+    if resolved_account_id is None:
+        raise ValueError("Choose an electric account before starting billing.")
+    existing = load_customer_billing(int(customer_user_id), account_id=resolved_account_id)
     timestamp = timestamp_now()
     with get_db_connection() as conn:
         conn.execute(
             """
             INSERT INTO customer_billing (
-                customer_user_id, plan_id, subscription_status, checkout_session_id,
+                account_id, customer_user_id, plan_id, subscription_status, checkout_session_id,
                 stripe_customer_id, stripe_subscription_id, stripe_payment_intent_id,
                 stripe_payment_reference, stripe_receipt_url, stripe_amount_total,
                 stripe_currency,
                 payments_customer_id, payments_order_id,
                 payments_checkout_session_id, payments_receipt_id, current_period_end, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(customer_user_id) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_id) DO UPDATE SET
                 plan_id = excluded.plan_id,
                 subscription_status = excluded.subscription_status,
                 checkout_session_id = excluded.checkout_session_id,
@@ -4348,6 +4903,7 @@ def upsert_customer_billing(
                 updated_at = excluded.updated_at
             """,
             (
+                int(resolved_account_id),
                 int(customer_user_id),
                 plan["id"],
                 status,
@@ -4375,16 +4931,16 @@ def upsert_customer_billing(
             ),
         )
         conn.commit()
-    return load_customer_billing(int(customer_user_id))
+    return load_customer_billing(int(customer_user_id), account_id=resolved_account_id)
 
 
-def record_customer_plan_selection(customer_user_id: int, plan_id: str | None) -> dict[str, object]:
+def record_customer_plan_selection(customer_user_id: int, plan_id: str | None, account_id: int | None = None) -> dict[str, object]:
     plan = get_billing_plan(plan_id)
-    billing = load_customer_billing(int(customer_user_id))
+    billing = load_customer_billing(int(customer_user_id), account_id=account_id)
     status = str(billing["status"] or "not_started")
     if status == "active" and plan["id"] != billing["plan_id"]:
         status = "checkout_started"
-    return upsert_customer_billing(int(customer_user_id), str(plan["id"]), status)
+    return upsert_customer_billing(int(customer_user_id), str(plan["id"]), status, account_id=account_id)
 
 
 def normalize_host(value: str | None) -> str:
@@ -4557,7 +5113,7 @@ def configure_stripe() -> None:
     stripe.api_version = get_stripe_api_version()
 
 
-def build_stripe_metadata(customer_user: dict[str, object], plan: dict[str, object]) -> dict[str, str]:
+def build_stripe_metadata(customer_user: dict[str, object], plan: dict[str, object], account_id: int | None = None) -> dict[str, str]:
     customer_user_id = str(customer_user["id"])
     return {
         "project": "home-energy-watch",
@@ -4565,6 +5121,7 @@ def build_stripe_metadata(customer_user: dict[str, object], plan: dict[str, obje
         "project_domain": "app.homeenergywatch.com",
         "customer_user_id": customer_user_id,
         "plan_id": str(plan["id"]),
+        "billing_interval": str(plan["billing_interval"]),
         "reference": f"customer_billing:{customer_user_id}:{plan['id']}",
     }
 
@@ -4573,15 +5130,20 @@ def create_customer_checkout_session(
     customer_user: dict[str, object],
     plan_id: str | None,
     base_url: str,
+    account_number: str | None = None,
 ) -> dict[str, object]:
     if not billing_checkout_enabled():
         raise ValueError("Online payment is not open yet.")
     configure_stripe()
     plan = get_billing_plan(plan_id)
+    account_id = resolve_customer_account_id(int(customer_user["id"]), account_number)
+    if account_id is None:
+        raise ValueError("Choose an electric account before starting billing.")
     price_id = get_stripe_price_id(plan)
     if not price_id:
         raise ValueError("Payment is not connected for that plan yet.")
     metadata = build_stripe_metadata(customer_user, plan)
+    metadata["account_id"] = str(account_id)
     session_obj = stripe.checkout.Session.create(
         mode="subscription",
         customer_email=str(customer_user["email"]),
@@ -4601,6 +5163,7 @@ def create_customer_checkout_session(
         int(customer_user["id"]),
         str(plan["id"]),
         "checkout_started",
+        account_id=account_id,
         checkout_session_id=session_id,
         stripe_customer_id=normalize_stripe_id(extract_mapping_value(session_obj, "customer")),
         stripe_subscription_id=normalize_stripe_id(extract_mapping_value(session_obj, "subscription")),
@@ -4610,9 +5173,9 @@ def create_customer_checkout_session(
     return {"id": session_id, "url": session_url}
 
 
-def create_customer_portal_session(customer_user: dict[str, object], base_url: str) -> dict[str, object]:
+def create_customer_portal_session(customer_user: dict[str, object], base_url: str, account_number: str | None = None) -> dict[str, object]:
     configure_stripe()
-    billing = load_customer_billing(int(customer_user["id"]))
+    billing = load_customer_billing(int(customer_user["id"]), account_number=account_number)
     stripe_customer_id = str(billing["stripe_customer_id"] or "")
     if not stripe_customer_id:
         raise ValueError("Billing is not active yet.")
@@ -4698,6 +5261,7 @@ def refresh_customer_billing_from_stripe(customer_user: dict[str, object], sessi
         expand=["subscription", "payment_intent.charges", "invoice"],
     )
     metadata = read_checkout_metadata(session_obj)
+    metadata_account_id = int(metadata["account_id"]) if str(metadata.get("account_id") or "").isdigit() else int(billing.get("account_id") or 0)
     plan_id = str(metadata.get("plan_id") or billing["plan_id"])
     subscription_obj = extract_mapping_value(session_obj, "subscription")
     subscription_id = normalize_stripe_id(subscription_obj)
@@ -4711,6 +5275,7 @@ def refresh_customer_billing_from_stripe(customer_user: dict[str, object], sessi
         int(customer_user["id"]),
         plan_id,
         billing_status,
+        account_id=metadata_account_id,
         checkout_session_id=target_session_id,
         stripe_customer_id=normalize_stripe_id(extract_mapping_value(session_obj, "customer")),
         stripe_subscription_id=subscription_id,
@@ -4736,12 +5301,14 @@ def handle_stripe_event(event: object) -> None:
         if not customer_user_id:
             return
         plan_id = str(metadata.get("plan_id") or "home")
+        account_id = int(metadata["account_id"]) if str(metadata.get("account_id") or "").isdigit() else None
         payment_status = str(extract_mapping_value(event_object, "payment_status") or "")
         status = "active" if payment_status in {"paid", "no_payment_required"} else "checkout_started"
         upsert_customer_billing(
             int(customer_user_id),
             plan_id,
             status,
+            account_id=account_id,
             checkout_session_id=normalize_stripe_id(event_object),
             stripe_customer_id=normalize_stripe_id(extract_mapping_value(event_object, "customer")),
             stripe_subscription_id=normalize_stripe_id(extract_mapping_value(event_object, "subscription")),
@@ -4758,6 +5325,7 @@ def handle_stripe_event(event: object) -> None:
         if not customer_user_id:
             return
         plan_id = str(metadata.get("plan_id") or "home")
+        account_id = int(metadata["account_id"]) if str(metadata.get("account_id") or "").isdigit() else None
         status = "canceled" if event_type == "customer.subscription.deleted" else stripe_subscription_status_to_billing_status(
             str(extract_mapping_value(event_object, "status") or "")
         )
@@ -4765,6 +5333,7 @@ def handle_stripe_event(event: object) -> None:
             int(customer_user_id),
             plan_id,
             status,
+            account_id=account_id,
             stripe_customer_id=normalize_stripe_id(extract_mapping_value(event_object, "customer")),
             stripe_subscription_id=normalize_stripe_id(event_object),
             current_period_end=normalize_stripe_timestamp(extract_mapping_value(event_object, "current_period_end")),
@@ -7468,6 +8037,7 @@ def serialize_household_profile_row(row: sqlite3.Row | None) -> dict[str, object
         return {
             "address": "",
             "zip_code": "",
+            "jurisdiction_code": "",
             "occupant_count": None,
             "year_built": None,
             "square_footage": None,
@@ -7484,6 +8054,7 @@ def serialize_household_profile_row(row: sqlite3.Row | None) -> dict[str, object
     return {
         "address": mapping.get("address") or "",
         "zip_code": mapping.get("zip_code") or "",
+        "jurisdiction_code": mapping.get("jurisdiction_code") or "",
         "occupant_count": mapping.get("occupant_count"),
         "year_built": mapping.get("year_built"),
         "square_footage": mapping.get("square_footage"),
@@ -7514,7 +8085,8 @@ def load_household_profile(account_number: str | None = None) -> dict[str, objec
                 notes,
                 latitude,
                 longitude,
-                weather_location
+                weather_location,
+                jurisdiction_code
             FROM household_profiles
             WHERE account_id = ?
             """,
@@ -7533,7 +8105,7 @@ def save_household_profile(account_number: str | None, form_like) -> dict[str, o
         account = get_or_create_account(conn, account_number)
         existing = conn.execute(
             """
-            SELECT address, zip_code, latitude, longitude, weather_location
+            SELECT address, zip_code, latitude, longitude, weather_location, jurisdiction_code
             FROM household_profiles
             WHERE account_id = ?
             """,
@@ -7545,6 +8117,9 @@ def save_household_profile(account_number: str | None, form_like) -> dict[str, o
         latitude = None if existing is None else existing["latitude"]
         longitude = None if existing is None else existing["longitude"]
         weather_location = None if existing is None else existing["weather_location"]
+        jurisdiction_code = infer_jurisdiction_code(address, account.get("energy_company"))
+        if not jurisdiction_code and existing is not None:
+            jurisdiction_code = existing["jurisdiction_code"] or None
         if existing_address != address:
             latitude = None
             longitude = None
@@ -7552,13 +8127,14 @@ def save_household_profile(account_number: str | None, form_like) -> dict[str, o
         conn.execute(
             """
             INSERT INTO household_profiles (
-                account_id, address, zip_code, occupant_count, year_built, square_footage,
+                account_id, address, zip_code, jurisdiction_code, occupant_count, year_built, square_footage,
                 heating_system, cooling_system, water_heater, notes, latitude, longitude, weather_location, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(account_id) DO UPDATE SET
                 address = excluded.address,
                 zip_code = excluded.zip_code,
+                jurisdiction_code = excluded.jurisdiction_code,
                 occupant_count = excluded.occupant_count,
                 year_built = excluded.year_built,
                 square_footage = excluded.square_footage,
@@ -7575,6 +8151,7 @@ def save_household_profile(account_number: str | None, form_like) -> dict[str, o
                 account["id"],
                 address,
                 zip_code,
+                jurisdiction_code,
                 values["occupant_count"],
                 values["year_built"],
                 values["square_footage"],
@@ -7588,6 +8165,7 @@ def save_household_profile(account_number: str | None, form_like) -> dict[str, o
                 timestamp_now(),
             ),
         )
+        refresh_account_commission_access(conn, int(account["id"]), jurisdiction_code)
         conn.commit()
 
     return load_household_profile(account_number)
@@ -7597,7 +8175,7 @@ def create_customer_signup(
     *,
     email: str,
     full_name: str,
-    password: str,
+    password: str | None = None,
     account_number: str | None,
     energy_company: str,
     plan_id: str | None,
@@ -7607,10 +8185,10 @@ def create_customer_signup(
     evidence_remote_hash: str | None = None,
     evidence_user_agent_hash: str | None = None,
     meter_value: str | None = None,
+    authenticated_customer_user_id: int | None = None,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     normalized_email = clean_email(email)
     normalized_name = (full_name or "").strip() or normalized_email
-    normalized_password = clean_password(password)
     if not accept_policies:
         raise ValueError("Agree to the Terms and Privacy Notice to create an account.")
     if not confirm_account_authority:
@@ -7631,11 +8209,14 @@ def create_customer_signup(
 
     with get_db_connection() as conn:
         existing_user = conn.execute(
-            "SELECT id FROM customer_users WHERE email = ?",
+            "SELECT id, email, full_name, is_active, email_verified_at, auth_version, last_login_at FROM customer_users WHERE email = ?",
             (normalized_email,),
         ).fetchone()
-        if existing_user is not None:
-            raise ValueError("An account already uses that email address.")
+        if existing_user is not None and (
+            authenticated_customer_user_id != int(existing_user["id"])
+            or not bool(existing_user["is_active"])
+        ):
+            raise ValueError("Sign in with your email link before adding another electric account.")
         existing_account = conn.execute(
             "SELECT id FROM accounts WHERE account_number = ?",
             (normalized_account_number,),
@@ -7643,31 +8224,27 @@ def create_customer_signup(
         if existing_account is not None:
             raise ValueError("That electric account is already registered. Sign in or contact support for access.")
 
-        conn.execute(
-            """
-            INSERT INTO customer_users (
-                email, full_name, password_hash, is_active, email_verified_at, auth_version,
-                created_at, updated_at, last_login_at
+        if existing_user is None:
+            conn.execute(
+                """
+                INSERT INTO customer_users (
+                    email, full_name, password_hash, is_active, email_verified_at, auth_version,
+                    created_at, updated_at, last_login_at
+                )
+                VALUES (?, ?, '', 1, ?, 1, ?, ?, NULL)
+                """,
+                (normalized_email, normalized_name, email_verified_at, timestamp, timestamp),
             )
-            VALUES (?, ?, ?, 1, ?, 1, ?, ?, NULL)
-            """,
-            (
-                normalized_email,
-                normalized_name,
-                generate_password_hash(normalized_password),
-                email_verified_at,
-                timestamp,
-                timestamp,
-            ),
-        )
-        customer_row = conn.execute(
-            """
-            SELECT id, email, full_name, is_active, email_verified_at, auth_version, last_login_at
-            FROM customer_users
-            WHERE email = ?
-            """,
-            (normalized_email,),
-        ).fetchone()
+            customer_row = conn.execute(
+                """
+                SELECT id, email, full_name, is_active, email_verified_at, auth_version, last_login_at
+                FROM customer_users
+                WHERE email = ?
+                """,
+                (normalized_email,),
+            ).fetchone()
+        else:
+            customer_row = existing_user
         customer_user = serialize_customer_user_row(customer_row) or {}
         account = get_or_create_account(
             conn,
@@ -7679,16 +8256,17 @@ def create_customer_signup(
         conn.execute(
             """
             INSERT INTO household_profiles (
-                account_id, address, zip_code, occupant_count, year_built, square_footage,
+                account_id, address, zip_code, jurisdiction_code, occupant_count, year_built, square_footage,
                 heating_system, cooling_system, water_heater, notes,
                 latitude, longitude, weather_location, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
             """,
             (
                 account["id"],
                 profile["address"],
                 profile["zip_code"],
+                infer_jurisdiction_code(profile["address"], normalized_energy_company),
                 profile["occupant_count"],
                 profile["year_built"],
                 profile["square_footage"],
@@ -7698,6 +8276,11 @@ def create_customer_signup(
                 profile["notes"],
                 timestamp,
             ),
+        )
+        refresh_account_commission_access(
+            conn,
+            int(account["id"]),
+            infer_jurisdiction_code(profile["address"], normalized_energy_company),
         )
         conn.execute(
             """
@@ -7726,18 +8309,18 @@ def create_customer_signup(
         conn.execute(
             """
             INSERT INTO customer_billing (
-                customer_user_id, plan_id, subscription_status, created_at, updated_at
+                account_id, customer_user_id, plan_id, subscription_status, created_at, updated_at
             )
-            VALUES (?, ?, 'not_started', ?, ?)
+            VALUES (?, ?, ?, 'not_started', ?, ?)
             """,
-            (customer_user["id"], plan["id"], timestamp, timestamp),
+            (account["id"], customer_user["id"], plan["id"], timestamp, timestamp),
         )
         billing_row = conn.execute(
-            "SELECT * FROM customer_billing WHERE customer_user_id = ?",
-            (customer_user["id"],),
+            "SELECT * FROM customer_billing WHERE account_id = ?",
+            (account["id"],),
         ).fetchone()
 
-    return customer_user, account, serialize_customer_billing_row(billing_row, int(customer_user["id"]))
+    return customer_user, account, serialize_customer_billing_row(billing_row, int(customer_user["id"]), int(account["id"]))
 
 
 def fetch_json(url: str) -> dict[str, object]:
@@ -11210,6 +11793,11 @@ def create_web_app() -> Flask:
             if api:
                 return jsonify({"error": "Sign in to continue."}), 401
             return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
+        if get_staff_commission_access(int(staff_user["id"])) is not None and request.method == "POST":
+            message = "Commission access is read-only."
+            if api:
+                return jsonify({"error": message}), 403
+            return message, 403
         return staff_user
 
     def require_customer_user(api: bool = False):
@@ -11245,6 +11833,19 @@ def create_web_app() -> Flask:
     def require_account_actor(account_number: str | None, api: bool = False, write: bool = False):
         staff_user = current_staff_user()
         if staff_user is not None:
+            commission_access = get_staff_commission_access(int(staff_user["id"]))
+            if commission_access is not None:
+                if write:
+                    message = "Commission access is read-only."
+                    if api:
+                        return jsonify({"error": message}), 403
+                    return message, 403
+                if not commission_can_view_account(int(staff_user["id"]), account_number):
+                    message = "That account is outside this commission's jurisdiction."
+                    if api:
+                        return jsonify({"error": message}), 403
+                    return message, 403
+                return {"kind": "commission", "user": staff_user, "commission": commission_access}
             return {"kind": "staff", "user": staff_user}
 
         customer_user = current_customer_user()
@@ -11362,6 +11963,13 @@ def create_web_app() -> Flask:
         account_page_number = parse_positive_int(request.args.get("account_page"), default=1)
         scaffold = build_account_scaffold(account_number, account_search, account_page_number)
         staff_user = current_staff_user()
+        commission_read_only = bool(staff_user and get_staff_commission_access(int(staff_user["id"])))
+        if commission_read_only:
+            commission_accounts = list_commission_accounts(int(staff_user["id"]))
+            allowed_numbers = {str(item["account_number"]) for item in commission_accounts}
+            if scaffold["account"]["account_number"] not in allowed_numbers and commission_accounts:
+                scaffold = build_account_scaffold(str(commission_accounts[0]["account_number"]), account_search, account_page_number)
+            scaffold["accounts"] = commission_accounts
         return {
             "defaults": defaults,
             "analysis": None,
@@ -11380,6 +11988,7 @@ def create_web_app() -> Flask:
             "setup_section": setup_section,
             "active_account_number": scaffold["account"]["account_number"],
             "page_title": page_title,
+            "commission_read_only": commission_read_only,
         }
 
     def build_customer_account_context(
@@ -11418,7 +12027,10 @@ def create_web_app() -> Flask:
             "setup_section": setup_section,
             "active_account_number": scaffold["account"]["account_number"],
             "customer_mode": True,
-            "billing": load_customer_billing(int(customer_user["id"])),
+            "billing": load_customer_billing(
+                int(customer_user["id"]),
+                account_number=str(scaffold["account"]["account_number"]),
+            ),
             "page_title": page_title,
         }
 
@@ -11456,11 +12068,18 @@ def create_web_app() -> Flask:
 
     def render_customer_signup_page(form_like=None):
         signup_form = build_customer_signup_form_state(form_like)
+        jurisdiction = infer_jurisdiction_code(signup_form["address"], signup_form["energy_company"])
+        commission_notice = (
+            "For a North Carolina service account, the North Carolina Utilities Commission may review the account record for regulatory work."
+            if jurisdiction == "NC"
+            else "Depending on the service location, the public utility commission with jurisdiction over the account may review the account record for regulatory work."
+        )
         return render_template(
             "customer_signup.html",
             page_title="Create Your Account",
             selected_plan_id=signup_form["plan_id"],
             signup_form=signup_form,
+            commission_notice=commission_notice,
         )
 
     def start_customer_session(customer_user: dict[str, object]) -> None:
@@ -11478,9 +12097,9 @@ def create_web_app() -> Flask:
             masked_email=mask_email_address(pending_email),
         )
 
-    def continue_customer_after_verification(customer_user: dict[str, object]):
+    def continue_customer_after_verification(customer_user: dict[str, object], account_number: str | None = None):
         start_customer_session(customer_user)
-        billing = load_customer_billing(int(customer_user["id"]))
+        billing = load_customer_billing(int(customer_user["id"]), account_number=account_number)
         selected_plan = get_billing_plan(str(billing["plan_id"]))
         if selected_plan["payment_ready"]:
             try:
@@ -11488,6 +12107,7 @@ def create_web_app() -> Flask:
                     customer_user,
                     str(billing["plan_id"]),
                     build_public_base_url(request.url_root),
+                    account_number or choose_customer_account_number(str(customer_user["email"])),
                 )
                 return redirect(str(session_obj["url"]))
             except Exception as exc:
@@ -11589,7 +12209,10 @@ def create_web_app() -> Flask:
             staff_team=[],
             latest_invite_url=None,
             customer_mode=True,
-            billing=load_customer_billing(int(customer_user["id"])),
+            billing=load_customer_billing(
+                int(customer_user["id"]),
+                account_number=str(account["account_number"]),
+            ),
             active_account_number=account["account_number"],
             page_title="Your energy history",
         )
@@ -11661,6 +12284,7 @@ def create_web_app() -> Flask:
                 confirm_account_authority=confirm_account_authority,
                 evidence_remote_hash=request_remote_hash(),
                 evidence_user_agent_hash=request_user_agent_hash(),
+                authenticated_customer_user_id=(current_customer_user() or {}).get("id"),
             )
         except Exception as exc:
             flash(str(exc))
@@ -11740,7 +12364,7 @@ def create_web_app() -> Flask:
                 )
             return render_verification_notice(str(customer_user["email"]))
 
-        return continue_customer_after_verification(customer_user)
+        return continue_customer_after_verification(customer_user, str(account["account_number"]))
 
     @app.get("/customer/verification-sent")
     def customer_verification_sent():
@@ -11813,7 +12437,7 @@ def create_web_app() -> Flask:
             target_id=customer_user["id"],
         )
         flash("Your email address is confirmed.")
-        return continue_customer_after_verification(customer_user)
+        return continue_customer_after_verification(customer_user, account_number)
 
     @app.get("/customer/forgot-password")
     def customer_forgot_password():
@@ -12048,6 +12672,7 @@ def create_web_app() -> Flask:
                 customer_user,
                 request.form.get("plan_id"),
                 build_public_base_url(request.url_root),
+                request.form.get("account_number") or request.args.get("account_number"),
             )
         except Exception as exc:
             flash(str(exc))
@@ -12056,7 +12681,7 @@ def create_web_app() -> Flask:
             "billing.checkout_started",
             actor_type="customer",
             actor_id=int(customer_user["id"]),
-            account_number=choose_customer_account_number(str(customer_user["email"])),
+            account_number=request.form.get("account_number") or choose_customer_account_number(str(customer_user["email"])),
             target_type="stripe_checkout_session",
             target_id=session_obj.get("id"),
             metadata={"plan_id": str(request.form.get("plan_id") or "")},
@@ -12097,7 +12722,11 @@ def create_web_app() -> Flask:
         if not isinstance(customer_user, dict):
             return customer_user
         try:
-            session_obj = create_customer_portal_session(customer_user, build_public_base_url(request.url_root))
+            session_obj = create_customer_portal_session(
+                customer_user,
+                build_public_base_url(request.url_root),
+                request.args.get("account_number"),
+            )
         except Exception as exc:
             flash(str(exc))
             return redirect(url_for("customer_dashboard"))
@@ -12369,6 +12998,51 @@ def create_web_app() -> Flask:
             return redirect(url_for("customer_dashboard"))
         return render_template("login.html", page_title="Sign In", next_url=request.args.get("next", ""))
 
+    @app.get("/login/token")
+    def login_token():
+        token = request.args.get("token", "")
+        try:
+            customer_user = consume_customer_login_token(token)
+        except ValueError:
+            try:
+                staff_user = consume_staff_login_token(token)
+            except ValueError:
+                flash("That sign-in link is no longer available.")
+                return redirect(url_for("login"))
+            if staff_user.get("mfa_enabled"):
+                establish_pending_staff_mfa_session(staff_user, next_destination())
+                record_audit_event(
+                    "staff.email_token_verified",
+                    actor_type="staff",
+                    actor_id=int(staff_user["id"]),
+                    target_type="staff_user",
+                    target_id=staff_user["id"],
+                    metadata={"method": "email_token"},
+                )
+                return redirect(url_for("staff_mfa_challenge"))
+            establish_staff_session(staff_user)
+            mark_staff_login_succeeded(int(staff_user["id"]))
+            record_audit_event(
+                "staff.login_succeeded",
+                actor_type="staff",
+                actor_id=int(staff_user["id"]),
+                target_type="staff_user",
+                target_id=staff_user["id"],
+                metadata={"method": "email_token"},
+            )
+            return redirect(url_for("index"))
+        start_customer_session(customer_user)
+        record_audit_event(
+            "customer.login_succeeded",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=choose_customer_account_number(str(customer_user["email"])),
+            target_type="customer_user",
+            target_id=customer_user["id"],
+            metadata={"method": "email_token"},
+        )
+        return redirect(url_for("customer_dashboard"))
+
     @app.get("/forgot-password")
     def forgot_password():
         return render_template(
@@ -12534,92 +13208,29 @@ def create_web_app() -> Flask:
         identity_hash = auth_request_identity("sign_in", email)
         limit_status = auth_rate_limit_status("sign_in", identity_hash)
         if limit_status["blocked"]:
-            flash(auth_limit_message(int(limit_status["retry_after"])))
-            return (
-                render_template(
-                    "login.html",
-                    page_title="Sign In",
-                    next_url=request.form.get("next", ""),
-                ),
-                429,
-            )
+            return render_template("login_link_notice.html", page_title="Check Your Email"), 429
+        record_auth_failure("sign_in", identity_hash)
+        customer_user = ensure_customer_user_for_email(email)
+        staff_user = None if customer_user is not None else get_staff_user_by_email(email)
+        if staff_user is None:
+            staff_user = ensure_commission_staff_user(email)
+        delivered = False
         try:
-            sign_in_kind, signed_in_user = resolve_sign_in_user(
-                email,
-                request.form.get("password", ""),
-            )
-        except EmailVerificationRequired as exc:
-            clear_auth_failures("sign_in", identity_hash)
-            session.clear()
-            session.permanent = True
-            session["pending_verification_email"] = str(exc.customer_user["email"])
-            record_audit_event(
-                "customer.login_verification_required",
-                actor_type="customer",
-                actor_id=int(exc.customer_user["id"]),
-                target_type="customer_user",
-                target_id=exc.customer_user["id"],
-            )
-            return redirect(url_for("customer_verification_sent"))
-        except Exception as exc:
-            failed_status = record_auth_failure("sign_in", identity_hash)
-            record_audit_event(
-                "auth.login_failed",
-                actor_type="anonymous",
-                metadata={"rate_limited": bool(failed_status["blocked"])},
-            )
-            flash(str(exc))
-            if failed_status["blocked"]:
-                flash(auth_limit_message(int(failed_status["retry_after"])))
-                return (
-                    render_template(
-                        "login.html",
-                        page_title="Sign In",
-                        next_url=request.form.get("next", ""),
-                    ),
-                    429,
-                )
-            return redirect(url_for("login", next=request.form.get("next", "")))
-
-        clear_auth_failures("sign_in", identity_hash)
-        destination = next_destination()
-        if sign_in_kind == "customer":
-            customer_user = signed_in_user
-            start_customer_session(customer_user)
-            record_audit_event(
-                "customer.login_succeeded",
-                actor_type="customer",
-                actor_id=int(customer_user["id"]),
-                account_number=choose_customer_account_number(str(customer_user["email"])),
-                target_type="customer_user",
-                target_id=customer_user["id"],
-                metadata={"entrypoint": "unified"},
-            )
-            return redirect(destination if destination else next_destination(default_endpoint="customer_dashboard"))
-
-        staff_user = signed_in_user
-        if staff_user.get("mfa_enabled"):
-            establish_pending_staff_mfa_session(staff_user, destination)
-            record_audit_event(
-                "staff.password_verified",
-                actor_type="staff",
-                actor_id=int(staff_user["id"]),
-                target_type="staff_user",
-                target_id=staff_user["id"],
-            )
-            return redirect(url_for("staff_mfa_challenge"))
-
-        establish_staff_session(staff_user)
-        mark_staff_login_succeeded(int(staff_user["id"]))
+            if customer_user is not None and customer_user.get("is_active"):
+                send_customer_login_link_email(customer_user, build_public_base_url(request.url_root))
+                delivered = True
+            elif staff_user is not None and staff_user.get("is_active"):
+                send_staff_login_link_email(staff_user, build_public_base_url(request.url_root))
+                delivered = True
+        except Exception:
+            delivered = False
         record_audit_event(
-            "staff.login_succeeded",
-            actor_type="staff",
-            actor_id=int(staff_user["id"]),
-            target_type="staff_user",
-            target_id=staff_user["id"],
-            metadata={"mfa": "not_enabled", "entrypoint": "unified"},
+            "auth.login_link_requested",
+            actor_type="customer" if customer_user is not None else ("staff" if staff_user is not None else "anonymous"),
+            actor_id=None if customer_user is None and staff_user is None else int((customer_user or staff_user)["id"]),
+            metadata={"delivery_attempted": delivered},
         )
-        return redirect(destination)
+        return render_template("login_link_notice.html", page_title="Check Your Email")
 
     @app.post("/login/passkey/start")
     @app.post("/customer/login/passkey/start")
@@ -13161,7 +13772,17 @@ def create_web_app() -> Flask:
         account_number = request.args.get("account_number")
         account_search = request.args.get("account_search")
         account_page_number = parse_positive_int(request.args.get("account_page"), default=1)
+        commission_read_only = bool(get_staff_commission_access(int(staff_user["id"])))
+        if commission_read_only:
+            commission_accounts = list_commission_accounts(int(staff_user["id"]))
+            allowed_numbers = {str(item["account_number"]) for item in commission_accounts}
+            if not commission_accounts:
+                return render_template("customer_empty.html", page_title="Commission records")
+            if account_number not in allowed_numbers:
+                account_number = str(commission_accounts[0]["account_number"])
         scaffold = build_account_scaffold(account_number, account_search, account_page_number)
+        if commission_read_only:
+            scaffold["accounts"] = commission_accounts
         latest_analysis = None
         try:
             _, latest_analysis = build_account_view(scaffold["account"]["account_number"], defaults)
@@ -13186,6 +13807,7 @@ def create_web_app() -> Flask:
             latest_invite_url=consume_latest_invite_url(),
             active_account_number=scaffold["account"]["account_number"],
             page_title="Commission Review",
+            commission_read_only=commission_read_only,
         )
 
     @app.get("/account")

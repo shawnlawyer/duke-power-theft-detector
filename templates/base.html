@@ -36,13 +36,15 @@
           <nav class="app-nav" aria-label="Main menu">
             {% if staff_user %}
               <a class="{% if request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('index', account_number=nav_account) }}"><span>Review</span><small>Dashboard</small></a>
-              <a class="{% if request.endpoint == 'account_page' %}active{% endif %}" href="{{ url_for('account_page', account_number=nav_account) }}"><span>Customer</span><small>Profile</small></a>
-              <a class="{% if request.endpoint == 'people_page' %}active{% endif %}" href="{{ url_for('people_page', account_number=nav_account) }}"><span>People</span><small>Access</small></a>
-              <a class="{% if request.endpoint == 'utility_page' %}active{% endif %}" href="{{ url_for('utility_page', account_number=nav_account) }}"><span>Utility</span><small>Connection</small></a>
-              <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}"><span>Inventory</span><small>Loads</small></a>
-              <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}"><span>History</span><small>Uploads</small></a>
-              <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}"><span>Staff</span><small>Team</small></a>
-              <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}"><span>Security</span><small>Access</small></a>
+              {% if not commission_read_only|default(false) %}
+                <a class="{% if request.endpoint == 'account_page' %}active{% endif %}" href="{{ url_for('account_page', account_number=nav_account) }}"><span>Customer</span><small>Profile</small></a>
+                <a class="{% if request.endpoint == 'people_page' %}active{% endif %}" href="{{ url_for('people_page', account_number=nav_account) }}"><span>People</span><small>Access</small></a>
+                <a class="{% if request.endpoint == 'utility_page' %}active{% endif %}" href="{{ url_for('utility_page', account_number=nav_account) }}"><span>Utility</span><small>Connection</small></a>
+                <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}"><span>Inventory</span><small>Loads</small></a>
+                <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}"><span>History</span><small>Uploads</small></a>
+                <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}"><span>Staff</span><small>Team</small></a>
+                <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}"><span>Security</span><small>Access</small></a>
+              {% endif %}
               {% if staff_user.role == "Commissioner" %}
                 <a class="{% if request.endpoint in ['data_requests_page', 'review_data_request', 'execute_data_request', 'place_legal_hold', 'release_legal_hold'] %}active{% endif %}" href="{{ url_for('data_requests_page') }}"><span>Data requests</span><small>Records</small></a>
                 <a class="{% if request.endpoint == 'audit_page' %}active{% endif %}" href="{{ url_for('audit_page') }}"><span>Audit</span><small>History</small></a>
@@ -79,6 +81,17 @@
               <h1>{{ page_title or ("Usage findings" if analysis else "Customer history") }}</h1>
             </div>
             <div class="topbar-meta">
+              {% if accounts is defined and accounts|length > 1 %}
+                <form class="account-switcher" action="{{ request.path }}" method="get">
+                  <label for="active-account">Account</label>
+                  <select id="active-account" name="account_number">
+                    {% for available_account in accounts %}
+                      <option value="{{ available_account.account_number }}" {% if available_account.account_number == nav_account %}selected{% endif %}>{{ available_account.account_number }}</option>
+                    {% endfor %}
+                  </select>
+                  <button type="submit" class="button-secondary button-small">Open</button>
+                </form>
+              {% endif %}
               {% if nav_account %}
                 <span class="topbar-chip">Account {{ nav_account }}</span>
               {% endif %}

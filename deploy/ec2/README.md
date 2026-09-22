@@ -46,7 +46,7 @@ sudo systemctl enable --now home-energy-watch-utility-sync.timer
    - `POWER_PUBLIC_BASE_URL=https://app.homeenergywatch.com`
    - `POWER_MARKETING_BASE_URL=https://homeenergywatch.com`
 
-Billing uses direct backend Stripe Checkout. Store `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_HOME`, and `STRIPE_PRICE_REVIEW` only in the ignored production env file or approved secret store. Home Watch is $19.99 a month and Review Desk is $99 a month. Checkout remains closed unless `POWER_BILLING_ENABLED=true`; do not enable it until the matching Stripe Price IDs have been installed for Home Energy Watch. Configure the Stripe webhook endpoint as `https://app.homeenergywatch.com/stripe/webhook`.
+Billing uses direct backend Stripe Checkout. Store `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and the annual `STRIPE_PRICE_HOME` only in the ignored production env file or approved secret store. Each account is billed $239.88 per year. Checkout remains closed unless `POWER_BILLING_ENABLED=true`; do not enable it until the annual Stripe Price ID has been installed for Home Energy Watch. Configure the Stripe webhook endpoint as `https://app.homeenergywatch.com/stripe/webhook`.
 
 Set `POWER_ENV=production`, use a unique `POWER_APP_SECRET` of at least 32 characters, and generate a dedicated Fernet key for `POWER_DATA_ENCRYPTION_KEY`:
 

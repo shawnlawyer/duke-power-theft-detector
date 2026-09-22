@@ -31,7 +31,7 @@ Start with [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) when changing behavior. EC2 
 | App runtime | Python 3.11, Flask 3 |
 | Production WSGI server | Gunicorn |
 | Data analysis | pandas, lxml, python-dateutil |
-| Authentication | Flask sessions, Werkzeug password hashing, passkeys through `fido2`, staff MFA through `pyotp` |
+| Authentication | Flask sessions, one-time email sign-in links, legacy operator password hashing, passkeys through `fido2`, staff MFA through `pyotp` |
 | Local database | SQLite at `POWER_DB_PATH`, defaulting to `data/output/power-history.db` when configured for local use |
 | Production database | Postgres/RDS through `POWER_DATABASE_URL`, with TLS required in production |
 | Billing | Backend Stripe Checkout, Billing Portal, and webhooks |
@@ -142,8 +142,7 @@ The app reads configuration from environment variables. Do not commit real value
 | `STRIPE_SECRET_KEY` | Backend-only Stripe secret key. |
 | `STRIPE_WEBHOOK_SECRET` | Backend-only webhook signing secret. |
 | `STRIPE_API_VERSION` | Stripe API version. |
-| `STRIPE_PRICE_HOME` | Stripe Price ID for Home Watch. |
-| `STRIPE_PRICE_REVIEW` | Stripe Price ID for Review Desk. |
+| `STRIPE_PRICE_HOME` | Annual Stripe Price ID for one electric account. |
 | `POWER_TIMEZONE` | Default analysis timezone. |
 | `POWER_NIGHT_START` | Default overnight window start. |
 | `POWER_NIGHT_END` | Default overnight window end. |
@@ -304,9 +303,10 @@ Auth labels:
 | Method | Path | Purpose | Auth | Request | Response |
 | --- | --- | --- | --- | --- | --- |
 | `GET` | `/signup` | Customer signup page. | Public | Optional plan/account query values | HTML or redirect |
-| `POST` | `/signup` | Creates customer, account, billing selection, and utility data authorization. | Public, CSRF | Form includes `email`, `full_name`, `password`, `account_number`, household fields, policy confirmations, plan fields | HTML verification notice or redirect |
+| `POST` | `/signup` | Creates a customer identity, one electric account, its annual billing record, and utility data authorization. | Public, CSRF | Form includes `email`, `full_name`, `account_number`, household fields, policy confirmations, and plan fields | HTML verification notice or redirect |
 | `GET` | `/login` | Unified staff/customer login page. | Public | Optional `next` | HTML or redirect |
-| `POST` | `/login` | Password sign-in for staff or customer. | Public, CSRF | Form: `email`, `password`, optional `next` | Redirect, or HTML with `429` on rate limit |
+| `POST` | `/login` | Sends a one-time sign-in link for a customer or eligible commission email. | Public, CSRF | Form: `email`, optional `next` | HTML notice, or `429` on rate limit |
+| `GET` | `/login/token` | Consumes a one-time sign-in link. | Public with token | Query: `token` | Redirect |
 | `POST` | `/login/passkey/start`, `/customer/login/passkey/start` | Starts passkey sign-in. | Public, CSRF | Form: `email`, optional `next` | JSON: `{"publicKey": ...}` or `{"error": ...}` |
 | `POST` | `/login/passkey/finish`, `/customer/login/passkey/finish` | Completes passkey sign-in. | Public, CSRF | JSON passkey assertion payload | JSON: `{"redirect": "/..."}` or `{"error": ...}` |
 | `POST` | `/logout` | Ends current staff or customer session. | Signed-in user, CSRF | Form with CSRF token | Redirect |

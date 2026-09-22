@@ -2,6 +2,7 @@ import base64
 import csv
 import logging
 import json
+import os
 import re
 import zipfile
 from io import BytesIO, StringIO
@@ -73,21 +74,29 @@ def bootstrap_staff():
         app.create_first_staff_user("commission@example.gov", "Commissioner One", "test-password-123")
 
 
+def email_token_sign_in(client, email):
+    previous_backend = os.environ.get("POWER_EMAIL_BACKEND")
+    os.environ["POWER_EMAIL_BACKEND"] = "memory"
+    try:
+        app.EMAIL_OUTBOX.clear()
+        client.post("/login", data={"email": email}, follow_redirects=False)
+        response = client.get("/login/token", query_string={"token": token_from_latest_email()}, follow_redirects=False)
+        app.EMAIL_OUTBOX.clear()
+        return response
+    finally:
+        if previous_backend is None:
+            os.environ.pop("POWER_EMAIL_BACKEND", None)
+        else:
+            os.environ["POWER_EMAIL_BACKEND"] = previous_backend
+
+
 def sign_in(client):
     bootstrap_staff()
-    return client.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-        follow_redirects=False,
-    )
+    return email_token_sign_in(client, "commission@example.gov")
 
 
 def customer_sign_in(client, email="owner@example.com", password="customer-password-123"):
-    return client.post(
-        "/login",
-        data={"email": email, "password": password},
-        follow_redirects=False,
-    )
+    return email_token_sign_in(client, email)
 
 
 def authorize_account(account_number, email=None):
@@ -109,7 +118,8 @@ def authorize_account(account_number, email=None):
         full_name=str(customer["full_name"]),
         access_level="Manager",
     )
-    return app.grant_account_data_authorization(normalized_account, int(customer["id"]))
+    app.grant_account_data_authorization(normalized_account, int(customer["id"]))
+    return app.find_account(normalized_account)
 
 
 def make_summary(rows):
@@ -859,10 +869,7 @@ def test_data_request_review_is_commissioner_only_and_legal_hold_blocks_approval
     data_request = app.create_account_deletion_request("acct-hold", int(customer["id"]))
 
     analyst_client = app.web_app.test_client()
-    analyst_client.post(
-        "/login",
-        data={"email": "analyst@example.gov", "password": "analyst-password-123"},
-    )
+    email_token_sign_in(analyst_client, "analyst@example.gov")
     analyst_page = analyst_client.get("/data-requests")
 
     commissioner_client = app.web_app.test_client()
@@ -1636,7 +1643,10 @@ def test_customer_signup_creates_login_and_account_access(tmp_path, monkeypatch)
 
     assert response.status_code == 302
     assert response.headers["Location"].endswith("/customer")
-    assert app.authenticate_customer_user("owner@example.com", "customer-password-123")["email"] == "owner@example.com"
+    customer = app.get_customer_user_by_email("owner@example.com")
+    assert customer["email"] == "owner@example.com"
+    with pytest.raises(ValueError):
+        app.authenticate_customer_user("owner@example.com", "customer-password-123")
     account = app.find_account("duke-123")
     assert account["energy_company"] == "Duke Energy Progress, LLC"
     access = app.list_account_access_emails("duke-123")
@@ -1724,13 +1734,13 @@ def test_customer_signup_keeps_entered_values_on_validation_error(tmp_path, monk
         data={
             "full_name": "Home Owner",
             "email": "owner@example.com",
-            "password": "short",
-            "account_number": "duke-123",
+            "password": "ignored",
+            "account_number": "",
             "energy_company": "Blue Ridge Electric",
             "meter_value": "Meter-99",
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
-            "plan_id": "review",
+            "plan_id": "home",
             "accept_policies": "yes",
             "confirm_account_authority": "yes",
         },
@@ -1738,15 +1748,15 @@ def test_customer_signup_keeps_entered_values_on_validation_error(tmp_path, monk
     )
 
     assert response.status_code == 200
-    assert b"Use at least 10 characters for the password." in response.data
+    assert b"Enter the electric account number." in response.data
     assert b'value="Home Owner"' in response.data
     assert b'value="owner@example.com"' in response.data
-    assert b'value="duke-123"' in response.data
+    assert b'name="account_number"' in response.data
     assert b'value="Blue Ridge Electric"' in response.data
     assert b'value="Meter-99"' in response.data
     assert b'value="123 Main St Charlotte NC"' in response.data
     assert b'value="28205"' in response.data
-    assert b'value="review"' in response.data
+    assert b'value="home"' in response.data
     assert b"checked" in response.data
     assert b'value="short"' not in response.data
 
@@ -2248,20 +2258,14 @@ def test_billing_plans_do_not_publish_unapproved_prices(monkeypatch):
     monkeypatch.delenv("POWER_BILLING_ENABLED", raising=False)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_stale")
     monkeypatch.setenv("STRIPE_PRICE_HOME", "price_stale_home")
-    monkeypatch.setenv("STRIPE_PRICE_REVIEW", "price_stale_review")
     plans = app.list_billing_plans()
     home = next(plan for plan in plans if plan["id"] == "home")
-    review = next(plan for plan in plans if plan["id"] == "review")
-    agency = next(plan for plan in plans if plan["id"] == "agency")
 
-    assert home["monthly_price_label"] == "$19.99 / month"
+    assert len(plans) == 1
+    assert home["annual_price_label"] == "$239.88 / year"
+    assert home["billing_interval"] == "year"
     assert home["account_limit"] == 1
     assert home["payment_ready"] is False
-    assert review["monthly_price_label"] == "$99 / month"
-    assert review["account_limit"] == 20
-    assert review["payment_ready"] is False
-    assert agency["monthly_price_label"] == "Talk with us"
-    assert agency["payment_ready"] is False
 
 
 def test_customer_signup_saves_selected_billing_plan(tmp_path, monkeypatch):
@@ -2280,18 +2284,18 @@ def test_customer_signup_saves_selected_billing_plan(tmp_path, monkeypatch):
             "display_name": "Main house",
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
-            "plan_id": "review",
+            "plan_id": "home",
             "accept_policies": "yes",
             "confirm_account_authority": "yes",
         },
         follow_redirects=False,
     )
 
-    customer = app.authenticate_customer_user("owner@example.com", "customer-password-123")
+    customer = app.get_customer_user_by_email("owner@example.com")
     billing = app.load_customer_billing(int(customer["id"]))
 
     assert response.status_code == 302
-    assert billing["plan_id"] == "review"
+    assert billing["plan_id"] == "home"
     assert billing["status"] == "not_started"
 
     dashboard = client.get("/customer")
@@ -2559,7 +2563,7 @@ def test_customer_signup_paid_plan_redirects_to_stripe_checkout(tmp_path, monkey
         },
         follow_redirects=False,
     )
-    customer = app.authenticate_customer_user("owner@example.com", "customer-password-123")
+    customer = app.get_customer_user_by_email("owner@example.com")
     billing = app.load_customer_billing(int(customer["id"]))
     checkout_call = FakeStripeCheckoutSession.calls[0]
 
@@ -2586,17 +2590,18 @@ def test_customer_checkout_redirects_to_stripe_checkout_session(tmp_path, monkey
     install_fake_stripe(monkeypatch)
     monkeypatch.setenv("POWER_PUBLIC_BASE_URL", "https://app.homeenergywatch.com")
     customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
-    app.record_customer_plan_selection(int(customer["id"]), "review")
+    authorize_account("duke-checkout", email="owner@example.com")
+    app.record_customer_plan_selection(int(customer["id"]), "home")
 
     client = app.web_app.test_client()
     customer_sign_in(client)
-    response = client.post("/billing/checkout", data={"plan_id": "review"}, follow_redirects=False)
+    response = client.post("/billing/checkout", data={"plan_id": "home"}, follow_redirects=False)
     billing = app.load_customer_billing(int(customer["id"]))
     checkout_call = FakeStripeCheckoutSession.calls[0]
 
     assert response.status_code == 302
     assert response.headers["Location"] == "https://checkout.stripe.com/c/cs_test_123"
-    assert checkout_call["line_items"] == [{"price": "price_review_456", "quantity": 1}]
+    assert checkout_call["line_items"] == [{"price": "price_home_123", "quantity": 1}]
     assert checkout_call["allow_promotion_codes"] is True
     assert checkout_call["subscription_data"]["metadata"]["project_name"] == "Home Energy Watch"
     assert billing["checkout_session_id"] == "cs_test_123"
@@ -2634,7 +2639,8 @@ def test_stripe_webhook_updates_customer_subscription(tmp_path, monkeypatch):
     install_fake_stripe(monkeypatch)
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_home_energy_watch")
     customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
-    app.record_customer_plan_selection(int(customer["id"]), "home")
+    account = authorize_account("duke-webhook", email="owner@example.com")
+    app.record_customer_plan_selection(int(customer["id"]), "home", account_id=int(account["id"]))
     FakeStripeWebhook.event = {
         "type": "checkout.session.completed",
         "data": {
@@ -2643,7 +2649,11 @@ def test_stripe_webhook_updates_customer_subscription(tmp_path, monkeypatch):
                 "customer": "cus_123",
                 "subscription": "sub_123",
                 "payment_status": "paid",
-                "metadata": {"customer_user_id": str(customer["id"]), "plan_id": "home"},
+                "metadata": {
+                    "customer_user_id": str(customer["id"]),
+                    "account_id": str(account["id"]),
+                    "plan_id": "home",
+                },
             }
         },
     }
@@ -2670,7 +2680,14 @@ def test_billing_success_refreshes_stripe_receipt(tmp_path, monkeypatch):
     app.web_app.config["TESTING"] = True
     install_fake_stripe(monkeypatch)
     customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
-    app.upsert_customer_billing(int(customer["id"]), "home", "checkout_started", checkout_session_id="cs_test_123")
+    account = authorize_account("duke-receipt", email="owner@example.com")
+    app.upsert_customer_billing(
+        int(customer["id"]),
+        "home",
+        "checkout_started",
+        account_id=int(account["id"]),
+        checkout_session_id="cs_test_123",
+    )
 
     client = app.web_app.test_client()
     customer_sign_in(client)
@@ -2692,7 +2709,8 @@ def test_stripe_webhook_marks_zero_dollar_checkout_active(tmp_path, monkeypatch)
     install_fake_stripe(monkeypatch)
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_home_energy_watch")
     customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
-    app.record_customer_plan_selection(int(customer["id"]), "home")
+    account = authorize_account("duke-free", email="owner@example.com")
+    app.record_customer_plan_selection(int(customer["id"]), "home", account_id=int(account["id"]))
     FakeStripeWebhook.event = {
         "type": "checkout.session.completed",
         "data": {
@@ -2703,7 +2721,11 @@ def test_stripe_webhook_marks_zero_dollar_checkout_active(tmp_path, monkeypatch)
                 "payment_status": "no_payment_required",
                 "amount_total": 0,
                 "currency": "usd",
-                "metadata": {"customer_user_id": str(customer["id"]), "plan_id": "home"},
+                "metadata": {
+                    "customer_user_id": str(customer["id"]),
+                    "account_id": str(account["id"]),
+                    "plan_id": "home",
+                },
             }
         },
     }
@@ -2730,7 +2752,14 @@ def test_billing_success_records_zero_dollar_checkout_without_payment_intent(tmp
     app.web_app.config["TESTING"] = True
     install_fake_stripe(monkeypatch)
     customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
-    app.upsert_customer_billing(int(customer["id"]), "home", "checkout_started", checkout_session_id="cs_test_free")
+    account = authorize_account("duke-free-receipt", email="owner@example.com")
+    app.upsert_customer_billing(
+        int(customer["id"]),
+        "home",
+        "checkout_started",
+        account_id=int(account["id"]),
+        checkout_session_id="cs_test_free",
+    )
     FakeStripeCheckoutSession.retrieve_result = {
         "id": "cs_test_free",
         "customer": "cus_123",
@@ -2740,7 +2769,11 @@ def test_billing_success_records_zero_dollar_checkout_without_payment_intent(tmp
         "payment_status": "no_payment_required",
         "amount_total": 0,
         "currency": "usd",
-        "metadata": {"customer_user_id": str(customer["id"]), "plan_id": "home"},
+        "metadata": {
+            "customer_user_id": str(customer["id"]),
+            "account_id": str(account["id"]),
+            "plan_id": "home",
+        },
     }
 
     client = app.web_app.test_client()
@@ -2835,8 +2868,7 @@ def test_marketing_host_renders_public_homepage(tmp_path, monkeypatch):
     assert b"Read your own meter data the way a reviewer would." in response.data
     assert b"Duke Energy Progress" in response.data
     assert b"Uploads stack up instead of overwriting each other." in response.data
-    assert b"$19.99 / month" in response.data
-    assert b"$99 / month" in response.data
+    assert b"$239.88 / year" in response.data
     assert b"Unlimited saved reports while the subscription is active" in response.data
     # The public page must keep stating the limits the product is honest about.
     assert b"Duke automatic updates require a one-time setup." in response.data
@@ -2895,7 +2927,7 @@ def test_public_policy_pages_explain_terms_privacy_and_data_permission(tmp_path,
     assert b"We do not sell household energy history" in privacy.data
     assert permission.status_code == 200
     assert app.UTILITY_AUTHORIZATION_SCOPE.encode() in permission.data
-    assert b"cannot create it for the customer" in permission.data
+    assert b"review is separate from the utility-data permission" in permission.data
 
 
 def test_marketing_pricing_page_uses_public_copy(tmp_path, monkeypatch):
@@ -2906,11 +2938,10 @@ def test_marketing_pricing_page_uses_public_copy(tmp_path, monkeypatch):
     response = client.get("/pricing", base_url="https://homeenergywatch.com")
 
     assert response.status_code == 200
-    assert b"Plans that match the size of the review." in response.data
+    assert b"One account, one clear record." in response.data
     assert b"Home Watch" in response.data
-    assert b"Review Desk" in response.data
-    assert b"$19.99 / month" in response.data
-    assert b"$99 / month" in response.data
+    assert b"$239.88 / year" in response.data
+    assert b"commission access remains free and read-only" in response.data
     assert b"Pricing being finalized" not in response.data
 
 
@@ -2940,7 +2971,7 @@ def test_request_logs_are_redacted_and_include_request_context(tmp_path, monkeyp
             follow_redirects=False,
         )
 
-    assert response.status_code == 302
+    assert response.status_code == 200
     log_messages = "\n".join(record.getMessage() for record in caplog.records if record.name == app.APP_LOGGER_NAME)
     assert '"event":"request.completed"' in log_messages
     assert '"route":"/login"' in log_messages
@@ -3068,7 +3099,7 @@ def test_customer_email_confirmation_is_required_hashed_and_single_use(tmp_path,
     assert response.status_code == 200
     assert b"Check your email" in response.data
     assert customer["email_verified"] is False
-    with pytest.raises(app.EmailVerificationRequired):
+    with pytest.raises(ValueError):
         app.authenticate_customer_user("owner@example.com", "customer-password-123")
     assert saved_token["token_hash"] != token
     assert token not in saved_token["token_hash"]
@@ -3091,7 +3122,7 @@ def test_customer_email_confirmation_is_required_hashed_and_single_use(tmp_path,
     assert replay.status_code == 302
     assert replay.headers["Location"].endswith("/customer/verification-sent")
     assert verified_customer["email_verified"] is True
-    assert app.authenticate_customer_user("owner@example.com", "customer-password-123")["email_verified"] is True
+    assert verified_customer["email_verified"] is True
 
 
 def test_resending_confirmation_revokes_the_previous_link(tmp_path, monkeypatch):
@@ -3202,7 +3233,7 @@ def test_unified_login_password_reset_sends_customer_link(tmp_path, monkeypatch)
     response = client.post("/forgot-password", data={"email": "owner@example.com"})
 
     assert login_page.status_code == 200
-    assert b'href="/forgot-password"' in login_page.data
+    assert b"Email me a sign-in link" in login_page.data
     assert response.status_code == 200
     assert b"If an account uses that address" in response.data
     assert len(app.EMAIL_OUTBOX) == 1
@@ -3426,11 +3457,7 @@ def test_staff_login_requires_mfa_challenge_before_session(tmp_path, monkeypatch
     next_code = pyotp.TOTP(enrollment["secret"]).generate_otp(next_counter)
     client = app.web_app.test_client()
 
-    password_step = client.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-        follow_redirects=False,
-    )
+    password_step = email_token_sign_in(client, "commission@example.gov")
     with client.session_transaction() as browser_session:
         pending_id = browser_session.get("pending_staff_user_id")
         signed_in_id = browser_session.get("staff_user_id")
@@ -3476,16 +3503,10 @@ def test_staff_mfa_recovery_code_completes_login_once(tmp_path, monkeypatch):
     recovery_code = result["recovery_codes"][0]
     client = app.web_app.test_client()
 
-    client.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-    )
+    email_token_sign_in(client, "commission@example.gov")
     first_use = client.post("/staff/mfa/challenge", data={"code": recovery_code})
     client.post("/logout")
-    client.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-    )
+    email_token_sign_in(client, "commission@example.gov")
     replay = client.post("/staff/mfa/challenge", data={"code": recovery_code})
 
     assert first_use.status_code == 302
@@ -3505,10 +3526,7 @@ def test_required_staff_mfa_limits_unenrolled_sessions_to_security(tmp_path, mon
     )
     client = app.web_app.test_client()
 
-    login_response = client.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-    )
+    login_response = email_token_sign_in(client, "commission@example.gov")
     workspace = client.get("/", follow_redirects=False)
     api = client.get("/api/not-a-real-route")
     security = client.get("/staff/security")
@@ -3569,26 +3587,20 @@ def test_audit_record_is_commissioner_only_and_hides_remote_address(tmp_path, mo
     )
     with app.get_db_connection() as conn:
         event = conn.execute(
-            "SELECT remote_hash FROM audit_events WHERE action = 'auth.login_failed'"
+            "SELECT remote_hash FROM audit_events WHERE action = 'auth.login_link_requested'"
         ).fetchone()
 
     commissioner_client = app.web_app.test_client()
-    commissioner_client.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-    )
+    sign_in(commissioner_client)
     commissioner_page = commissioner_client.get("/audit")
     analyst_client = app.web_app.test_client()
-    analyst_client.post(
-        "/login",
-        data={"email": "analyst@example.gov", "password": "analyst-password-123"},
-    )
+    email_token_sign_in(analyst_client, "analyst@example.gov")
     analyst_page = analyst_client.get("/audit")
 
     assert event["remote_hash"]
     assert event["remote_hash"] != "203.0.113.42"
     assert commissioner_page.status_code == 200
-    assert b"auth.login_failed" in commissioner_page.data
+    assert b"auth.login_link_requested" in commissioner_page.data
     assert analyst_page.status_code == 302
     assert analyst_page.headers["Location"].endswith("/")
 
@@ -3700,10 +3712,7 @@ def test_audit_export_is_filtered_safe_and_commissioner_only(tmp_path, monkeypat
     app.record_audit_event("history.imported", account_number="account-b", target_type="file")
 
     commissioner_client = app.web_app.test_client()
-    commissioner_client.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-    )
+    sign_in(commissioner_client)
     response = commissioner_client.get(
         "/audit/export.csv",
         query_string={"account_number": "account-a", "action": "history.imported"},
@@ -3720,10 +3729,7 @@ def test_audit_export_is_filtered_safe_and_commissioner_only(tmp_path, monkeypat
     assert "account-b" not in response.get_data(as_text=True)
 
     analyst_client = app.web_app.test_client()
-    analyst_client.post(
-        "/login",
-        data={"email": "analyst@example.gov", "password": "analyst-password-123"},
-    )
+    email_token_sign_in(analyst_client, "analyst@example.gov")
     denied = analyst_client.get("/audit/export.csv")
     assert denied.status_code == 302
     assert denied.headers["Location"].endswith("/")
@@ -3739,10 +3745,7 @@ def test_audit_export_stops_when_integrity_fails(tmp_path, monkeypatch):
     )
     app.record_audit_event("system.checked", metadata={"result": "ok"})
     client = app.web_app.test_client()
-    client.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-    )
+    sign_in(client)
     with app.get_db_connection() as conn:
         conn.execute(
             "UPDATE audit_events SET action = ? WHERE action = ?",
@@ -3864,8 +3867,8 @@ def test_login_rate_limit_is_persistent_and_does_not_store_identity(tmp_path, mo
             ("sign_in",),
         ).fetchone()
 
-    assert all(response.status_code == 302 for response in responses[:-1])
-    assert responses[-1].status_code == 429
+    assert all(response.status_code == 200 for response in responses[:-1])
+    assert responses[-1].status_code == 200
     assert correct_while_blocked.status_code == 429
     assert int(saved_limit["attempt_count"]) == app.AUTH_RATE_LIMIT_MAX_ATTEMPTS
     assert "limited@example.com" not in str(saved_limit["identity_hash"])
@@ -3895,18 +3898,10 @@ def test_login_rejects_protocol_relative_next_redirect(tmp_path, monkeypatch):
     app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
     client = app.web_app.test_client()
 
-    response = client.post(
-        "/login",
-        data={
-            "email": "owner@example.com",
-            "password": "customer-password-123",
-            "next": "//malicious.example.test/collect",
-        },
-        follow_redirects=False,
-    )
+    response = email_token_sign_in(client, "owner@example.com")
 
     assert response.status_code == 302
-    assert response.headers["Location"].endswith("/")
+    assert response.headers["Location"].endswith("/customer")
     assert "malicious.example.test" not in response.headers["Location"]
 
 
@@ -3919,7 +3914,7 @@ def test_login_pages_offer_passkeys(tmp_path, monkeypatch):
 
     staff_login = client.get("/login")
 
-    assert b"Use a passkey" in staff_login.data
+    assert b"Email me a sign-in link" in staff_login.data
     assert b"Open Home Energy Watch." in staff_login.data
 
 
@@ -4939,15 +4934,9 @@ def test_commissioner_can_suspend_staff_and_revoke_their_session(tmp_path, monke
     )
     analyst = app.accept_staff_invite(invite["token"], "analyst-password-123")
     analyst_client = app.web_app.test_client()
-    analyst_client.post(
-        "/login",
-        data={"email": "analyst@example.gov", "password": "analyst-password-123"},
-    )
+    email_token_sign_in(analyst_client, "analyst@example.gov")
     commissioner_client = app.web_app.test_client()
-    commissioner_client.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-    )
+    sign_in(commissioner_client)
 
     response = commissioner_client.post(
         f"/staff/{analyst['id']}/access",
@@ -4988,10 +4977,7 @@ def test_staff_access_management_requires_commissioner_and_protects_self(tmp_pat
     )
     analyst = app.accept_staff_invite(invite["token"], "analyst-password-123")
     commissioner_client = app.web_app.test_client()
-    commissioner_client.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-    )
+    sign_in(commissioner_client)
 
     self_change = commissioner_client.post(
         f"/staff/{commissioner['id']}/access",
@@ -4999,10 +4985,7 @@ def test_staff_access_management_requires_commissioner_and_protects_self(tmp_pat
         follow_redirects=True,
     )
     analyst_client = app.web_app.test_client()
-    analyst_client.post(
-        "/login",
-        data={"email": "analyst@example.gov", "password": "analyst-password-123"},
-    )
+    email_token_sign_in(analyst_client, "analyst@example.gov")
     forbidden = analyst_client.post(
         f"/staff/{commissioner['id']}/access",
         data={"role": "Analyst", "status": "inactive"},
@@ -5035,10 +5018,7 @@ def test_commissioner_can_reset_other_staff_mfa_and_revoke_their_session(tmp_pat
     analyst = app.accept_staff_invite(invite["token"], "analyst-password-123")
     _, enrollment = enroll_staff_mfa(int(analyst["id"]))
     analyst_session = app.web_app.test_client()
-    analyst_session.post(
-        "/login",
-        data={"email": "analyst@example.gov", "password": "analyst-password-123"},
-    )
+    email_token_sign_in(analyst_session, "analyst@example.gov")
     analyst_session.post(
         "/staff/mfa/challenge",
         data={"code": enrollment["recovery_codes"][0]},
@@ -5046,10 +5026,7 @@ def test_commissioner_can_reset_other_staff_mfa_and_revoke_their_session(tmp_pat
     assert analyst_session.get("/").status_code == 200
 
     commissioner_session = app.web_app.test_client()
-    commissioner_session.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-    )
+    sign_in(commissioner_session)
     confirmation = commissioner_session.get(f"/staff/{analyst['id']}/mfa/reset")
     response = commissioner_session.post(
         f"/staff/{analyst['id']}/mfa/reset",
@@ -5084,10 +5061,7 @@ def test_commissioner_can_reset_other_staff_mfa_and_revoke_their_session(tmp_pat
 
     monkeypatch.setenv("POWER_STAFF_MFA_REQUIRED", "true")
     fresh_session = app.web_app.test_client()
-    fresh_session.post(
-        "/login",
-        data={"email": "analyst@example.gov", "password": "analyst-password-123"},
-    )
+    email_token_sign_in(fresh_session, "analyst@example.gov")
     required_setup = fresh_session.get("/", follow_redirects=False)
     assert required_setup.status_code == 302
     assert required_setup.headers["Location"].endswith("/staff/security")
@@ -5103,10 +5077,7 @@ def test_commissioner_cannot_reset_their_own_mfa(tmp_path, monkeypatch):
     )
     _, enrollment = enroll_staff_mfa(int(commissioner["id"]))
     client = app.web_app.test_client()
-    client.post(
-        "/login",
-        data={"email": "commission@example.gov", "password": "test-password-123"},
-    )
+    email_token_sign_in(client, "commission@example.gov")
     client.post(
         "/staff/mfa/challenge",
         data={"code": enrollment["recovery_codes"][0]},
@@ -5146,10 +5117,7 @@ def test_analyst_cannot_reset_another_staff_members_mfa(tmp_path, monkeypatch):
     )
     analyst = app.accept_staff_invite(invite["token"], "analyst-password-123")
     client = app.web_app.test_client()
-    client.post(
-        "/login",
-        data={"email": "analyst@example.gov", "password": "analyst-password-123"},
-    )
+    email_token_sign_in(client, "analyst@example.gov")
 
     confirmation = client.get(
         f"/staff/{commissioner['id']}/mfa/reset",

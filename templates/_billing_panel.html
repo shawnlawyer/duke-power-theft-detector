@@ -6,7 +6,7 @@
       <p class="section-kicker">Billing</p>
       <h2>{{ current_billing.plan_name if current_billing else "Choose a plan" }}</h2>
       {% if current_billing %}
-        <p class="plain-note">{{ current_billing.monthly_price_label }} · {{ current_billing.status_label }}</p>
+        <p class="plain-note">{{ current_billing.annual_price_label }} · {{ current_billing.status_label }}</p>
       {% else %}
         <p class="plain-note">Choose a subscription and create as many reports as you need while it is active.</p>
       {% endif %}
@@ -17,12 +17,14 @@
   {% if current_billing and current_billing.status in ["active", "trialing"] %}
     <form action="{{ url_for('billing_portal') }}" method="post">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="account_number" value="{{ account.account_number if account is defined and account else '' }}">
       <button type="submit" class="button-secondary">Manage billing</button>
     </form>
   {% elif current_billing and current_billing.payment_ready %}
     <form class="billing-action-form" action="{{ url_for('billing_checkout') }}" method="post">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="plan_id" value="{{ current_billing.plan_id }}">
+      <input type="hidden" name="account_number" value="{{ account.account_number if account is defined and account else '' }}">
       <button type="submit">Continue to secure payment</button>
     </form>
     <p class="plain-note">Your subscription includes unlimited reports while it is active. Card details are entered on the secure checkout page.</p>
