@@ -6,8 +6,8 @@
       <div class="section-header">
         <div>
           <p class="section-kicker">Pricing</p>
-          <h2>Choose the level that fits the review.</h2>
-          <p class="plain-note">Subscribe once, then create as many reports as you need while your plan is active. Home Watch is $19.99 a month and Review Desk is $99 a month.</p>
+          <h2>Choose the account you want to keep on record.</h2>
+          <p class="plain-note">Each electric account has its own annual plan. One email address can be connected to more than one account, and commission access is free and read-only.</p>
         </div>
       </div>
 
@@ -15,7 +15,7 @@
         {% for plan in billing_plans %}
           <article class="plan-card">
             <div>
-              <p class="section-kicker">{{ plan.monthly_price_label }}</p>
+              <p class="section-kicker">{{ plan.annual_price_label }}</p>
               <h3>{{ plan.name }}</h3>
               <p class="plain-note">{{ plan.summary }}</p>
             </div>
@@ -31,6 +31,7 @@
               <form action="{{ url_for('billing_checkout') }}" method="post">
                 <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="plan_id" value="{{ plan.id }}">
+                <input type="hidden" name="account_number" value="{{ request.args.get('account_number', '') }}">
                 <button type="submit">
                   {% if billing and billing.plan_id == plan.id and billing.status in ["active", "trialing"] %}
                     Current plan

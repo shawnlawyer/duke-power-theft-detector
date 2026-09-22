@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout auth-layout">
+    <section class="section-block auth-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Check your email</p>
+          <h2>Your sign-in link is on its way.</h2>
+          <p class="plain-note">If that address is connected to Home Energy Watch or an eligible commission, we sent a one-time link. It expires in 15 minutes and works once.</p>
+        </div>
+      </div>
+      <p class="plain-note auth-note">No password is stored or reset. If you no longer control the email address, you cannot open the account with it.</p>
+      <p class="plain-note auth-note"><a class="inline-link" href="{{ url_for('login') }}">Use another email address</a>.</p>
+    </section>
+  </main>
+{% endblock %}

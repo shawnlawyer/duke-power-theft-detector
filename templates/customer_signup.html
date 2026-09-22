@@ -7,7 +7,7 @@
         <div>
           <p class="section-kicker">Home account</p>
           <h2>Start watching your energy history.</h2>
-          <p class="plain-note">Create an account, choose the workspace that fits, and add your first usage file when you are ready.</p>
+          <p class="plain-note">Create an account for one electric account, then add your first usage file when you are ready.</p>
         </div>
       </div>
 
@@ -28,7 +28,7 @@
                 value="{{ plan.id }}"
                 {% if plan.id == selected_plan_id %}checked{% endif %}
               >
-          <span>{{ plan.monthly_price_label }} · Unlimited reports while subscribed</span>
+          <span>{{ plan.annual_price_label }} · Unlimited reports while subscribed</span>
               <strong>{{ plan.name }}</strong>
               <small>{{ plan.summary }}</small>
             </label>
@@ -43,10 +43,6 @@
           <label>
             <span>Email</span>
             <input type="email" name="email" value="{{ signup_form.email }}" required>
-          </label>
-          <label>
-            <span>Password</span>
-            <input type="password" name="password" autocomplete="new-password" required>
           </label>
           <label>
             <span>Electric account number</span>
@@ -92,6 +88,7 @@
               <a class="inline-link" href="{{ url_for('privacy_page') }}" target="_blank" rel="noopener">Privacy Notice</a>.
             </label>
           </div>
+          <p class="plain-note wide-field">{{ commission_notice }}</p>
           <div class="consent-row wide-field">
             <input
               id="confirm-account-authority"
@@ -106,7 +103,7 @@
             </label>
           </div>
         </div>
-        <button type="submit">Create account and continue to payment</button>
+        <button type="submit">Create account and email me a sign-in link</button>
       </form>
 
       <p class="plain-note auth-note">

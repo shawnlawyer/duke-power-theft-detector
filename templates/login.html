@@ -7,7 +7,7 @@
         <div>
           <p class="section-kicker">Sign in</p>
           <h2>Open Home Energy Watch.</h2>
-          <p class="plain-note">Use the email and password tied to your account.</p>
+          <p class="plain-note">Enter the email address tied to your account or commission access. We will send a one-time sign-in link.</p>
         </div>
       </div>
 
@@ -15,29 +15,17 @@
         class="account-form"
         action="{{ url_for('login_post') }}"
         method="post"
-        data-passkey-login
-        data-passkey-start-url="{{ url_for('sign_in_passkey_start') }}"
-        data-passkey-finish-url="{{ url_for('sign_in_passkey_finish') }}"
       >
         <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="next" value="{{ next_url or '' }}">
         <label>
-          <span>Email</span>
+          <span>Email address</span>
           <input type="email" name="email" required>
         </label>
-        <label>
-          <span>Password</span>
-          <input type="password" name="password" required>
-        </label>
         <div class="button-row">
-          <button type="submit">Sign in</button>
-          <button type="button" class="button-secondary" data-passkey-login-button>Use a passkey</button>
+          <button type="submit">Email me a sign-in link</button>
         </div>
-        <p class="plain-note auth-note" data-passkey-status></p>
       </form>
-      <p class="plain-note auth-note">
-        <a class="inline-link" href="{{ url_for('forgot_password') }}">Forgot your password?</a>
-      </p>
     </section>
   </main>
 {% endblock %}

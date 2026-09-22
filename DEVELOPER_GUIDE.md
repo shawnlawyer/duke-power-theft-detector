@@ -73,7 +73,7 @@ Keep measurement separate from interpretation. A flagged interval is a review pr
 
 ## Authentication and authorization
 
-Customer and staff identities use separate database records, but the public `/login` flow resolves both through shared sign-in logic. Password reset starts at `/forgot-password`; the legacy `/customer/forgot-password` and `/staff/forgot-password` endpoints remain available for direct links.
+Customer and commission identities use separate database records, but the public `/login` flow resolves both through shared, one-time email-link sign-in. Legacy password-reset endpoints remain available only for migration and older platform-operator records; new customer and commission records do not store passwords.
 
 Use the existing helpers inside `create_app()`:
 
@@ -84,7 +84,7 @@ Use the existing helpers inside `create_app()`:
 
 Customer writes must be scoped to an account access record. Account notes, inventory, utility connections, imports, and reports must never be loaded by account number alone without an authorization check. Keep CSRF protection on state-changing forms; Stripe webhooks are the intentional CSRF exception.
 
-Passkeys, password resets, email verification, rate limits, staff MFA, and audit events already have persistence and tests. Extend those paths rather than creating a second authentication mechanism.
+Email tokens, passkeys, password resets, email verification, rate limits, staff MFA, and audit events already have persistence and tests. Extend those paths rather than creating a second authentication mechanism.
 
 ## Account-scoped records
 
@@ -142,10 +142,9 @@ Never put SES credentials in templates or browser JavaScript. Do not log tokens,
 
 Billing calls belong in the backend. Plans are defined by `BILLING_PLAN_DEFINITIONS` and are subscription-only:
 
-- Home Watch: `$19.99/month`
-- Review Desk: `$99/month`
+- Home Watch: `$239.88/year` per electric account
 
-Subscribers can create unlimited reports while active. Required production variables include `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_HOME`, `STRIPE_PRICE_REVIEW`, and `POWER_BILLING_ENABLED`. Keep billing closed until matching Price IDs are installed and verified. Do not create live charges, subscriptions, refunds, or provider configuration changes without explicit approval.
+Subscribers can create unlimited reports while active. Commission access is free and read-only. Required production variables include `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_HOME`, and `POWER_BILLING_ENABLED`. Keep billing closed until the annual Price ID is installed and verified. Do not create live charges, subscriptions, refunds, or provider configuration changes without explicit approval.
 
 ## Route map
 
