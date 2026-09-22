@@ -805,7 +805,7 @@ svg { display: block; max-width: 100%; }
 /* -- 10. Responsive ------------------------------------------------------ */
 
 @media (max-width: 1080px) {
-  .wb-hero { grid-template-columns: minmax(0, 1fr); gap: 32px; padding: 40px 0 36px; }
+  .wb-hero { grid-template-columns: minmax(0, 1fr); gap: 32px; padding: 40px var(--pad) 36px; }
   .wb-figure { grid-template-columns: minmax(0, 1fr); gap: 26px; }
   .wb-figure.flip > .wb-figure-body { order: 0; }
   .wb-close-inner { grid-template-columns: minmax(0, 1fr); }
