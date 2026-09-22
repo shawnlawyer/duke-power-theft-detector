@@ -775,65 +775,54 @@ def create_customer_billing_table(conn: DatabaseConnection, table_name: str = "c
 
 
 def migrate_legacy_customer_billing(conn: DatabaseConnection, default_account_id: int) -> None:
-    """Move the old person-keyed billing row into one account-keyed row per account."""
+    """Migrate only unambiguous billing mappings, retaining the original records."""
     legacy_table = "customer_billing_legacy"
     if table_exists(conn, legacy_table):
         raise RuntimeError(
             "A previous billing migration left customer_billing_legacy in place; review it before restarting."
         )
     legacy_columns = table_columns(conn, "customer_billing")
+    if table_exists(conn, "customer_billing_account_migration"):
+        raise RuntimeError("An unfinished billing migration exists; review it before restarting.")
+    mappings = []
+    mapped_accounts = set()
+    for row in conn.execute("SELECT * FROM customer_billing").fetchall():
+        explicit_account = row["account_id"] if "account_id" in legacy_columns else None
+        if explicit_account is not None:
+            accounts = conn.execute("SELECT id AS account_id FROM accounts WHERE id = ?", (explicit_account,)).fetchall()
+        else:
+            accounts = conn.execute(
+                "SELECT DISTINCT access.account_id FROM account_access_emails access "
+                "JOIN customer_users users ON users.email = access.email "
+                "WHERE users.id = ?", (row["customer_user_id"],)
+            ).fetchall()
+        if len(accounts) != 1:
+            raise RuntimeError("Legacy billing needs exactly one verified account mapping per payer; no billing records were discarded.")
+        account_id = int(accounts[0]["account_id"])
+        if account_id in mapped_accounts:
+            raise RuntimeError("Multiple billing rows map to one electric account; resolve the mapping before migration.")
+        mapped_accounts.add(account_id)
+        mappings.append((account_id, row["customer_user_id"]))
+
+    # Keep the legacy table and its constraints intact as a recovery record.
+    # A distinct new table name also avoids PostgreSQL primary-key index collisions.
+    create_customer_billing_table(conn, "customer_billing_account_migration")
+    destination_columns = [
+        "account_id", "customer_user_id", "plan_id", "subscription_status", "checkout_session_id",
+        "stripe_customer_id", "stripe_subscription_id", "stripe_payment_intent_id",
+        "stripe_payment_reference", "stripe_receipt_url", "stripe_amount_total", "stripe_currency",
+        "payments_customer_id", "payments_order_id", "payments_checkout_session_id",
+        "payments_receipt_id", "current_period_end", "created_at", "updated_at",
+    ]
+    source_columns = ["?"] + [name if name in legacy_columns else "NULL" for name in destination_columns[1:]]
+    for account_id, customer_user_id in mappings:
+        conn.execute(
+            f"INSERT INTO customer_billing_account_migration ({', '.join(destination_columns)}) "
+            f"SELECT {', '.join(source_columns)} FROM customer_billing WHERE customer_user_id = ?",
+            (account_id, customer_user_id),
+        )
     conn.execute("ALTER TABLE customer_billing RENAME TO customer_billing_legacy")
-    create_customer_billing_table(conn)
-    account_expression = (
-        "COALESCE(legacy.account_id, "
-        "(SELECT MIN(access.account_id) FROM account_access_emails access "
-        "JOIN customer_users users ON users.email = access.email "
-        "WHERE users.id = legacy.customer_user_id), ?)"
-        if "account_id" in legacy_columns
-        else "COALESCE((SELECT MIN(access.account_id) FROM account_access_emails access "
-        "JOIN customer_users users ON users.email = access.email "
-        "WHERE users.id = legacy.customer_user_id), ?)"
-    )
-    conn.execute(
-        f"""
-        WITH mapped AS (
-            SELECT legacy.*,
-                   {account_expression} AS mapped_account_id
-            FROM customer_billing_legacy legacy
-        ), ranked AS (
-            SELECT mapped.*,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY mapped_account_id
-                       ORDER BY CASE
-                           WHEN subscription_status IN ('active', 'trialing') THEN 0
-                           WHEN subscription_status = 'checkout_started' THEN 1
-                           ELSE 2
-                       END,
-                       updated_at DESC,
-                       customer_user_id
-                   ) AS row_number
-            FROM mapped
-        )
-        INSERT INTO customer_billing (
-            account_id, customer_user_id, plan_id, subscription_status, checkout_session_id,
-            stripe_customer_id, stripe_subscription_id, stripe_payment_intent_id,
-            stripe_payment_reference, stripe_receipt_url, stripe_amount_total,
-            stripe_currency, payments_customer_id, payments_order_id,
-            payments_checkout_session_id, payments_receipt_id, current_period_end,
-            created_at, updated_at
-        )
-        SELECT mapped_account_id, customer_user_id, plan_id, subscription_status, checkout_session_id,
-               stripe_customer_id, stripe_subscription_id, stripe_payment_intent_id,
-               stripe_payment_reference, stripe_receipt_url, stripe_amount_total,
-               stripe_currency, payments_customer_id, payments_order_id,
-               payments_checkout_session_id, payments_receipt_id, current_period_end,
-               created_at, updated_at
-        FROM ranked
-        WHERE row_number = 1
-        """,
-        (default_account_id,),
-    )
-    conn.execute("DROP TABLE customer_billing_legacy")
+    conn.execute("ALTER TABLE customer_billing_account_migration RENAME TO customer_billing")
 
 
 def ensure_accounts_table(conn: DatabaseConnection) -> int:
@@ -1479,9 +1468,6 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         raise RuntimeError(
             "Multiple billing rows map to one electric account; resolve the account mapping before restarting."
         )
-    conn.execute("ALTER TABLE customer_billing DROP CONSTRAINT IF EXISTS customer_billing_pkey")
-    conn.execute("ALTER TABLE customer_billing ALTER COLUMN account_id SET NOT NULL")
-    conn.execute("ALTER TABLE customer_billing ADD CONSTRAINT customer_billing_pkey PRIMARY KEY (account_id)")
     seed_commission_registry(conn)
 
 
@@ -3666,6 +3652,7 @@ def get_customer_user_by_id(customer_user_id: int | None) -> dict[str, object] |
 
 
 def create_customer_user(email: str, full_name: str, password: str | None = None) -> dict[str, object]:
+    # Empty hashes disable password authentication and support legacy NOT NULL schemas.
     normalized_email = clean_email(email)
     normalized_name = (full_name or "").strip() or normalized_email
     timestamp = timestamp_now()
@@ -3683,7 +3670,7 @@ def create_customer_user(email: str, full_name: str, password: str | None = None
                 email, full_name, password_hash, is_active, email_verified_at, auth_version,
                 created_at, updated_at, last_login_at
             )
-            VALUES (?, ?, NULL, 1, ?, 1, ?, ?, NULL)
+            VALUES (?, ?, '', 1, ?, 1, ?, ?, NULL)
             """,
             (
                 normalized_email,
@@ -4000,7 +3987,7 @@ def ensure_customer_user_for_email(email: str, full_name: str | None = None) -> 
                 email, full_name, password_hash, is_active, email_verified_at,
                 auth_version, created_at, updated_at, last_login_at
             )
-            VALUES (?, ?, NULL, 1, NULL, 1, ?, ?, NULL)
+            VALUES (?, ?, '', 1, NULL, 1, ?, ?, NULL)
             """,
             (normalized_email, (full_name or "").strip() or normalized_email, timestamp, timestamp),
         )
@@ -8198,6 +8185,7 @@ def create_customer_signup(
     evidence_remote_hash: str | None = None,
     evidence_user_agent_hash: str | None = None,
     meter_value: str | None = None,
+    authenticated_customer_user_id: int | None = None,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     normalized_email = clean_email(email)
     normalized_name = (full_name or "").strip() or normalized_email
@@ -8224,6 +8212,11 @@ def create_customer_signup(
             "SELECT id, email, full_name, is_active, email_verified_at, auth_version, last_login_at FROM customer_users WHERE email = ?",
             (normalized_email,),
         ).fetchone()
+        if existing_user is not None and (
+            authenticated_customer_user_id != int(existing_user["id"])
+            or not bool(existing_user["is_active"])
+        ):
+            raise ValueError("Sign in with your email link before adding another electric account.")
         existing_account = conn.execute(
             "SELECT id FROM accounts WHERE account_number = ?",
             (normalized_account_number,),
@@ -8238,7 +8231,7 @@ def create_customer_signup(
                     email, full_name, password_hash, is_active, email_verified_at, auth_version,
                     created_at, updated_at, last_login_at
                 )
-                VALUES (?, ?, NULL, 1, ?, 1, ?, ?, NULL)
+                VALUES (?, ?, '', 1, ?, 1, ?, ?, NULL)
                 """,
                 (normalized_email, normalized_name, email_verified_at, timestamp, timestamp),
             )
@@ -12291,6 +12284,7 @@ def create_web_app() -> Flask:
                 confirm_account_authority=confirm_account_authority,
                 evidence_remote_hash=request_remote_hash(),
                 evidence_user_agent_hash=request_user_agent_hash(),
+                authenticated_customer_user_id=(current_customer_user() or {}).get("id"),
             )
         except Exception as exc:
             flash(str(exc))
