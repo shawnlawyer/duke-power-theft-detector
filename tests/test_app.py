@@ -2359,6 +2359,14 @@ class FakeStripeCheckout:
     Session = FakeStripeCheckoutSession
 
 
+class FakeStripePrice:
+    retrieve_result = {"active": True, "unit_amount": 23988, "currency": "usd", "recurring": {"interval": "year", "interval_count": 1}, "livemode": False}
+
+    @classmethod
+    def retrieve(cls, _price_id):
+        return cls.retrieve_result
+
+
 class FakeStripeBillingPortal:
     Session = FakeStripeBillingPortalSession
 
@@ -2425,6 +2433,7 @@ class FakeStripePromotionCode:
 
 class FakeStripe:
     checkout = FakeStripeCheckout
+    Price = FakeStripePrice
     billing_portal = FakeStripeBillingPortal
     Webhook = FakeStripeWebhook
     Account = FakeStripeAccount
@@ -2435,6 +2444,7 @@ class FakeStripe:
 
 
 def install_fake_stripe(monkeypatch):
+    FakeStripePrice.retrieve_result = {"active": True, "unit_amount": 23988, "currency": "usd", "recurring": {"interval": "year", "interval_count": 1}, "livemode": False}
     FakeStripeCheckoutSession.calls = []
     FakeStripeCheckoutSession.retrieve_result = None
     FakeStripeBillingPortalSession.calls = []
@@ -2582,6 +2592,20 @@ def test_customer_signup_paid_plan_redirects_to_stripe_checkout(tmp_path, monkey
     assert billing["stripe_customer_id"] == "cus_123"
     assert billing["stripe_subscription_id"] == "sub_123"
     assert billing["stripe_payment_reference"] == "cs_test_123"
+
+
+def test_customer_checkout_rejects_monthly_price(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    install_fake_stripe(monkeypatch)
+    customer = app.create_customer_user("owner@example.com", "Owner")
+    authorize_account("duke-checkout", email="owner@example.com")
+    FakeStripePrice.retrieve_result = {
+        "active": True, "unit_amount": 1900, "currency": "usd",
+        "recurring": {"interval": "month", "interval_count": 1}, "livemode": False,
+    }
+    with pytest.raises(ValueError, match="annual account price"):
+        app.create_customer_checkout_session(customer, "home", "https://app.homeenergywatch.com", "duke-checkout")
+    assert FakeStripeCheckoutSession.calls == []
 
 
 def test_customer_checkout_redirects_to_stripe_checkout_session(tmp_path, monkeypatch):
@@ -3890,6 +3914,31 @@ def test_successful_login_rotates_session_state(tmp_path, monkeypatch):
     assert saved_session["customer_user_id"] == int(customer["id"])
     assert saved_session["_permanent"] is True
     assert "attacker_marker" not in saved_session
+
+
+@pytest.mark.parametrize("actor,path", [("customer", "/customer"), ("staff", "/")])
+def test_signed_in_session_ends_24_hours_after_login(tmp_path, monkeypatch, actor, path):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+    if actor == "customer":
+        app.create_customer_user("owner@example.com", "Owner")
+        customer_sign_in(client)
+    else:
+        sign_in(client)
+    with client.session_transaction() as browser_session:
+        signed_in_at = browser_session["authenticated_at"]
+        browser_session["authenticated_at"] = signed_in_at - (24 * 60 * 60 - 1)
+    assert client.get(path).status_code == 200
+    with client.session_transaction() as browser_session:
+        assert browser_session["authenticated_at"] == signed_in_at - (24 * 60 * 60 - 1)
+        browser_session["authenticated_at"] = signed_in_at - 24 * 60 * 60
+    response = client.get(path, follow_redirects=False)
+    assert response.status_code == 302
+    assert "/login" in response.headers["Location"]
+    with client.session_transaction() as browser_session:
+        assert "customer_user_id" not in browser_session
+        assert "staff_user_id" not in browser_session
 
 
 def test_login_rejects_protocol_relative_next_redirect(tmp_path, monkeypatch):

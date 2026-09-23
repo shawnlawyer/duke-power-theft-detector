@@ -5142,6 +5142,18 @@ def create_customer_checkout_session(
     price_id = get_stripe_price_id(plan)
     if not price_id:
         raise ValueError("Payment is not connected for that plan yet.")
+    verify_configured_stripe_account()
+    price = stripe.Price.retrieve(price_id)
+    recurring = extract_mapping_value(price, "recurring")
+    if (
+        not extract_mapping_value(price, "active")
+        or extract_mapping_value(price, "unit_amount") != 23988
+        or extract_mapping_value(price, "currency") != "usd"
+        or extract_mapping_value(recurring, "interval") != "year"
+        or extract_mapping_value(recurring, "interval_count") != 1
+        or bool(extract_mapping_value(price, "livemode")) != get_stripe_secret_key().startswith("sk_live_")
+    ):
+        raise ValueError("The annual account price is not configured correctly. Payment cannot start.")
     metadata = build_stripe_metadata(customer_user, plan)
     metadata["account_id"] = str(account_id)
     session_obj = stripe.checkout.Session.create(
@@ -11590,7 +11602,8 @@ def create_web_app() -> Flask:
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=is_production_environment(),
         SESSION_COOKIE_NAME="home_energy_watch_session",
-        PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+        PERMANENT_SESSION_LIFETIME=timedelta(hours=24),
+        SESSION_REFRESH_EACH_REQUEST=False,
     )
     if (os.getenv("POWER_TRUST_PROXY") or "").strip().lower() in {"1", "true", "yes"}:
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
@@ -11627,6 +11640,18 @@ def create_web_app() -> Flask:
     def establish_request_context():
         g.request_id = uuid4().hex
         g.request_started_at = time.perf_counter()
+
+    @app.before_request
+    def expire_authenticated_session():
+        if not (session.get("staff_user_id") or session.get("customer_user_id")):
+            return None
+        try:
+            age_seconds = int(time.time()) - int(session["authenticated_at"])
+        except (KeyError, TypeError, ValueError):
+            age_seconds = 24 * 60 * 60
+        if age_seconds < 0 or age_seconds >= 24 * 60 * 60:
+            session.clear()
+        return None
 
     @app.before_request
     def enforce_csrf_protection():
@@ -11739,6 +11764,7 @@ def create_web_app() -> Flask:
         session.permanent = True
         session["staff_user_id"] = int(staff_user["id"])
         session["staff_auth_version"] = int(staff_user.get("auth_version") or 1)
+        session["authenticated_at"] = int(time.time())
 
     def establish_pending_staff_mfa_session(staff_user: dict[str, object], next_url: str) -> None:
         session.clear()
@@ -12087,6 +12113,7 @@ def create_web_app() -> Flask:
         session.permanent = True
         session["customer_user_id"] = int(customer_user["id"])
         session["customer_auth_version"] = int(customer_user.get("auth_version") or 1)
+        session["authenticated_at"] = int(time.time())
 
     def render_verification_notice(email: str | None = None):
         pending_email = (email or session.get("pending_verification_email") or "").strip()
@@ -12243,6 +12270,7 @@ def create_web_app() -> Flask:
         session.permanent = True
         session["staff_user_id"] = int(staff_user["id"])
         session["staff_auth_version"] = int(staff_user.get("auth_version") or 1)
+        session["authenticated_at"] = int(time.time())
         record_audit_event(
             "staff.first_run_completed",
             actor_type="staff",
@@ -13621,6 +13649,7 @@ def create_web_app() -> Flask:
         session.permanent = True
         session["staff_user_id"] = int(staff_user["id"])
         session["staff_auth_version"] = int(staff_user.get("auth_version") or 1)
+        session["authenticated_at"] = int(time.time())
         record_audit_event(
             "staff.invite_accepted",
             actor_type="staff",
