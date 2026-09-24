@@ -2916,6 +2916,22 @@ def test_marketing_host_redirects_app_routes_to_app_subdomain(tmp_path, monkeypa
     assert response.headers["Location"] == "https://app.homeenergywatch.com/login"
 
 
+def test_marketing_commissions_page_uses_customer_facing_sign_in_copy(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+
+    response = client.get("/for-commissions", base_url="https://homeenergywatch.com")
+
+    assert response.status_code == 200
+    assert b"Pick up your review where you left off." in response.data
+    assert b"Sign in to review account history, compare usage periods" in response.data
+    assert b'href="https://app.homeenergywatch.com/login"' in response.data
+    assert b">Sign in</a>" in response.data
+    assert b"app subdomain" not in response.data
+    assert b"Commission sign in" not in response.data
+
+
 def test_marketing_host_exposes_indexable_robots_and_sitemap(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
