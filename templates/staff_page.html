@@ -3,5 +3,21 @@
 {% block content %}
   <main class="app-layout">
     {% include "_staff_panel.html" %}
+    {% if staff_user.role == "Commissioner" %}
+    <section class="section-block">
+      <div class="section-header"><div><p class="section-kicker">Referral partners</p><h2>Affiliate accounts</h2><p class="plain-note">Create a referral code and set the percentage recorded for eligible paid subscriptions. Payments are reviewed before any payout.</p></div></div>
+      <form class="account-form" action="{{ url_for('create_affiliate') }}" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <div class="field-grid">
+          <label><span>Name</span><input name="name" required></label>
+          <label><span>Email</span><input name="email" type="email" required></label>
+          <label><span>Referral code</span><input name="slug" pattern="[A-Za-z0-9-]+" required></label>
+          <label><span>Percentage</span><input name="commission_percent" type="number" min="0" max="100" step="0.01" value="10" required></label>
+        </div>
+        <button type="submit">Create referral partner</button>
+      </form>
+      <div class="table-wrap compact-table"><table><thead><tr><th>Partner</th><th>Link</th><th>Rate</th><th>Status</th></tr></thead><tbody>{% for affiliate in affiliates %}<tr><td>{{ affiliate.name }}<div class="table-note">{{ affiliate.email }}</div></td><td><code>{{ request.url_root.rstrip('/') }}/r/{{ affiliate.slug }}</code></td><td>{{ affiliate.commission_percent }}%</td><td>{{ affiliate.status }}</td></tr>{% else %}<tr><td colspan="4">No referral partners yet.</td></tr>{% endfor %}</tbody></table></div>
+    </section>
+    {% endif %}
   </main>
 {% endblock %}
