@@ -1,12 +1,27 @@
 {% extends "marketing_base.html" %}
 {% block content %}
-<main class="marketing-main">
-  <section class="marketing-hero">
-    <p class="eyebrow">Referral partners</p>
-    <h1>Help someone make sense of their energy history.</h1>
-    <p>Share Home Energy Watch with homeowners who want a clearer record of their utility data. Approved partners receive a percentage of eligible subscription payments attributed to their referral link.</p>
-    <p>To become a partner, contact us with your name and the email address you would like associated with your account.</p>
-    <a class="button button-primary" href="mailto:hello@homeenergywatch.com?subject=Home%20Energy%20Watch%20referral%20partner">Ask about becoming a partner</a>
+<main class="marketing-main affiliate-page">
+  <section class="affiliate-intro">
+    <p class="sharp-eyebrow">Referral partners</p>
+    <h1>Tell someone about Home Energy Watch. Get paid when they sign up.</h1>
+    <p>Whether you tell one friend or build a serious referral business, you get a personal link to share. Every eligible paid subscription attributed to your link is recorded as a commission for you.</p>
+  </section>
+  <section class="affiliate-grid">
+    <div class="affiliate-explainer">
+      <h2>Start small or make it a real income stream.</h2>
+      <p>One referral might earn you a little extra. A hundred customers could become a meaningful monthly or annual income stream. You do not need a website or an audience to get started.</p>
+      <p>Commissions are recorded after a successful payment and paid using the method you provide. We do not offer refunds on subscriptions.</p>
+    </div>
+    <form class="affiliate-form" action="{{ url_for('affiliate_apply') }}" method="post">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+      <h2>Get your referral link</h2>
+      <label><span>Your name</span><input name="name" required autocomplete="name"></label>
+      <label><span>Email address</span><input name="email" type="email" required autocomplete="email"></label>
+      <label><span>How should we pay you?</span><select name="payout_method" required><option value="">Choose one</option><option value="paypal">PayPal</option><option value="venmo">Venmo</option><option value="other">Another method</option></select></label>
+      <label><span>Payout email or handle</span><input name="payout_destination" required placeholder="Where should payments go?"></label>
+      <button class="button button-primary" type="submit">Create my referral link</button>
+      <p class="affiliate-form-note">Your link starts at a 10% commission rate. Commission settings can be adjusted by the Home Energy Watch team.</p>
+    </form>
   </section>
 </main>
 {% endblock %}

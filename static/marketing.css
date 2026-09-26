@@ -78,6 +78,20 @@ svg { display: block; max-width: 100%; }
 .marketing-shell { display: flex; flex-direction: column; min-height: 100vh; }
 .marketing-main { flex: 1; }
 
+.affiliate-page { max-width: var(--page); margin: 0 auto; padding: 64px var(--pad) 88px; }
+.affiliate-intro { max-width: 760px; padding-bottom: 42px; border-bottom: 1px solid var(--rule); }
+.affiliate-intro h1 { margin-top: 14px; font-size: clamp(32px, 5vw, 56px); line-height: 1.04; }
+.affiliate-intro > p:last-child { margin-top: 20px; max-width: 62ch; font-size: 17px; color: var(--ink-2); }
+.affiliate-grid { display: grid; grid-template-columns: minmax(0, .85fr) minmax(340px, 1fr); gap: 64px; align-items: start; padding-top: 48px; }
+.affiliate-explainer { padding-top: 10px; max-width: 48ch; }
+.affiliate-explainer h2, .affiliate-form h2 { font-size: 22px; line-height: 1.18; }
+.affiliate-explainer p { margin-top: 18px; font-size: 15px; color: var(--ink-2); }
+.affiliate-form { display: grid; gap: 16px; padding: 28px; border: 1px solid var(--rule-strong); background: var(--paper-raised); box-shadow: 0 10px 24px rgba(25,26,23,.06); }
+.affiliate-form h2 { margin-bottom: 4px; }
+.affiliate-form label { display: grid; gap: 6px; font-size: 12px; font-family: var(--mono); color: var(--ink-2); }
+.affiliate-form input, .affiliate-form select { width: 100%; min-height: 42px; padding: 8px 10px; border: 1px solid var(--rule-strong); border-radius: var(--radius); background: var(--paper); color: var(--ink); font: 15px var(--sans); }
+.affiliate-form-note { font-size: 12px; color: var(--ink-3); }
+
 /* -- 2. Primitives ------------------------------------------------------- */
 
 .wb-wrap { width: 100%; max-width: var(--page); margin: 0 auto; padding: 0 var(--pad); }
@@ -836,4 +850,7 @@ svg { display: block; max-width: 100%; }
   .wb-rate-row > div:last-child { border-bottom: 0; }
   .wb-rate-row.head { display: none; }
   .marketing-header { position: static; }
+  .affiliate-page { padding-top: 42px; padding-bottom: 60px; }
+  .affiliate-grid { grid-template-columns: minmax(0, 1fr); gap: 34px; padding-top: 34px; }
+  .affiliate-form { padding: 22px; }
 }
