@@ -831,6 +831,70 @@ def create_customer_billing_table(conn: DatabaseConnection, table_name: str = "c
     )
 
 
+def ensure_affiliate_tables(conn: DatabaseConnection) -> None:
+    numeric_type = "BIGINT" if conn.kind == "postgres" else "INTEGER"
+    id_type = "BIGSERIAL PRIMARY KEY" if conn.kind == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS affiliate_accounts (
+            id {id_type}, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, email TEXT NOT NULL,
+            commission_percent NUMERIC NOT NULL DEFAULT 10, status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS affiliate_commissions (
+            id {id_type}, affiliate_id {numeric_type} NOT NULL, customer_user_id {numeric_type},
+            account_id {numeric_type}, stripe_event_id TEXT NOT NULL UNIQUE, stripe_reference TEXT,
+            gross_amount {numeric_type} NOT NULL, commission_percent NUMERIC NOT NULL,
+            commission_amount {numeric_type} NOT NULL, currency TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            FOREIGN KEY(affiliate_id) REFERENCES affiliate_accounts(id),
+            FOREIGN KEY(customer_user_id) REFERENCES customer_users(id),
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_affiliate_commissions_affiliate ON affiliate_commissions (affiliate_id, created_at)")
+
+
+def list_affiliate_accounts() -> list[dict[str, object]]:
+    with get_db_connection() as conn:
+        rows = conn.execute("SELECT * FROM affiliate_accounts ORDER BY name, id").fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_affiliate_by_slug(slug: str | None) -> dict[str, object] | None:
+    normalized = re.sub(r"[^a-z0-9-]", "", (slug or "").strip().lower())
+    if not normalized:
+        return None
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT * FROM affiliate_accounts WHERE slug = ? AND status = 'active'", (normalized,)).fetchone()
+    return dict(row) if row else None
+
+
+def create_affiliate_account(name: str, email: str, slug: str, commission_percent: str) -> dict[str, object]:
+    normalized_slug = re.sub(r"[^a-z0-9-]", "", slug.strip().lower())
+    if not normalized_slug:
+        raise ValueError("Choose a referral code using letters, numbers, or hyphens.")
+    percent = float(commission_percent)
+    if percent < 0 or percent > 100:
+        raise ValueError("The referral percentage must be between 0 and 100.")
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        conn.execute("INSERT INTO affiliate_accounts (slug, name, email, commission_percent, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)", (normalized_slug, name.strip(), clean_email(email), percent, timestamp, timestamp))
+        conn.commit()
+        row = conn.execute("SELECT * FROM affiliate_accounts WHERE slug = ?", (normalized_slug,)).fetchone()
+    return dict(row)
+
+
+def record_affiliate_commission(affiliate: dict[str, object], event_id: str, customer_user_id: int | None, gross_amount: int, currency: str, reference: str | None = None) -> None:
+    percent = float(affiliate.get("commission_percent") or 0)
+    amount = round(gross_amount * percent / 100)
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        conn.execute("INSERT INTO affiliate_commissions (affiliate_id, customer_user_id, stripe_event_id, stripe_reference, gross_amount, commission_percent, commission_amount, currency, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?) ON CONFLICT(stripe_event_id) DO NOTHING", (affiliate["id"], customer_user_id, event_id, reference, gross_amount, percent, amount, currency.upper(), timestamp, timestamp))
+        conn.commit()
+
+
 def migrate_legacy_customer_billing(conn: DatabaseConnection, default_account_id: int) -> None:
     """Migrate only unambiguous billing mappings, retaining the original records."""
     legacy_table = "customer_billing_legacy"
@@ -1494,6 +1558,7 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_receipt_url TEXT")
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_amount_total BIGINT")
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS stripe_currency TEXT")
+    ensure_affiliate_tables(conn)
     conn.execute("ALTER TABLE customer_billing ADD COLUMN IF NOT EXISTS account_id BIGINT")
     conn.execute(
         """
@@ -2208,6 +2273,7 @@ def migrate_database(conn: DatabaseConnection) -> None:
         conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_amount_total INTEGER")
     if "stripe_currency" not in billing_columns:
         conn.execute("ALTER TABLE customer_billing ADD COLUMN stripe_currency TEXT")
+    ensure_affiliate_tables(conn)
     if "account_id" not in billing_columns:
         conn.execute("ALTER TABLE customer_billing ADD COLUMN account_id INTEGER")
         conn.execute(
@@ -5343,7 +5409,7 @@ def configure_stripe() -> None:
 
 def build_stripe_metadata(customer_user: dict[str, object], plan: dict[str, object], account_id: int | None = None) -> dict[str, str]:
     customer_user_id = str(customer_user["id"])
-    return {
+    metadata = {
         "project": "home-energy-watch",
         "project_name": "Home Energy Watch",
         "project_domain": "app.homeenergywatch.com",
@@ -5352,6 +5418,10 @@ def build_stripe_metadata(customer_user: dict[str, object], plan: dict[str, obje
         "billing_interval": str(plan["billing_interval"]),
         "reference": f"customer_billing:{customer_user_id}:{plan['id']}",
     }
+    affiliate_slug = str(session.get("affiliate_slug") or "") if has_request_context() else ""
+    if affiliate_slug and get_affiliate_by_slug(affiliate_slug):
+        metadata["affiliate_slug"] = affiliate_slug
+    return metadata
 
 
 def create_customer_checkout_session(
@@ -5557,6 +5627,17 @@ def handle_stripe_event(event: object) -> None:
             stripe_amount_total=extract_stripe_amount_total(event_object),
             stripe_currency=extract_stripe_currency(event_object),
         )
+        affiliate = get_affiliate_by_slug(str(metadata.get("affiliate_slug") or ""))
+        amount = extract_stripe_amount_total(event_object)
+        if affiliate is not None and amount is not None and str(extract_mapping_value(event_object, "payment_status") or "") in {"paid", "no_payment_required"}:
+            record_affiliate_commission(
+                affiliate,
+                normalize_stripe_id(event_object),
+                int(customer_user_id),
+                amount,
+                extract_stripe_currency(event_object) or "usd",
+                resolve_stripe_payment_reference(event_object),
+            )
         return
 
     if event_type in {"customer.subscription.updated", "customer.subscription.deleted"}:
@@ -11983,6 +12064,7 @@ def create_web_app() -> Flask:
         "terms_page",
         "privacy_page",
         "utility_data_authorization_page",
+        "affiliate_page",
         "robots_txt",
         "sitemap_xml",
         "health",
@@ -12341,12 +12423,31 @@ def create_web_app() -> Flask:
             "terms_url": build_absolute_url(marketing_base_url, "/terms"),
             "privacy_url": build_absolute_url(marketing_base_url, "/privacy"),
             "utility_authorization_url": build_absolute_url(marketing_base_url, "/utility-data-authorization"),
+            "affiliate_url": build_absolute_url(marketing_base_url, "/affiliate"),
             "start_home_url": build_absolute_url(app_base_url, "/signup"),
             "home_login_url": build_absolute_url(app_base_url, "/login"),
             "commission_login_url": build_absolute_url(app_base_url, "/login"),
             "canonical_url": build_absolute_url(marketing_base_url, request.path),
             "robots_meta": "index,follow",
         }
+
+    @app.get("/affiliate")
+    def affiliate_page():
+        return render_template(
+            "marketing_affiliate.html",
+            **build_marketing_page_context(
+                page_title="Become a referral partner",
+                page_description="Share Home Energy Watch with people who need a clearer record of their household energy use.",
+                active_page="affiliate",
+            ),
+        )
+
+    @app.get("/r/<slug>")
+    def affiliate_referral(slug: str):
+        affiliate = get_affiliate_by_slug(slug)
+        if affiliate is not None:
+            session["affiliate_slug"] = str(affiliate["slug"])
+        return redirect(url_for("signup"))
 
     def build_staff_account_context(page_title: str, setup_section: str | None = None) -> dict[str, object]:
         ensure_data_dirs()
@@ -14308,10 +14409,28 @@ def create_web_app() -> Flask:
             return staff_user
         return render_template(
             "staff_page.html",
+            staff_user=staff_user,
             staff_team=list_staff_users(),
+            affiliates=list_affiliate_accounts(),
             latest_invite_url=consume_latest_invite_url(),
             page_title="Staff",
         )
+
+    @app.post("/staff/affiliates")
+    def create_affiliate():
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        try:
+            affiliate = create_affiliate_account(
+                request.form.get("name", ""), request.form.get("email", ""),
+                request.form.get("slug", ""), request.form.get("commission_percent", "10"),
+            )
+            record_audit_event("affiliate.created", actor_type="staff", actor_id=int(staff_user["id"]), target_type="affiliate_account", target_id=affiliate["id"], metadata={"slug": affiliate["slug"]})
+            flash("Referral partner created.")
+        except Exception as exc:
+            flash(str(exc))
+        return redirect(url_for("staff_page"))
 
     @app.get("/audit")
     def audit_page():
