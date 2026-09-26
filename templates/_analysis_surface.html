@@ -435,6 +435,52 @@
         <script id="initial-day-detail" type="application/json">{{ analysis.initial_day_detail|tojson }}</script>
       </section>
 
+      <section class="section-block assistant-panel" id="household-assistant" data-api-url="{{ url_for('api_household_assistant') }}" data-history-url="{{ url_for('api_household_assistant_history') }}" data-account-number="{{ analysis.account.account_number }}">
+        <div class="section-header">
+          <div>
+            <p class="section-kicker">Household guide</p>
+            <h2>Ask what happened</h2>
+            <p class="plain-note">Ask about a date, a spike, an appliance, or a change in the house. You can type or speak.</p>
+          </div>
+        </div>
+        <div class="assistant-controls">
+          <label>
+            <span>Question</span>
+            <textarea id="household-question" rows="3" placeholder="What happened on January 12?" aria-label="Household question"></textarea>
+          </label>
+          <label>
+            <span>Date, if relevant</span>
+            <input id="household-question-date" type="date" aria-label="Question date">
+          </label>
+          <div class="assistant-actions">
+            <button type="button" class="button-secondary" id="household-speak">Speak</button>
+            <button type="button" id="household-ask">Ask</button>
+            <button type="button" class="button-secondary" id="household-stop-speaking" hidden>Stop reading</button>
+          </div>
+        </div>
+        <p class="plain-note" id="household-speech-status" role="status"></p>
+        <div class="assistant-answer" id="household-answer" aria-live="polite">Your answer will appear here.</div>
+        <div class="assistant-history" id="household-assistant-history" hidden></div>
+      </section>
+
+      <section class="section-block assistant-panel" id="household-onboarding" data-proposal-url="{{ url_for('api_equipment_proposal') }}" data-confirm-url="{{ url_for('api_confirm_equipment_proposal') }}" data-account-number="{{ analysis.account.account_number }}">
+        <div class="section-header">
+          <div>
+            <p class="section-kicker">Household onboarding</p>
+            <h2>Tell us what is in the house</h2>
+            <p class="plain-note">Describe your heating, cooling, water heating, appliances, lights, computers, and replacements. We will show you the proposed timeline before saving it.</p>
+          </div>
+        </div>
+        <textarea id="household-onboarding-statement" rows="5" placeholder="I had an 80-gallon electric water heater until January. Then I installed a gas tankless heater. I use a small electric tankless heater in the summer, and my greenhouse lights run all the time."></textarea>
+        <div class="assistant-actions">
+          <button type="button" class="button-secondary" id="household-onboarding-speak">Speak</button>
+          <button type="button" id="household-onboarding-propose">Build my timeline</button>
+        </div>
+        <p class="plain-note" id="household-onboarding-status" role="status"></p>
+        <div id="household-onboarding-proposal" class="assistant-answer" hidden></div>
+        <button type="button" id="household-onboarding-confirm" hidden>Save confirmed timeline</button>
+      </section>
+
       <section class="section-block inventory-overview">
         <div class="section-header">
           <div>

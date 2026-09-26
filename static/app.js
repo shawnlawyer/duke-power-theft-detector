@@ -1370,6 +1370,221 @@
   renderSpikeIntervals();
   applyDayExplorerState();
   updateLoadTest();
+
+  const assistant = document.getElementById("household-assistant");
+  const assistantQuestion = document.getElementById("household-question");
+  const assistantDate = document.getElementById("household-question-date");
+  const assistantAsk = document.getElementById("household-ask");
+  const assistantSpeak = document.getElementById("household-speak");
+  const assistantStop = document.getElementById("household-stop-speaking");
+  const assistantAnswer = document.getElementById("household-answer");
+  const assistantStatus = document.getElementById("household-speech-status");
+  const assistantHistory = document.getElementById("household-assistant-history");
+  let speechRecognition = null;
+
+  function readAssistantAnswer(text) {
+    if (!window.speechSynthesis || !text) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.96;
+    utterance.onstart = () => { if (assistantStop) assistantStop.hidden = false; };
+    utterance.onend = () => { if (assistantStop) assistantStop.hidden = true; };
+    window.speechSynthesis.speak(utterance);
+  }
+
+  if (assistantAsk && assistant) {
+    assistantAsk.addEventListener("click", async () => {
+      const question = (assistantQuestion?.value || "").trim();
+      if (!question) return;
+      assistantAsk.disabled = true;
+      if (assistantStatus) assistantStatus.textContent = "Checking the meter history and household model.";
+      try {
+        const response = await fetch(assistant.dataset.apiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ account_number: assistant.dataset.accountNumber, question, date: assistantDate?.value || null }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "The household answer was unavailable.");
+        if (assistantAnswer) assistantAnswer.textContent = payload.answer;
+        if (assistantStatus) assistantStatus.textContent = payload.bedrock ? "Answer prepared from the household record." : "Answer prepared from the household record and deterministic estimates.";
+        readAssistantAnswer(payload.answer);
+      } catch (error) {
+        if (assistantAnswer) assistantAnswer.textContent = error.message;
+        if (assistantStatus) assistantStatus.textContent = "The question could not be answered.";
+      } finally {
+        assistantAsk.disabled = false;
+      }
+    });
+  }
+
+  if (assistantSpeak) {
+    assistantSpeak.addEventListener("click", () => {
+      if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
+        if (assistantStatus) assistantStatus.textContent = "Speech input is not available in this browser. You can type the question instead.";
+        return;
+      }
+      const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      speechRecognition?.stop();
+      speechRecognition = new Recognition();
+      speechRecognition.lang = document.documentElement.lang || "en-US";
+      speechRecognition.interimResults = false;
+      speechRecognition.onstart = () => { if (assistantStatus) assistantStatus.textContent = "Listening…"; };
+      speechRecognition.onresult = (event) => {
+        const transcript = event.results?.[0]?.[0]?.transcript || "";
+        if (assistantQuestion) assistantQuestion.value = transcript;
+        if (assistantStatus) assistantStatus.textContent = "I heard your question. Press Ask to continue.";
+      };
+      speechRecognition.onerror = () => { if (assistantStatus) assistantStatus.textContent = "I could not hear that. Try again or type the question."; };
+      speechRecognition.start();
+    });
+  }
+
+  if (assistantStop) {
+    assistantStop.addEventListener("click", () => {
+      window.speechSynthesis?.cancel();
+      assistantStop.hidden = true;
+    });
+  }
+
+  async function loadAssistantHistory() {
+    if (!assistant?.dataset.historyUrl || !assistantHistory) return;
+    try {
+      const response = await fetch(`${assistant.dataset.historyUrl}?account_number=${encodeURIComponent(assistant.dataset.accountNumber)}`);
+      const payload = await response.json();
+      const items = payload.interactions || [];
+      if (!items.length) return;
+      assistantHistory.innerHTML = "";
+      const heading = document.createElement("h3");
+      heading.textContent = "Previous questions";
+      assistantHistory.appendChild(heading);
+      items.forEach((item) => {
+        const entry = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = item.question_date ? `${item.question_date}: ${item.question}` : item.question;
+        const answer = document.createElement("p");
+        answer.textContent = item.answer;
+        entry.append(summary, answer);
+        assistantHistory.appendChild(entry);
+      });
+      assistantHistory.hidden = false;
+    } catch (error) {
+      // Conversation history is supplementary; keep the question flow available.
+    }
+  }
+  loadAssistantHistory();
+
+  const onboarding = document.getElementById("household-onboarding");
+  const onboardingStatement = document.getElementById("household-onboarding-statement");
+  const onboardingPropose = document.getElementById("household-onboarding-propose");
+  const onboardingSpeak = document.getElementById("household-onboarding-speak");
+  const onboardingProposal = document.getElementById("household-onboarding-proposal");
+  const onboardingConfirm = document.getElementById("household-onboarding-confirm");
+  const onboardingStatus = document.getElementById("household-onboarding-status");
+  let currentProposal = [];
+
+  function renderOnboardingProposal(proposal) {
+    currentProposal = proposal || [];
+    if (!onboardingProposal) return;
+    onboardingProposal.innerHTML = "";
+    if (!currentProposal.length) {
+      onboardingProposal.textContent = "I did not find a clear equipment record. Add more detail and try again.";
+      onboardingProposal.hidden = false;
+      if (onboardingConfirm) onboardingConfirm.hidden = true;
+      return;
+    }
+    const intro = document.createElement("p");
+    intro.textContent = "Review these proposed records. Add an active date before saving.";
+    onboardingProposal.appendChild(intro);
+    currentProposal.forEach((item, index) => {
+      const row = document.createElement("div");
+      row.className = "assistant-proposal-row";
+      const title = document.createElement("strong");
+      title.textContent = `${item.label || "Equipment"} (${item.fuel_type || "electric"})`;
+      row.appendChild(title);
+      const detail = document.createElement("span");
+      detail.textContent = ` ${item.watts_each || 0} W typical; ${item.confidence || "estimated"}`;
+      row.appendChild(detail);
+      const date = document.createElement("input");
+      date.type = "date";
+      date.dataset.proposalIndex = String(index);
+      date.value = item.active_from || "";
+      date.setAttribute("aria-label", `Active date for ${item.label || "equipment"}`);
+      row.appendChild(date);
+      onboardingProposal.appendChild(row);
+    });
+    onboardingProposal.hidden = false;
+    if (onboardingConfirm) onboardingConfirm.hidden = false;
+  }
+
+  if (onboardingPropose && onboarding) {
+    onboardingPropose.addEventListener("click", async () => {
+      const statement = (onboardingStatement?.value || "").trim();
+      if (!statement) return;
+      onboardingPropose.disabled = true;
+      if (onboardingStatus) onboardingStatus.textContent = "Reading your description and building a proposed timeline.";
+      try {
+        const response = await fetch(onboarding.dataset.proposalUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ account_number: onboarding.dataset.accountNumber, statement }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "The equipment proposal was unavailable.");
+        renderOnboardingProposal(payload.proposal);
+        if (onboardingStatus) onboardingStatus.textContent = "Review the proposed records before saving them.";
+      } catch (error) {
+        if (onboardingStatus) onboardingStatus.textContent = error.message;
+      } finally {
+        onboardingPropose.disabled = false;
+      }
+    });
+  }
+
+  if (onboardingConfirm && onboarding) {
+    onboardingConfirm.addEventListener("click", async () => {
+      const dates = Array.from(onboardingProposal?.querySelectorAll("input[data-proposal-index]") || []);
+      const proposal = currentProposal.map((item, index) => ({ ...item, active_from: dates[index]?.value || item.active_from }));
+      onboardingConfirm.disabled = true;
+      try {
+        const response = await fetch(onboarding.dataset.confirmUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ account_number: onboarding.dataset.accountNumber, proposal }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "The timeline could not be saved.");
+        if (onboardingStatus) onboardingStatus.textContent = "The confirmed equipment timeline was saved.";
+        onboardingConfirm.hidden = true;
+      } catch (error) {
+        if (onboardingStatus) onboardingStatus.textContent = error.message;
+      } finally {
+        onboardingConfirm.disabled = false;
+      }
+    });
+  }
+
+  if (onboardingSpeak) {
+    onboardingSpeak.addEventListener("click", () => {
+      const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!Recognition) {
+        if (onboardingStatus) onboardingStatus.textContent = "Speech input is not available in this browser. You can type the description instead.";
+        return;
+      }
+      const recognition = new Recognition();
+      recognition.lang = document.documentElement.lang || "en-US";
+      recognition.interimResults = false;
+      recognition.onstart = () => { if (onboardingStatus) onboardingStatus.textContent = "Listening…"; };
+      recognition.onresult = (event) => {
+        const transcript = event.results?.[0]?.[0]?.transcript || "";
+        if (onboardingStatement) onboardingStatement.value = transcript;
+        if (onboardingStatus) onboardingStatus.textContent = "Description captured. Build the proposed timeline when ready.";
+      };
+      recognition.onerror = () => { if (onboardingStatus) onboardingStatus.textContent = "I could not hear that. Try again or type the description."; };
+      recognition.start();
+    });
+  }
+
   if (initialDetail?.date) {
     loadDetail(initialDetail.date)
       .then((detail) => {

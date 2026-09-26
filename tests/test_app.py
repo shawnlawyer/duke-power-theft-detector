@@ -5199,3 +5199,89 @@ def test_analyst_cannot_reset_another_staff_members_mfa(tmp_path, monkeypatch):
     assert response.headers["Location"].endswith("/")
     assert app.get_staff_user_by_id(int(commissioner["id"]))["mfa_enabled"] is True
     assert app.get_staff_user_by_id(int(analyst["id"]))["role"] == "Analyst"
+
+
+def test_equipment_history_preserves_replacements_and_estimates_active_load(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.add_equipment_history(
+        "timeline-account",
+        category="water_heating",
+        label="80-gallon electric water heater",
+        active_from="2020-01-01",
+        active_until="2024-01-15",
+        watts_each=4500,
+        annual_hours=8760,
+        duty_cycle=0.12,
+    )
+    app.add_equipment_history(
+        "timeline-account",
+        category="water_heating",
+        label="Gas tankless water heater",
+        active_from="2024-01-16",
+        fuel_type="gas",
+        watts_each=100,
+        annual_hours=8760,
+        duty_cycle=0.2,
+    )
+    app.add_equipment_history(
+        "timeline-account",
+        category="water_heating",
+        label="Small summer electric tankless heater",
+        active_from="2024-06-01",
+        fuel_type="electric",
+        watts_each=3000,
+        annual_hours=2200,
+        duty_cycle=0.1,
+        season_start="04-01",
+        season_end="10-31",
+    )
+
+    history = app.list_equipment_history("timeline-account")
+    winter = app.estimate_equipment_loads(history, "2023-12-01")
+    post_replacement_winter = app.estimate_equipment_loads(history, "2024-12-01")
+    current = app.estimate_equipment_loads(history, "2024-07-01")
+
+    assert len(history) == 3
+    assert winter["theoretical_max_kw"] == 4.5
+    assert post_replacement_winter["theoretical_max_kw"] == 0.0
+    assert current["theoretical_max_kw"] == 3.0
+    assert current["active_equipment"][0]["fuel_type"] == "gas"
+
+
+def test_equipment_proposal_requires_confirmation_and_saves_confirmed_dates(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    account = authorize_account("onboarding-account", email="onboarding@example.com")
+    client = app.web_app.test_client()
+    customer_sign_in(client, "onboarding@example.com")
+    proposal_response = client.post(
+        "/api/equipment-proposal",
+        json={
+            "account_number": account["account_number"],
+            "statement": "I had an 80-gallon electric water heater, then replaced it with a gas tankless water heater.",
+        },
+    )
+    assert proposal_response.status_code == 200
+    proposal = proposal_response.get_json()["proposal"]
+    assert proposal_response.get_json()["requires_confirmation"] is True
+    assert len(proposal) == 2
+    for index, item in enumerate(proposal):
+        item["active_from"] = f"202{index}-01-01"
+    confirmed = client.post(
+        "/api/equipment-proposal/confirm",
+        json={"account_number": account["account_number"], "proposal": proposal},
+    )
+    assert confirmed.status_code == 200
+    assert len(confirmed.get_json()["equipment"]) == 2
+
+    answer = client.post(
+        "/api/household-assistant",
+        json={"account_number": account["account_number"], "question": "What is my modeled annual use?"},
+    )
+    assert answer.status_code == 200
+    assert answer.get_json()["interaction"]["id"] > 0
+    history = client.get(
+        "/api/household-assistant/history",
+        query_string={"account_number": account["account_number"]},
+    )
+    assert history.status_code == 200
+    assert history.get_json()["interactions"][0]["question"] == "What is my modeled annual use?"

@@ -137,6 +137,9 @@ The app reads configuration from environment variables. Do not commit real value
 | `POWER_EMAIL_FROM` | Verified sender for SES. |
 | `POWER_EMAIL_REPLY_TO` | Optional reply-to address. |
 | `POWER_EMAIL_REGION` | SES region, commonly `us-east-1`. |
+| `POWER_BEDROCK_ENABLED` | Enables the household assistant's AWS Bedrock interpretation layer. Keep false until the Bedrock model access and IAM role are verified. |
+| `POWER_BEDROCK_REGION` | AWS region for Bedrock, defaulting to `AWS_REGION` or `us-east-1`. |
+| `POWER_BEDROCK_MODEL_ID` | Bedrock model ID, defaulting to `us.amazon.nova-2-lite-v1:0`. |
 | `POWER_BILLING_ENABLED` | Opens Stripe Checkout only when true and all Stripe values are installed. |
 | `STRIPE_ACCOUNT_ID` | Stripe account identifier for metadata and operator reference. |
 | `STRIPE_SECRET_KEY` | Backend-only Stripe secret key. |
@@ -378,6 +381,9 @@ Auth labels:
 | `GET` | `/api/supported-feeds` | Lists utility feed adapters. | Public | None | JSON: `{"supported_feeds": [{"adapter_id", "display_name", "provider_label", "standard_label", "format_label", "file_types", "customer_label", "customer_note", "status"}]}` |
 | `GET` | `/api/utility-by-zip` | Looks up the electric provider for a ZIP/address. | Public | Query: `zip_code`, optional `address` | JSON provider match, usually with `energy_company`, `eia_utility_id`, `zip_code`, `match_address`, `match_basis`; `400` or `503` on failure |
 | `GET` | `/api/day-detail` | Returns analysis detail for one account day. | Account actor | Query: `account_number`, `date`, optional `tz`, `night_start`, `night_end`, `min_night_kw`, `night_multiplier` | JSON with `date`, `label`, `current_day`, `previous_day`, `baseline_day`, delta summaries, `series`, `alert_events`, `top_jumps`, `notes`, `load_summary`, `load_overview`, `inventory_alignment`, `baseline_kw`, and `weather`; `404` when unavailable |
+| `GET` | `/api/equipment-history` | Returns effective-dated household equipment and the estimate active on a date. | Account actor | Query: `account_number`, optional `date` | JSON equipment timeline and theoretical/expected/annual estimates |
+| `POST` | `/api/equipment-history` | Adds a dated equipment or appliance record. | Account actor, write, CSRF | JSON: `account_number`, `category`, `label`, `active_from`, optional replacement date, fuel, wattage, duty cycle, season, and notes | JSON saved record, timeline, and estimate |
+| `POST` | `/api/household-assistant` | Answers a household usage question from the account history and meter evidence. | Account actor | JSON: `account_number`, `question`, optional `date` | JSON written answer, estimate context, and whether Bedrock was used |
 | `POST` | `/api/analyze` | Imports a mounted input file or uploaded file, analyzes saved history, and returns the report context. | Account actor, write, CSRF | JSON: `account_number`, optional `input_file`, display/profile/settings fields; or multipart form with `xml_file` | JSON report context including summary rows, suspicious rows, downloads, account, load inventory, import result, and initial day detail; `403` when data authorization is missing |
 
 ### Billing

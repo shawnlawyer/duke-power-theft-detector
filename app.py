@@ -660,6 +660,63 @@ def timestamp_now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def ensure_equipment_history_table(conn: DatabaseConnection) -> None:
+    id_type = "BIGSERIAL" if conn.kind == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    primary_key = "PRIMARY KEY" if conn.kind == "postgres" else ""
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS account_equipment_history (
+            id {id_type} {primary_key},
+            account_id {'BIGINT' if conn.kind == 'postgres' else 'INTEGER'} NOT NULL,
+            category TEXT NOT NULL,
+            label TEXT NOT NULL,
+            manufacturer TEXT,
+            model TEXT,
+            fuel_type TEXT NOT NULL DEFAULT 'electric',
+            watts_each {'DOUBLE PRECISION' if conn.kind == 'postgres' else 'REAL'} NOT NULL,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            duty_cycle {'DOUBLE PRECISION' if conn.kind == 'postgres' else 'REAL'} NOT NULL DEFAULT 1.0,
+            annual_hours {'DOUBLE PRECISION' if conn.kind == 'postgres' else 'REAL'} NOT NULL DEFAULT 8760.0,
+            active_from TEXT NOT NULL,
+            active_until TEXT,
+            season_start TEXT,
+            season_end TEXT,
+            notes TEXT,
+            source TEXT NOT NULL DEFAULT 'user',
+            confidence TEXT NOT NULL DEFAULT 'user_reported',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_account_equipment_history_account_dates "
+        "ON account_equipment_history (account_id, active_from, active_until)"
+    )
+    id_type = "BIGSERIAL" if conn.kind == "postgres" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    primary_key = "PRIMARY KEY" if conn.kind == "postgres" else ""
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS household_assistant_interactions (
+            id {id_type} {primary_key},
+            account_id {'BIGINT' if conn.kind == 'postgres' else 'INTEGER'} NOT NULL,
+            customer_user_id {'BIGINT' if conn.kind == 'postgres' else 'INTEGER'},
+            question TEXT NOT NULL,
+            question_date TEXT,
+            answer TEXT NOT NULL,
+            used_bedrock INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_household_assistant_interactions_account "
+        "ON household_assistant_interactions (account_id, created_at)"
+    )
+
+
 def ensure_database() -> None:
     ensure_data_dirs()
     with get_db_connection(ensure_schema=False) as conn:
@@ -1474,6 +1531,7 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
 def migrate_database(conn: DatabaseConnection) -> None:
     if conn.kind == "postgres":
         migrate_database_postgres(conn)
+        ensure_equipment_history_table(conn)
         return
 
     default_account_id = ensure_accounts_table(conn)
@@ -2169,6 +2227,7 @@ def migrate_database(conn: DatabaseConnection) -> None:
             (default_account_id,),
         )
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_billing_account_id ON customer_billing (account_id)")
+    ensure_equipment_history_table(conn)
     seed_commission_registry(conn)
 
 
@@ -2461,6 +2520,175 @@ def get_email_reply_to() -> str:
 
 def get_email_region() -> str:
     return (os.getenv("POWER_EMAIL_REGION") or "us-east-1").strip()
+
+
+def bedrock_enabled() -> bool:
+    return (os.getenv("POWER_BEDROCK_ENABLED") or "false").strip().lower() in {"1", "true", "yes"}
+
+
+def get_bedrock_region() -> str:
+    return (os.getenv("POWER_BEDROCK_REGION") or os.getenv("AWS_REGION") or "us-east-1").strip()
+
+
+def get_bedrock_model_id() -> str:
+    return (os.getenv("POWER_BEDROCK_MODEL_ID") or "us.amazon.nova-2-lite-v1:0").strip()
+
+
+def build_household_question_context(account_number: str, question: str, target_date: str | None = None) -> dict[str, object]:
+    account = load_account(account_number) or {"account_number": account_number}
+    equipment = list_equipment_history(account_number)
+    estimate = estimate_equipment_loads(equipment, target_date)
+    context: dict[str, object] = {
+        "question": question,
+        "account": {"account_number": account.get("account_number"), "display_name": account.get("display_name")},
+        "equipment_history": equipment,
+        "estimate": estimate,
+    }
+    if target_date:
+        settings = parse_settings({})
+        df, summary, baseline, alert_events = analyze_history_store(
+            account_number=account_number,
+            tz_name=settings["tz"],
+            night_start_str=settings["night_start"],
+            night_end_str=settings["night_end"],
+            min_night_kw=settings["min_night_kw"],
+            night_multiplier=settings["night_multiplier"],
+            baseline_date=account.get("baseline_date"),
+        )
+        detail = build_day_detail(df, summary, alert_events, target_date, baseline_date=account.get("baseline_date"))
+        context["meter_day"] = detail
+        context["baseline_kw"] = baseline
+    return context
+
+
+def save_household_assistant_interaction(
+    account_number: str,
+    question: str,
+    question_date: str | None,
+    answer: str,
+    used_bedrock: bool,
+    customer_user_id: int | None = None,
+) -> dict[str, object]:
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        row = conn.execute(
+            """
+            INSERT INTO household_assistant_interactions (
+                account_id, customer_user_id, question, question_date, answer,
+                used_bedrock, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (account["id"], customer_user_id, question, question_date, answer, 1 if used_bedrock else 0, timestamp_now()),
+        ).fetchone()
+        conn.commit()
+    return {"id": int(row["id"] if conn.kind == "postgres" else row[0])}
+
+
+def list_household_assistant_interactions(account_number: str | None = None) -> list[dict[str, object]]:
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        rows = conn.execute(
+            """
+            SELECT id, question, question_date, answer, used_bedrock, created_at
+            FROM household_assistant_interactions
+            WHERE account_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 50
+            """,
+            (account["id"],),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def invoke_bedrock_household_assistant(context: dict[str, object]) -> str | None:
+    if not bedrock_enabled() or boto3 is None:
+        return None
+    prompt = (
+        "You are the Home Energy Watch household energy analyst. Answer the user's question using only the supplied "
+        "account context. Separate measured facts, estimates, and hypotheses. Never identify a person or claim illegal "
+        "activity from meter data. If the question asks what could cause a spike, provide a ranked list of plausible "
+        "causes with evidence and missing evidence. Keep the answer concise and explain missing evidence.\n\n"
+        f"CONTEXT:\n{json.dumps(context, default=str)}"
+    )
+    response = boto3.client("bedrock-runtime", region_name=get_bedrock_region()).converse(
+        modelId=get_bedrock_model_id(),
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        inferenceConfig={"maxTokens": 700, "temperature": 0.1},
+    )
+    content = response.get("output", {}).get("message", {}).get("content", [])
+    text_parts = [str(item.get("text")) for item in content if item.get("text")]
+    return "\n".join(text_parts).strip() or None
+
+
+def extract_equipment_proposal(text: str) -> list[dict[str, object]]:
+    """Turn an onboarding statement into proposed records; never saves without confirmation."""
+    if bedrock_enabled() and boto3 is not None:
+        prompt = (
+            "Extract household equipment history from the user's statement. Return ONLY a JSON array. "
+            "Each object must contain category, label, fuel_type, watts_each, quantity, duty_cycle, "
+            "annual_hours, active_from, active_until, season_start, season_end, notes, confidence. "
+            "Use null for unknown dates, use conservative typical estimates, and never invent a manufacturer "
+            "or model. Treat inferred values as confidence 'typical_estimate'.\n\nSTATEMENT:\n" + text
+        )
+        response = boto3.client("bedrock-runtime", region_name=get_bedrock_region()).converse(
+            modelId=get_bedrock_model_id(),
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig={"maxTokens": 1200, "temperature": 0.0},
+        )
+        content = response.get("output", {}).get("message", {}).get("content", [])
+        raw = "\n".join(str(item.get("text")) for item in content if item.get("text")).strip()
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [item for item in parsed if isinstance(item, dict)]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    lowered = text.lower()
+    proposed: list[dict[str, object]] = []
+    if "80-gallon" in lowered and "water heater" in lowered:
+        proposed.append({"category": "water_heating", "label": "80-gallon electric water heater", "fuel_type": "electric", "watts_each": 4500, "quantity": 1, "duty_cycle": 0.12, "annual_hours": 8760, "active_from": None, "active_until": None, "season_start": None, "season_end": None, "notes": "Extracted from onboarding statement; confirm dates.", "confidence": "user_reported"})
+    if "gas tankless" in lowered and "water heater" in lowered:
+        proposed.append({"category": "water_heating", "label": "Gas tankless water heater", "fuel_type": "gas", "watts_each": 100, "quantity": 1, "duty_cycle": 0.2, "annual_hours": 8760, "active_from": None, "active_until": None, "season_start": None, "season_end": None, "notes": "Gas consumption is outside the electric meter; controls may use a small amount of electricity.", "confidence": "user_reported"})
+    if "electric tankless" in lowered:
+        proposed.append({"category": "water_heating", "label": "Electric tankless water heater", "fuel_type": "electric", "watts_each": 3000, "quantity": 1, "duty_cycle": 0.1, "annual_hours": 2200, "active_from": None, "active_until": None, "season_start": "04-01", "season_end": "10-31", "notes": "Seasonal use inferred from onboarding statement; confirm dates.", "confidence": "user_reported"})
+    if "greenhouse" in lowered and "light" in lowered:
+        proposed.append({"category": "greenhouse_lighting", "label": "Greenhouse lighting", "fuel_type": "electric", "watts_each": 360, "quantity": 1, "duty_cycle": 1.0, "annual_hours": 8760, "active_from": None, "active_until": None, "season_start": None, "season_end": None, "notes": "Confirm fixture wattage and whether lights run continuously.", "confidence": "typical_estimate"})
+    return proposed
+
+
+def deterministic_household_answer(context: dict[str, object]) -> str:
+    estimate = context.get("estimate") or {}
+    meter_day = context.get("meter_day") or {}
+    question = str(context.get("question") or "").strip()
+    if meter_day and meter_day.get("current_day"):
+        current = meter_day["current_day"]
+        peak = current.get("max_kw")
+        night = current.get("night_avg_kw")
+        modeled = estimate.get("expected_peak_kw")
+        answer = f"On {meter_day.get('date')}, the meter recorded a peak of {peak} kW"
+        if night is not None:
+            answer += f" and an overnight average of {night} kW"
+        answer += "."
+        if modeled is not None:
+            answer += f" The current equipment model estimates an expected peak of {modeled} kW and a theoretical maximum of {estimate.get('theoretical_max_kw')} kW."
+        candidates = [
+            "1. HVAC or backup heat operating during the interval",
+            "2. A large cycling load such as water heating, a dryer, range, or pump",
+            "3. A continuous or newly relocated load not yet represented in the timeline",
+        ]
+        answer += " Possible causes, ranked for investigation: " + "; ".join(candidates) + ". This identifies a difference to investigate; it does not identify a particular device or person."
+        return answer
+    if estimate.get("active_equipment"):
+        top = sorted(estimate["active_equipment"], key=lambda item: item["annual_kwh"], reverse=True)[:3]
+        names = ", ".join(str(item["label"]) for item in top)
+        return (
+            f"The active equipment model estimates {estimate.get('annual_electric_kwh')} annual electric kWh, "
+            f"an expected peak of {estimate.get('expected_peak_kw')} kW, and a theoretical maximum of "
+            f"{estimate.get('theoretical_max_kw')} kW. The largest modeled contributors are {names}. "
+            f"I treated your question as: {question}"
+        )
+    return "There is not enough household equipment history yet to estimate the cause. Add the major systems, appliances, fuel types, and replacement dates first."
 
 
 def send_transactional_email(recipient: str, subject: str, text_body: str) -> None:
@@ -9079,6 +9307,145 @@ def build_load_overview(load_items: list[dict[str, object]]) -> dict[str, object
     }
 
 
+def list_equipment_history(account_number: str | None = None) -> list[dict[str, object]]:
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        rows = conn.execute(
+            """
+            SELECT id, category, label, manufacturer, model, fuel_type, watts_each,
+                   quantity, duty_cycle, annual_hours, active_from, active_until,
+                   season_start, season_end, notes, source, confidence
+            FROM account_equipment_history
+            WHERE account_id = ?
+            ORDER BY active_from ASC, id ASC
+            """,
+            (account["id"],),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def equipment_active_on(item: dict[str, object], target_date: str) -> bool:
+    active_from = str(item.get("active_from") or "0001-01-01")
+    active_until = str(item.get("active_until") or "9999-12-31")
+    if not active_from <= target_date <= active_until:
+        return False
+    season_start = str(item.get("season_start") or "").strip()
+    season_end = str(item.get("season_end") or "").strip()
+    if not season_start or not season_end:
+        return True
+    try:
+        month_day = datetime.fromisoformat(target_date).strftime("%m-%d")
+        if season_start <= season_end:
+            return season_start <= month_day <= season_end
+        return month_day >= season_start or month_day <= season_end
+    except ValueError:
+        return True
+
+
+def estimate_equipment_loads(
+    equipment: list[dict[str, object]],
+    target_date: str | None = None,
+) -> dict[str, object]:
+    selected_date = target_date or datetime.now().date().isoformat()
+    active = [item for item in equipment if equipment_active_on(item, selected_date)]
+    rows: list[dict[str, object]] = []
+    theoretical_watts = 0.0
+    expected_watts = 0.0
+    annual_kwh = 0.0
+    for item in active:
+        quantity = max(1, int(item.get("quantity") or 1))
+        watts = max(0.0, float(item.get("watts_each") or 0.0))
+        duty_cycle = min(1.0, max(0.0, float(item.get("duty_cycle") or 0.0)))
+        annual_hours = min(8760.0, max(0.0, float(item.get("annual_hours") or 0.0)))
+        fuel_type = str(item.get("fuel_type") or "electric").lower()
+        electric_factor = 0.0 if fuel_type not in {"electric", "dual"} else 1.0
+        total_watts = watts * quantity * electric_factor
+        item_kwh = total_watts * annual_hours * duty_cycle / 1000.0
+        theoretical_watts += total_watts
+        expected_watts += total_watts * duty_cycle
+        annual_kwh += item_kwh
+        rows.append(
+            {
+                "id": int(item["id"]),
+                "label": item["label"],
+                "category": item["category"],
+                "fuel_type": fuel_type,
+                "active_from": item["active_from"],
+                "active_until": item.get("active_until"),
+                "theoretical_watts": round(total_watts, 1),
+                "expected_watts": round(total_watts * duty_cycle, 1),
+                "annual_kwh": round(item_kwh, 1),
+                "confidence": item.get("confidence") or "user_reported",
+            }
+        )
+    return {
+        "as_of": selected_date,
+        "active_equipment": rows,
+        "theoretical_max_kw": round(theoretical_watts / 1000.0, 3),
+        "expected_peak_kw": round(expected_watts / 1000.0, 3),
+        "annual_electric_kwh": round(annual_kwh, 1),
+        "confidence": "estimated" if rows else "insufficient_data",
+    }
+
+
+def add_equipment_history(
+    account_number: str | None,
+    *,
+    category: str,
+    label: str,
+    active_from: str,
+    active_until: str | None = None,
+    manufacturer: str | None = None,
+    model: str | None = None,
+    fuel_type: str = "electric",
+    watts_each: float = 0.0,
+    quantity: int = 1,
+    duty_cycle: float = 1.0,
+    annual_hours: float = 8760.0,
+    season_start: str | None = None,
+    season_end: str | None = None,
+    notes: str | None = None,
+    source: str = "user",
+    confidence: str = "user_reported",
+) -> dict[str, object]:
+    normalized_from = normalize_optional_date(active_from)
+    if not normalized_from:
+        raise ValueError("Choose when this equipment became active.")
+    normalized_until = normalize_optional_date(active_until)
+    if normalized_until and normalized_until < normalized_from:
+        raise ValueError("The replacement date cannot be before the active date.")
+    clean_label = (label or "").strip()
+    if not clean_label:
+        raise ValueError("Give this equipment a name.")
+    if watts_each < 0 or quantity <= 0:
+        raise ValueError("Enter a valid quantity and wattage.")
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        timestamp = timestamp_now()
+        row = conn.execute(
+            """
+            INSERT INTO account_equipment_history (
+                account_id, category, label, manufacturer, model, fuel_type,
+                watts_each, quantity, duty_cycle, annual_hours, active_from,
+                active_until, season_start, season_end, notes, source, confidence,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (
+                account["id"], category.strip() or "other", clean_label,
+                (manufacturer or "").strip() or None, (model or "").strip() or None,
+                (fuel_type or "electric").strip().lower(), float(watts_each),
+                int(quantity), min(1.0, max(0.0, float(duty_cycle))),
+                min(8760.0, max(0.0, float(annual_hours))), normalized_from,
+                normalized_until, season_start, season_end, (notes or "").strip() or None,
+                source, confidence, timestamp, timestamp,
+            ),
+        ).fetchone()
+        conn.commit()
+    return {"id": int(row["id"] if conn.kind == "postgres" else row[0])}
+
+
 def add_load_item(
     account_number: str | None,
     label: str,
@@ -14299,6 +14666,137 @@ def create_web_app() -> Flask:
         detail["baseline_kw"] = None if baseline is None else round(float(baseline), 3)
         detail["weather"] = load_day_weather(account["account_number"], detail["date"], settings["tz"])
         return jsonify(detail)
+
+    @app.get("/api/equipment-history")
+    def api_equipment_history():
+        actor = require_account_actor(request.args.get("account_number"), api=True)
+        if not isinstance(actor, dict):
+            return actor
+        account_number = request.args.get("account_number")
+        history = list_equipment_history(account_number)
+        target_date = request.args.get("date") or datetime.now().date().isoformat()
+        return jsonify({"equipment": history, "estimate": estimate_equipment_loads(history, target_date)})
+
+    @app.post("/api/equipment-history")
+    def api_add_equipment_history():
+        payload = request.get_json(silent=True) or request.form
+        account_number = payload.get("account_number")
+        actor = require_account_actor(account_number, write=True, api=True)
+        if not isinstance(actor, dict):
+            return actor
+        try:
+            saved = add_equipment_history(
+                account_number,
+                category=str(payload.get("category") or "other"),
+                label=str(payload.get("label") or ""),
+                active_from=str(payload.get("active_from") or ""),
+                active_until=payload.get("active_until"),
+                manufacturer=payload.get("manufacturer"),
+                model=payload.get("model"),
+                fuel_type=str(payload.get("fuel_type") or "electric"),
+                watts_each=float(payload.get("watts_each") or 0),
+                quantity=int(payload.get("quantity") or 1),
+                duty_cycle=float(payload.get("duty_cycle") or 1),
+                annual_hours=float(payload.get("annual_hours") or 8760),
+                season_start=payload.get("season_start"),
+                season_end=payload.get("season_end"),
+                notes=payload.get("notes"),
+                source=str(payload.get("source") or "user"),
+                confidence=str(payload.get("confidence") or "user_reported"),
+            )
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        history = list_equipment_history(account_number)
+        return jsonify({"saved": saved, "equipment": history, "estimate": estimate_equipment_loads(history)}), 201
+
+    @app.post("/api/equipment-proposal")
+    def api_equipment_proposal():
+        payload = request.get_json(silent=True) or {}
+        account_number = payload.get("account_number")
+        actor = require_account_actor(account_number, write=True, api=True)
+        if not isinstance(actor, dict):
+            return actor
+        statement = str(payload.get("statement") or "").strip()
+        if not statement:
+            return jsonify({"error": "Tell me about the equipment, appliances, and changes in the home."}), 400
+        try:
+            proposal = extract_equipment_proposal(statement)
+        except Exception:
+            proposal = []
+        return jsonify({"statement": statement, "proposal": proposal, "requires_confirmation": True})
+
+    @app.post("/api/equipment-proposal/confirm")
+    def api_confirm_equipment_proposal():
+        payload = request.get_json(silent=True) or {}
+        account_number = payload.get("account_number")
+        actor = require_account_actor(account_number, write=True, api=True)
+        if not isinstance(actor, dict):
+            return actor
+        proposal = payload.get("proposal")
+        if not isinstance(proposal, list) or not proposal:
+            return jsonify({"error": "Confirm at least one equipment record."}), 400
+        saved = []
+        try:
+            for item in proposal:
+                if not isinstance(item, dict):
+                    continue
+                if not item.get("active_from"):
+                    raise ValueError("Add an active date to each proposed equipment record before saving.")
+                saved.append(add_equipment_history(
+                    account_number,
+                    category=str(item.get("category") or "other"),
+                    label=str(item.get("label") or ""),
+                    active_from=str(item.get("active_from")),
+                    active_until=item.get("active_until"),
+                    manufacturer=item.get("manufacturer"),
+                    model=item.get("model"),
+                    fuel_type=str(item.get("fuel_type") or "electric"),
+                    watts_each=float(item.get("watts_each") or 0),
+                    quantity=int(item.get("quantity") or 1),
+                    duty_cycle=float(item.get("duty_cycle") or 1),
+                    annual_hours=float(item.get("annual_hours") or 8760),
+                    season_start=item.get("season_start"),
+                    season_end=item.get("season_end"),
+                    notes=item.get("notes"),
+                    source="conversation",
+                    confidence=str(item.get("confidence") or "user_confirmed"),
+                ))
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        history = list_equipment_history(account_number)
+        return jsonify({"saved": saved, "equipment": history, "estimate": estimate_equipment_loads(history)})
+
+    @app.post("/api/household-assistant")
+    def api_household_assistant():
+        payload = request.get_json(silent=True) or {}
+        account_number = payload.get("account_number")
+        actor = require_account_actor(account_number, api=True)
+        if not isinstance(actor, dict):
+            return actor
+        question = str(payload.get("question") or "").strip()
+        if not question:
+            return jsonify({"error": "Ask a question about the household or its usage history."}), 400
+        target_date = str(payload.get("date") or "").strip() or None
+        context = build_household_question_context(str(account_number), question, target_date)
+        used_bedrock = False
+        try:
+            bedrock_answer = invoke_bedrock_household_assistant(context)
+            used_bedrock = bool(bedrock_answer)
+            answer = bedrock_answer or deterministic_household_answer(context)
+        except Exception:
+            answer = deterministic_household_answer(context)
+        interaction = save_household_assistant_interaction(
+            str(account_number), question, target_date, answer, used_bedrock,
+            int(actor["user"]["id"]) if actor.get("kind") == "customer" else None,
+        )
+        return jsonify({"answer": answer, "date": target_date, "estimate": context.get("estimate"), "bedrock": used_bedrock, "interaction": interaction})
+
+    @app.get("/api/household-assistant/history")
+    def api_household_assistant_history():
+        actor = require_account_actor(request.args.get("account_number"), api=True)
+        if not isinstance(actor, dict):
+            return actor
+        return jsonify({"interactions": list_household_assistant_interactions(request.args.get("account_number"))})
 
     @app.post("/api/analyze")
     def api_analyze():
