@@ -27,6 +27,7 @@
               {% endif %}
             </p>
             <p class="plain-note">Unlimited reports while your subscription is active.</p>
+            <p class="plain-note billing-policy">Subscriptions are non-refundable. Please review the plan before continuing to payment.</p>
             {% if customer_user and plan.payment_ready %}
               <form action="{{ url_for('billing_checkout') }}" method="post">
                 <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
