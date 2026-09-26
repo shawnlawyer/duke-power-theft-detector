@@ -854,6 +854,11 @@ def ensure_affiliate_tables(conn: DatabaseConnection) -> None:
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_affiliate_commissions_affiliate ON affiliate_commissions (affiliate_id, created_at)")
+    affiliate_columns = table_columns(conn, "affiliate_accounts")
+    if "payout_method" not in affiliate_columns:
+        conn.execute("ALTER TABLE affiliate_accounts ADD COLUMN payout_method TEXT")
+    if "payout_destination" not in affiliate_columns:
+        conn.execute("ALTER TABLE affiliate_accounts ADD COLUMN payout_destination TEXT")
 
 
 def list_affiliate_accounts() -> list[dict[str, object]]:
@@ -871,7 +876,7 @@ def get_affiliate_by_slug(slug: str | None) -> dict[str, object] | None:
     return dict(row) if row else None
 
 
-def create_affiliate_account(name: str, email: str, slug: str, commission_percent: str) -> dict[str, object]:
+def create_affiliate_account(name: str, email: str, slug: str, commission_percent: str, payout_method: str = "", payout_destination: str = "") -> dict[str, object]:
     normalized_slug = re.sub(r"[^a-z0-9-]", "", slug.strip().lower())
     if not normalized_slug:
         raise ValueError("Choose a referral code using letters, numbers, or hyphens.")
@@ -880,7 +885,7 @@ def create_affiliate_account(name: str, email: str, slug: str, commission_percen
         raise ValueError("The referral percentage must be between 0 and 100.")
     timestamp = timestamp_now()
     with get_db_connection() as conn:
-        conn.execute("INSERT INTO affiliate_accounts (slug, name, email, commission_percent, status, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?)", (normalized_slug, name.strip(), clean_email(email), percent, timestamp, timestamp))
+        conn.execute("INSERT INTO affiliate_accounts (slug, name, email, commission_percent, status, payout_method, payout_destination, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)", (normalized_slug, name.strip(), clean_email(email), percent, payout_method.strip().lower(), payout_destination.strip(), timestamp, timestamp))
         conn.commit()
         row = conn.execute("SELECT * FROM affiliate_accounts WHERE slug = ?", (normalized_slug,)).fetchone()
     return dict(row)
@@ -12441,6 +12446,24 @@ def create_web_app() -> Flask:
                 active_page="affiliate",
             ),
         )
+
+    @app.post("/affiliate/apply")
+    def affiliate_apply():
+        name = (request.form.get("name") or "").strip()
+        email = (request.form.get("email") or "").strip()
+        payout_method = (request.form.get("payout_method") or "").strip().lower()
+        payout_destination = (request.form.get("payout_destination") or "").strip()
+        if not name or not email or payout_method not in {"paypal", "venmo", "other"} or not payout_destination:
+            flash("Please complete your name, email, payout method, and payout details.")
+            return redirect(url_for("affiliate_page"))
+        slug_base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "partner"
+        slug = f"{slug_base}-{secrets.token_hex(3)}"
+        try:
+            affiliate = create_affiliate_account(name, email, slug, "10", payout_method, payout_destination)
+            flash(f"Your referral link is ready: {build_absolute_url(build_public_base_url(request.url_root), '/r/' + str(affiliate['slug']))}")
+        except Exception as exc:
+            flash(str(exc))
+        return redirect(url_for("affiliate_page"))
 
     @app.get("/r/<slug>")
     def affiliate_referral(slug: str):
