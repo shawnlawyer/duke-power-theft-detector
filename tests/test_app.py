@@ -1402,15 +1402,17 @@ def test_customer_can_connect_duke_with_helper_without_exposing_tokens(tmp_path,
     )
     app.add_account_access_email("acct-1", "owner@example.com", full_name="Home Owner", access_level="Manager")
     app.grant_account_data_authorization("acct-1", int(customer["id"]))
-    monkeypatch.setattr(
-        app,
-        "build_duke_authorization_flow",
-        lambda: {
+    authorization_flows = []
+
+    def fake_authorization_flow():
+        authorization_flows.append(1)
+        return {
             "authorization_url": "https://login.duke-energy.com/authorize-test",
             "state": "state-value",
             "code_verifier": "pkce-verifier-value",
-        },
-    )
+        }
+
+    monkeypatch.setattr(app, "build_duke_authorization_flow", fake_authorization_flow)
     secret_payload = app.serialize_duke_oauth_secret(
         {
             "access_token": "access-token-value",
@@ -1441,6 +1443,10 @@ def test_customer_can_connect_duke_with_helper_without_exposing_tokens(tmp_path,
             "account_number": "acct-1",
             "return_to": "/customer/utility?account_number=acct-1",
         },
+    )
+    repeated_start_response = client.post(
+        "/utility-connection/duke/start",
+        data={"account_number": "acct-1", "return_to": "/customer/utility?account_number=acct-1"},
     )
     finish_response = client.post(
         "/utility-connection/duke/complete",
@@ -1477,6 +1483,8 @@ def test_customer_can_connect_duke_with_helper_without_exposing_tokens(tmp_path,
     assert b"Upload it from History" in response.data
     assert start_response.status_code == 302
     assert start_response.headers["Location"] == "https://login.duke-energy.com/authorize-test"
+    assert repeated_start_response.headers["Location"] == start_response.headers["Location"]
+    assert len(authorization_flows) == 1
     assert finish_response.status_code == 200
     assert b"Duke is connected" in finish_response.data
     assert connections[0]["access_method"] == app.DUKE_OAUTH_ACCESS_METHOD
@@ -1485,6 +1493,73 @@ def test_customer_can_connect_duke_with_helper_without_exposing_tokens(tmp_path,
     assert "access-token-value" not in json.dumps(connections)
     assert "access-token-value" not in stored_secret
     assert json.loads(app.unseal_secret_value(stored_secret))["tokens"]["refresh_token"] == "refresh-token-value"
+
+
+def test_failed_duke_connection_clears_pending_flow_and_logs_only_failure_stage(tmp_path, monkeypatch, caplog):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
+    app.save_account_profile("acct-1", energy_company="Duke Energy Progress, LLC")
+    app.add_account_access_email("acct-1", "owner@example.com", access_level="Manager")
+    app.grant_account_data_authorization("acct-1", int(customer["id"]))
+    monkeypatch.setattr(
+        app,
+        "build_duke_authorization_flow",
+        lambda: {
+            "authorization_url": "https://login.duke-energy.com/authorize-test",
+            "state": "state-value",
+            "code_verifier": "pkce-verifier-value",
+        },
+    )
+    monkeypatch.setattr(
+        app,
+        "exchange_duke_authorization_code",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("private-token-error")),
+    )
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+    client.post("/utility-connection/duke/start", data={"account_number": "acct-1"})
+
+    with caplog.at_level("INFO", logger=app.APP_LOGGER_NAME):
+        response = client.post(
+            "/utility-connection/duke/complete",
+            data={"account_number": "acct-1", "authorization_code": "private-one-time-code"},
+            follow_redirects=True,
+        )
+
+    with client.session_transaction() as customer_session:
+        assert app.DUKE_OAUTH_PENDING_SESSION_KEY not in customer_session
+    assert response.status_code == 200
+    assert b"Duke could not complete this connection" in response.data
+    assert b"private-token-error" not in response.data
+    assert "utility.duke_connection_completion_failed" in caplog.text
+    assert "duke_exchange" in caplog.text
+    assert "private-one-time-code" not in caplog.text
+    assert "private-token-error" not in caplog.text
+
+
+def test_duke_account_match_accepts_leading_zero_only_when_unambiguous():
+    accounts = {"26383591807": {"accountNumber": "26383591807"}}
+    assert app.select_duke_account(accounts, "026383591807")[0] == "26383591807"
+    assert not app.duke_account_numbers_match("026383591807", "026383591808")
+    assert not app.duke_account_numbers_match("ACCT-01", "ACCT-1")
+
+    accounts["026383591807"] = {"accountNumber": "026383591807"}
+    with pytest.raises(ValueError, match="More than one Duke account"):
+        app.select_duke_account(accounts, "026383591807")
+
+
+def test_duke_sign_in_reuses_only_current_flow_for_same_account():
+    pending = {
+        "account_number": "acct-1",
+        "started_at": app.timestamp_now(),
+        "authorization_url": "https://login.duke-energy.com/authorize?state=one",
+    }
+    assert app.reusable_duke_authorization_url(pending, "acct-1") == pending["authorization_url"]
+    assert app.reusable_duke_authorization_url(pending, "acct-2") is None
+    assert app.reusable_duke_authorization_url({**pending, "authorization_url": "https://other.example/authorize"}, "acct-1") is None
+    expired = (datetime.now() - timedelta(minutes=app.DUKE_OAUTH_EXPIRY_MINUTES + 1)).isoformat()
+    assert app.reusable_duke_authorization_url({**pending, "started_at": expired}, "acct-1") is None
 
 
 def test_duke_connection_rejects_expired_sign_in_flow(tmp_path, monkeypatch):
