@@ -1463,6 +1463,7 @@ def test_customer_can_connect_duke_with_helper_without_exposing_tokens(tmp_path,
     assert b"Download the Chrome helper" in response.data
     assert app.DUKE_OAUTH_HELPER_DOWNLOAD_URL.encode() in response.data
     assert b"Start Duke sign-in" in response.data
+    assert "form-action 'self' https://app.homeenergywatch.com https://login.duke-energy.com" in response.headers["Content-Security-Policy"]
     start_form = re.search(rb'<form[^>]*action="/utility-connection/duke/start"[^>]*>', response.data)
     assert start_form is not None
     assert b'target="_blank"' not in start_form.group(0)
@@ -4106,6 +4107,7 @@ def test_security_headers_and_cookie_flags_are_set(tmp_path, monkeypatch):
     assert response.headers["X-Content-Type-Options"] == "nosniff"
     assert response.headers["X-Frame-Options"] == "DENY"
     assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+    assert "https://login.duke-energy.com" not in response.headers["Content-Security-Policy"]
     assert "HttpOnly" in response.headers["Set-Cookie"]
     assert "SameSite=Lax" in response.headers["Set-Cookie"]
 

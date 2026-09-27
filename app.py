@@ -12131,11 +12131,14 @@ def create_web_app() -> Flask:
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        form_action = "form-action 'self' https://app.homeenergywatch.com"
+        if request.endpoint == "customer_utility_page":
+            form_action += " https://login.duke-energy.com"
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data: https:; style-src 'self'; "
             "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; "
-            "form-action 'self' https://app.homeenergywatch.com",
+            + form_action,
         )
         if session.get("staff_user_id") or session.get("customer_user_id"):
             response.headers["Cache-Control"] = "no-store, private"
