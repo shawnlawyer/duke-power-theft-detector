@@ -464,9 +464,9 @@
         </li>
         <li>
           <strong>Start Duke sign-in.</strong>
-          <span>Duke opens in a new tab. Sign in and complete Duke's verification steps. The helper will show a one-time code after Duke approves the connection.</span>
+          <span>Duke opens in this tab. Sign in and complete Duke's verification steps. The helper will show a one-time code after Duke approves the connection.</span>
           {% if can_manage_account %}
-            <form action="{{ url_for('start_duke_connection') }}" method="post" target="_blank">
+            <form action="{{ url_for('start_duke_connection') }}" method="post">
               <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
               <input type="hidden" name="return_to" value="{{ return_path }}">
@@ -476,7 +476,7 @@
         </li>
         <li>
           <strong>Finish the connection.</strong>
-          <span>Copy the one-time code from the helper and paste it below. The code expires quickly and is not saved.</span>
+          <span>Copy the one-time code from the helper, return to this Utility page, and paste it below. The code expires quickly and is not saved.</span>
           {% if can_manage_account %}
             <form class="duke-code-form" action="{{ url_for('complete_duke_connection') }}" method="post">
               <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
