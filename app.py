@@ -7608,6 +7608,16 @@ def normalize_duke_account_number(value: object) -> str:
     return re.sub(r"[^0-9A-Za-z]", "", str(value or "")).upper()
 
 
+def duke_account_numbers_match(left: object, right: object) -> bool:
+    left_number = normalize_duke_account_number(left)
+    right_number = normalize_duke_account_number(right)
+    if not left_number or not right_number:
+        return False
+    if left_number.isdecimal() and right_number.isdecimal():
+        return left_number.lstrip("0") == right_number.lstrip("0")
+    return left_number == right_number
+
+
 def mask_duke_account_number(value: object) -> str:
     normalized = normalize_duke_account_number(value)
     return f"Duke account ending {normalized[-4:]}" if normalized else "Duke account"
@@ -7617,7 +7627,7 @@ def select_duke_account(
     accounts: dict[str, dict[str, Any]],
     expected_account_number: str,
 ) -> tuple[str, dict[str, Any]]:
-    expected = normalize_duke_account_number(expected_account_number)
+    matches = []
     for account_number, account in accounts.items():
         candidates = (
             account_number,
@@ -7625,8 +7635,12 @@ def select_duke_account(
             account.get("srcAcctId"),
             account.get("srcAcctId2"),
         )
-        if any(normalize_duke_account_number(candidate) == expected for candidate in candidates if candidate):
-            return str(account_number), account
+        if any(duke_account_numbers_match(candidate, expected_account_number) for candidate in candidates if candidate):
+            matches.append((str(account_number), account))
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError("More than one Duke account matches this account number. Check the account number on the Account page.")
     raise ValueError(
         "Duke did not return the selected Home Energy Watch account. Confirm the account number on the Account page, then try again."
     )
@@ -7646,11 +7660,10 @@ def select_duke_electric_meters(
     meters: dict[str, dict[str, Any]],
     duke_account_number: str,
 ) -> list[dict[str, Any]]:
-    selected_account = normalize_duke_account_number(duke_account_number)
     selected = [
         meter
         for meter in meters.values()
-        if normalize_duke_account_number(duke_meter_account_number(meter)) == selected_account
+        if duke_account_numbers_match(duke_meter_account_number(meter), duke_account_number)
         and str(meter.get("serviceType") or "").upper() == "ELECTRIC"
         and str(meter.get("serialNum") or "").strip()
     ]
@@ -7705,21 +7718,60 @@ def build_duke_authorization_flow() -> dict[str, str]:
     return asyncio.run(build_duke_authorization_flow_async())
 
 
+def reusable_duke_authorization_url(pending: object, account_number: str) -> str | None:
+    if not isinstance(pending, dict):
+        return None
+    if normalize_account_number(str(pending.get("account_number") or "")) != normalize_account_number(account_number):
+        return None
+    try:
+        started_at = datetime.fromisoformat(str(pending.get("started_at") or ""))
+    except ValueError:
+        return None
+    if started_at.tzinfo is not None:
+        return None
+    if started_at + timedelta(minutes=DUKE_OAUTH_EXPIRY_MINUTES) <= datetime.now():
+        return None
+    authorization_url = str(pending.get("authorization_url") or "")
+    try:
+        parsed = urlsplit(authorization_url)
+    except ValueError:
+        return None
+    if parsed.scheme != "https" or parsed.netloc != "login.duke-energy.com":
+        return None
+    return authorization_url
+
+
 async def exchange_duke_authorization_code_async(
     authorization_code: str,
     code_verifier: str,
     expected_account_number: str,
 ) -> dict[str, Any]:
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as client_session:
-        auth0_client = Auth0Client(client_session, timeout=30)
-        auth = DukeEnergyAuth(client_session, auth0_client, timeout=30)
-        await auth.authenticate_with_code(authorization_code, code_verifier)
-        client = DukeEnergy(auth)
-        accounts = await client.get_accounts(fresh=True)
-        duke_account_number, _ = select_duke_account(accounts, expected_account_number)
-        meters = await client.get_meters(fresh=True)
-        selected_meters = select_duke_electric_meters(meters, duke_account_number)
-        token_data = auth.token or {}
+    stage = "duke_sign_in"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90)) as client_session:
+            auth0_client = Auth0Client(client_session, timeout=30)
+            auth = DukeEnergyAuth(client_session, auth0_client, timeout=30)
+            await auth.authenticate_with_code(authorization_code, code_verifier)
+            client = DukeEnergy(auth)
+            stage = "account_lookup"
+            accounts = await client.get_accounts(fresh=True)
+            stage = "account_match"
+            duke_account_number, _ = select_duke_account(accounts, expected_account_number)
+            stage = "meter_lookup"
+            meters = await client.get_meters(fresh=True)
+            stage = "electric_meter_match"
+            selected_meters = select_duke_electric_meters(meters, duke_account_number)
+            token_data = auth.token or {}
+    except Exception as exc:
+        status = getattr(exc, "status", None)
+        emit_application_log(
+            "utility.duke_connection_failed",
+            request_id=str(getattr(g, "request_id", "")) if has_request_context() else "",
+            stage=stage,
+            error_type=type(exc).__name__,
+            http_status=status if isinstance(status, int) else None,
+        )
+        raise
     return {
         "duke_account_number": duke_account_number,
         "meter_count": len(selected_meters),
@@ -15296,6 +15348,9 @@ def create_web_app() -> Flask:
                 raise ValueError("Select a Duke Energy account before starting Duke sign-in.")
             if not account_has_active_data_authorization(account_number):
                 raise ValueError("Customer authorization is required before connecting Duke.")
+            existing_url = reusable_duke_authorization_url(session.get(DUKE_OAUTH_PENDING_SESSION_KEY), str(account["account_number"]))
+            if existing_url:
+                return redirect(existing_url)
             flow = build_duke_authorization_flow()
             return_to = (request.form.get("return_to") or "").strip()
             if not return_to.startswith("/") or return_to.startswith("//"):
@@ -15304,6 +15359,7 @@ def create_web_app() -> Flask:
                 "account_number": str(account["account_number"]),
                 "code_verifier": flow["code_verifier"],
                 "state": flow["state"],
+                "authorization_url": flow["authorization_url"],
                 "started_at": timestamp_now(),
                 "return_to": return_to,
             }
@@ -15325,6 +15381,7 @@ def create_web_app() -> Flask:
         actor = require_account_actor(account_number, write=True)
         if not isinstance(actor, dict):
             return actor
+        stage = "validation"
         try:
             account = find_account(account_number)
             if account is None or "duke" not in str(account.get("energy_company") or "").lower():
@@ -15348,11 +15405,13 @@ def create_web_app() -> Flask:
             authorization_code = (request.form.get("authorization_code") or "").strip()
             if not 8 <= len(authorization_code) <= 4096:
                 raise ValueError("Paste the complete one-time code shown by the Duke helper.")
+            stage = "duke_exchange"
             completed = exchange_duke_authorization_code(
                 authorization_code,
                 str(pending.get("code_verifier") or ""),
                 str(account["account_number"]),
             )
+            stage = "save_connection"
             connection = save_duke_oauth_connection(
                 account_number,
                 str(completed["secret_payload"]),
@@ -15372,7 +15431,19 @@ def create_web_app() -> Flask:
             )
             flash("Duke is connected. Use Sync now for an immediate refresh; daily updates will continue automatically.")
         except Exception as exc:
-            flash(str(exc))
+            session.pop(DUKE_OAUTH_PENDING_SESSION_KEY, None)
+            emit_application_log(
+                "utility.duke_connection_completion_failed",
+                request_id=str(getattr(g, "request_id", "")),
+                stage=stage,
+                error_type=type(exc).__name__,
+            )
+            if isinstance(exc, ValueError):
+                flash(str(exc))
+            elif stage == "duke_exchange":
+                flash("Duke could not complete this connection. Start Duke sign-in again and use the newest one-time code.")
+            else:
+                flash("Home Energy Watch could not save the Duke connection. Please try again.")
         return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection")
