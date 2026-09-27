@@ -1463,6 +1463,10 @@ def test_customer_can_connect_duke_with_helper_without_exposing_tokens(tmp_path,
     assert b"Download the Chrome helper" in response.data
     assert app.DUKE_OAUTH_HELPER_DOWNLOAD_URL.encode() in response.data
     assert b"Start Duke sign-in" in response.data
+    start_form = re.search(rb'<form[^>]*action="/utility-connection/duke/start"[^>]*>', response.data)
+    assert start_form is not None
+    assert b'target="_blank"' not in start_form.group(0)
+    assert b"Duke opens in this tab" in response.data
     assert b"One-time Duke code" in response.data
     assert b"Download your Duke history" in response.data
     assert b"Open Duke Usage Details" in response.data
