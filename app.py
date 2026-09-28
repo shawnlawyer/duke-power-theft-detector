@@ -7818,28 +7818,31 @@ def save_duke_oauth_connection(
         sealed_secret = seal_secret_value(secret_payload)
         secret_hash = build_secret_hash(secret_payload)
         if existing is None:
-            cursor = conn.execute(
-                """
+            insert_sql = """
                 INSERT INTO utility_connections (
                     account_id, provider_name, connection_label, access_method, access_identifier,
                     secret_hash, secret_token, secret_last4, status, last_sync_at, created_at, updated_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)
-                """,
-                (
-                    account["id"],
-                    provider_name,
-                    DUKE_OAUTH_CONNECTION_LABEL,
-                    DUKE_OAUTH_ACCESS_METHOD,
-                    mask_duke_account_number(duke_account_number),
-                    secret_hash,
-                    sealed_secret,
-                    "Ready to sync",
-                    timestamp,
-                    timestamp,
-                ),
+                """
+            values = (
+                account["id"],
+                provider_name,
+                DUKE_OAUTH_CONNECTION_LABEL,
+                DUKE_OAUTH_ACCESS_METHOD,
+                mask_duke_account_number(duke_account_number),
+                secret_hash,
+                sealed_secret,
+                "Ready to sync",
+                timestamp,
+                timestamp,
             )
-            connection_id = int(cursor.lastrowid)
+            if conn.kind == "postgres":
+                row = conn.execute(f"{insert_sql} RETURNING id", values).fetchone()
+                connection_id = int(row["id"])
+            else:
+                cursor = conn.execute(insert_sql, values)
+                connection_id = int(cursor.lastrowid)
         else:
             connection_id = int(existing["id"])
             conn.execute(

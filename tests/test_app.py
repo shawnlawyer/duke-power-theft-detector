@@ -1497,6 +1497,58 @@ def test_customer_can_connect_duke_with_helper_without_exposing_tokens(tmp_path,
     assert json.loads(app.unseal_secret_value(stored_secret))["tokens"]["refresh_token"] == "refresh-token-value"
 
 
+def test_duke_oauth_connection_uses_returning_id_on_postgres(monkeypatch):
+    class FakeCursor:
+        def __init__(self, row):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class FakePostgresConnection:
+        kind = "postgres"
+
+        def __init__(self):
+            self.queries = []
+            self.committed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params):
+            self.queries.append((query, params))
+            if "INSERT INTO utility_connections" in query:
+                return FakeCursor({"id": 42})
+            return FakeCursor(None)
+
+        def commit(self):
+            self.committed = True
+
+    connection = FakePostgresConnection()
+    monkeypatch.setattr(app, "get_db_connection", lambda: connection)
+    monkeypatch.setattr(app, "get_or_create_account", lambda *_: {"id": 7, "energy_company": "Duke Energy"})
+    monkeypatch.setattr(app, "parse_duke_oauth_secret", lambda *_: {"duke_account_number": "acct-1"})
+    monkeypatch.setattr(app, "seal_secret_value", lambda *_: "sealed-secret")
+    monkeypatch.setattr(app, "build_secret_hash", lambda *_: "secret-hash")
+    monkeypatch.setattr(app, "list_utility_connections", lambda *_: [{"id": 42}])
+
+    saved = app.save_duke_oauth_connection("acct-1", "secret-payload", "acct-1")
+
+    assert saved["id"] == 42
+    assert connection.committed
+    insert_query, insert_values = next(
+        (query, values)
+        for query, values in connection.queries
+        if "INSERT INTO utility_connections" in query
+    )
+    assert "RETURNING id" in insert_query
+    assert insert_values[0] == 7
+    assert insert_values[6] == "sealed-secret"
+
+
 def test_failed_duke_connection_clears_pending_flow_and_logs_only_failure_stage(tmp_path, monkeypatch, caplog):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
