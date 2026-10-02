@@ -4667,7 +4667,7 @@ def test_review_dashboard_renders_note_markers_and_modal_shell(tmp_path, monkeyp
     assert b"Heaviest hours" in response.data
 
 
-def test_history_page_offers_two_file_comparison_upload(tmp_path, monkeypatch):
+def test_history_page_offers_saved_history_date_comparison(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
 
@@ -4679,10 +4679,10 @@ def test_history_page_offers_two_file_comparison_upload(tmp_path, monkeypatch):
     assert response.status_code == 200
     assert b"Upload the export." in response.data
     assert b'name="xml_file"' in response.data
-    assert b"Align two exports." in response.data
+    assert b"Compare two periods from your saved history." in response.data
     assert b'action="/compare"' in response.data
-    assert b'name="left_file"' in response.data
-    assert b'name="right_file"' in response.data
+    assert b'name="left_start"' in response.data
+    assert b'name="right_start"' in response.data
     assert b'name="energy_company"' not in response.data
     assert b"Build comparison packet" in response.data
     assert b"Customer data permission must be active" in response.data
