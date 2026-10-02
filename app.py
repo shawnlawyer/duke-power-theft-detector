@@ -10919,6 +10919,35 @@ def analyze_history_store(
     return df, summary_with_flags, baseline, alert_events
 
 
+def analyze_history_range_comparison(
+    account_number: str | None, left_start: str, left_end: str, right_start: str, right_end: str, *,
+    tz_name: str = DEFAULT_TZ, night_start_str: str = DEFAULT_NIGHT_START,
+    night_end_str: str = DEFAULT_NIGHT_END, min_night_kw: float = DEFAULT_MIN_NIGHT_KW,
+    night_multiplier: float = DEFAULT_NIGHT_MULTIPLIER, baseline_date: str | None = None,
+) -> dict[str, object]:
+    df, summary, _, _ = analyze_history_store(account_number, tz_name, night_start_str, night_end_str, min_night_kw, night_multiplier, baseline_date)
+    if summary.empty:
+        raise ValueError("There is not enough saved history to compare yet.")
+    def parse_date(value: str) -> pd.Timestamp:
+        try:
+            return pd.Timestamp(datetime.strptime(value, "%Y-%m-%d").date())
+        except (TypeError, ValueError):
+            raise ValueError("Choose valid start and end dates for both periods.")
+    ranges = [(parse_date(left_start), parse_date(left_end)), (parse_date(right_start), parse_date(right_end))]
+    if any(start > end for start, end in ranges):
+        raise ValueError("Each comparison period must start before it ends.")
+    summaries, baselines = [], []
+    for start, end in ranges:
+        selected_df = df[(df["start"].dt.date >= start.date()) & (df["start"].dt.date <= end.date())]
+        if selected_df.empty:
+            raise ValueError("One of those periods has no saved readings.")
+        period_summary = compute_daily_summary(selected_df, night_start_str, night_end_str)
+        period_summary, period_baseline = flag_suspicious_days(period_summary, min_night_kw, night_multiplier, baseline_date)
+        summaries.append(period_summary)
+        baselines.append(period_baseline)
+    return build_interval_comparison(summaries[0], summaries[1], baselines[0], baselines[1], f"{left_start} to {left_end}", f"{right_start} to {right_end}")
+
+
 def build_output_path(input_path: Path) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     return OUTPUT_DIR / f"{input_path.stem}-{timestamp}-{uuid4().hex[:8]}.csv"
@@ -14760,17 +14789,23 @@ def create_web_app() -> Flask:
                 actor["user"] if actor["kind"] == "customer" else None,
             ):
                 raise ValueError("Customer data permission is required before exports can be compared.")
-            left_path = save_uploaded_file(request.files.get("left_file"))
-            right_path = save_uploaded_file(request.files.get("right_file"))
-            comparison, report_path = analyze_interval_file_comparison(
-                left_input_path=left_path,
-                right_input_path=right_path,
-                tz_name=settings["tz"],
-                night_start_str=settings["night_start"],
-                night_end_str=settings["night_end"],
-                min_night_kw=settings["min_night_kw"],
-                night_multiplier=settings["night_multiplier"],
-            )
+            if request.files.get("left_file") and request.files.get("right_file"):
+                left_path = save_uploaded_file(request.files.get("left_file"))
+                right_path = save_uploaded_file(request.files.get("right_file"))
+                comparison, report_path = analyze_interval_file_comparison(
+                    left_path, right_path, tz_name=settings["tz"], night_start_str=settings["night_start"],
+                    night_end_str=settings["night_end"], min_night_kw=settings["min_night_kw"],
+                    night_multiplier=settings["night_multiplier"],
+                )
+            else:
+                comparison = analyze_history_range_comparison(
+                    account_number=account_number,
+                    left_start=request.form.get("left_start", ""), left_end=request.form.get("left_end", ""),
+                    right_start=request.form.get("right_start", ""), right_end=request.form.get("right_end", ""),
+                    tz_name=settings["tz"], night_start_str=settings["night_start"], night_end_str=settings["night_end"],
+                    min_night_kw=settings["min_night_kw"], night_multiplier=settings["night_multiplier"],
+                )
+                report_path = build_compare_output_path(Path("saved-history-period"), Path("comparison"))
             csv_report_path = build_web_comparison_csv_path(report_path)
             save_comparison_artifact(csv_report_path, comparison)
             register_report_artifacts(account_number, [report_path, csv_report_path])

@@ -6,18 +6,18 @@
 <section class="section-block upload-block" id="history-comparison">
   <div class="section-header">
     <div>
-      <h2>Align two exports.</h2>
+      <h2>Compare two periods from your saved history.</h2>
       <p class="plain-note">
-        Match the periods that can actually be compared, then review total kWh changes, overnight baseline shifts, flagged-night changes, and the follow-up points worth checking first.
+        Your uploads are added to one continuous history. Choose two date ranges from that history to review total kWh changes, overnight baseline shifts, flagged-night changes, and the follow-up points worth checking first.
         {% if customer_can_upload_own_history and not data_permission_active %}
-          You can compare your own Duke or Green Button exports right away.
+          You can compare the history already saved for this account.
         {% endif %}
       </p>
     </div>
   </div>
 
   {% if can_manage_history %}
-    <form class="upload-form" action="{{ url_for('compare_exports') }}" method="post" enctype="multipart/form-data">
+    <form class="upload-form" action="{{ url_for('compare_exports') }}" method="post">
     <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="account_number" value="{{ (analysis.account.account_number if analysis else account.account_number) }}">
     <input type="hidden" name="display_name" value="{{ (analysis.account.display_name if analysis else account.display_name) }}">
@@ -26,12 +26,20 @@
     <fieldset class="form-fieldset" {% if history_permission_required %}disabled{% endif %}>
     <div class="comparison-file-grid">
       <label class="upload-field">
-        <span>Earlier export</span>
-        <input type="file" name="left_file" accept=".xml,.csv,application/xml,text/xml,text/csv" required>
+        <span>Earlier period starts</span>
+        <input type="date" name="left_start" required>
       </label>
       <label class="upload-field">
-        <span>Later export</span>
-        <input type="file" name="right_file" accept=".xml,.csv,application/xml,text/xml,text/csv" required>
+        <span>Earlier period ends</span>
+        <input type="date" name="left_end" required>
+      </label>
+      <label class="upload-field">
+        <span>Later period starts</span>
+        <input type="date" name="right_start" required>
+      </label>
+      <label class="upload-field">
+        <span>Later period ends</span>
+        <input type="date" name="right_end" required>
       </label>
     </div>
 
