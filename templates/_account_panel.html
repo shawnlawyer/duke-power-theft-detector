@@ -521,7 +521,6 @@
           {% if is_customer %}<a class="inline-link" href="{{ url_for('customer_history_page', account_number=current_account.account_number) }}">Open History</a>{% else %}<a class="inline-link" href="{{ url_for('history_page', account_number=current_account.account_number) }}">Open History</a>{% endif %}
         </li>
       </ol>
-      <p class="plain-note">The provider application is prepared for review, but it has not been submitted and Xcel approval or ongoing access should not be assumed.</p>
     </div>
   {% endif %}
 
