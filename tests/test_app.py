@@ -354,19 +354,25 @@ def test_xcel_customer_guidance_uses_download_path_without_live_connect_claim():
 
 def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setitem(app.web_app.config, "TESTING", True)
+    authorize_account("xcel-1", "xcel-owner@example.com")
     app.save_account_profile(
         "xcel-1",
         display_name="Xcel home",
         energy_company="Xcel Energy",
     )
     client = app.web_app.test_client()
-    response = client.get("/account", query_string={"account_number": "xcel-1"})
-    assert response.status_code in {200, 302}
-    if response.status_code == 200:
-        body = response.get_data(as_text=True)
-        assert "Download your Xcel history" in body
-        assert "Xcel's customer download is available now" in body
-        assert "Start Xcel sign-in" not in body
+    customer_sign_in(client, "xcel-owner@example.com")
+    response = client.get("/customer/utility", query_string={"account_number": "xcel-1"})
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert "Download your Xcel history" in body
+    assert "Xcel's customer download is available now" in body
+    assert "Start Xcel sign-in" not in body
+    assert "provider application is prepared" not in body
+    assert "it has not been submitted" not in body
+
+
 def test_energy_company_lookup_uses_service_location_and_territory(monkeypatch):
     requested_urls = []
 
