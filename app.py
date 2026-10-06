@@ -31,7 +31,7 @@ import zipfile
 from datetime import date as ddate, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -350,6 +350,43 @@ DUKE_OAUTH_CONNECTION_LABEL = "Duke automatic feed"
 DUKE_OAUTH_PENDING_SESSION_KEY = "pending_duke_oauth"
 DUKE_OAUTH_EXPIRY_MINUTES = 10
 DUKE_SYNC_LOOKBACK_DAYS = 30
+GREEN_BUTTON_ACCESS_METHOD = "green_button_oauth"
+GREEN_BUTTON_PENDING_SESSION_KEY = "pending_green_button"
+GREEN_BUTTON_EXPIRY_MINUTES = 10
+GREEN_BUTTON_PROVIDERS = {
+    "con edison": "CONED",
+    "con edison company of new york": "CONED",
+    "orange & rockland": "ORU",
+    "orange and rockland": "ORU",
+}
+GREEN_BUTTON_DEFAULT_SCOPE = os.getenv(
+    "POWER_GREEN_BUTTON_SCOPE",
+    "FB=1_3_4_5_7_8_10_15_16_51_53_56_57_58_60;IntervalDuration=Monthly_3600_900_300;BlockDuration=Monthly_Daily;HistoryLength=63072000",
+).strip()
+GREEN_BUTTON_CONFIG = {
+    "CONED": {
+        "label": "Con Edison",
+        "authorize_url": os.getenv("POWER_CONED_GREEN_BUTTON_AUTHORIZE_URL", "").strip(),
+        "token_url": os.getenv("POWER_CONED_GREEN_BUTTON_TOKEN_URL", "").strip(),
+        "resource_url": os.getenv("POWER_CONED_GREEN_BUTTON_RESOURCE_URL", "").strip(),
+        "client_id": os.getenv("POWER_CONED_GREEN_BUTTON_CLIENT_ID", "").strip(),
+        "client_secret": os.getenv("POWER_CONED_GREEN_BUTTON_CLIENT_SECRET", "").strip(),
+        "bulk_id": os.getenv("POWER_CONED_GREEN_BUTTON_BULK_ID", "").strip(),
+        "scope": os.getenv("POWER_CONED_GREEN_BUTTON_SCOPE", GREEN_BUTTON_DEFAULT_SCOPE).strip(),
+        "approved": os.getenv("POWER_CONED_GREEN_BUTTON_APPROVED", "false").lower() == "true",
+    },
+    "ORU": {
+        "label": "Orange & Rockland",
+        "authorize_url": os.getenv("POWER_ORU_GREEN_BUTTON_AUTHORIZE_URL", "").strip(),
+        "token_url": os.getenv("POWER_ORU_GREEN_BUTTON_TOKEN_URL", "").strip(),
+        "resource_url": os.getenv("POWER_ORU_GREEN_BUTTON_RESOURCE_URL", "").strip(),
+        "client_id": os.getenv("POWER_ORU_GREEN_BUTTON_CLIENT_ID", "").strip(),
+        "client_secret": os.getenv("POWER_ORU_GREEN_BUTTON_CLIENT_SECRET", "").strip(),
+        "bulk_id": os.getenv("POWER_ORU_GREEN_BUTTON_BULK_ID", "").strip(),
+        "scope": os.getenv("POWER_ORU_GREEN_BUTTON_SCOPE", GREEN_BUTTON_DEFAULT_SCOPE).strip(),
+        "approved": os.getenv("POWER_ORU_GREEN_BUTTON_APPROVED", "false").lower() == "true",
+    },
+}
 GREEN_BUTTON_CONNECT_URL = "https://www.greenbuttonalliance.org/green-button-connect-my-data-cmd"
 GREEN_BUTTON_DOWNLOAD_URL = "https://www.greenbuttonalliance.org/green-button-download-my-data-dmd"
 NCUC_DATA_ACCESS_ORDER_URL = "https://starw1.ncuc.gov/NCUC/ViewFile.aspx?Id=b18eb0c3-6968-47d0-adbf-9f1b6ea8f680"
@@ -4980,7 +5017,14 @@ def list_energy_companies() -> list[str]:
 
 
 def list_utility_access_guides() -> list[dict[str, str]]:
-    return [dict(guide) for guide in UTILITY_ACCESS_GUIDES]
+    guides = [dict(guide) for guide in UTILITY_ACCESS_GUIDES]
+    for key, config in GREEN_BUTTON_CONFIG.items():
+        if config.get("approved") and config.get("authorize_url") and config.get("token_url") and config.get("client_id"):
+            guides.append({"id": f"green_button_{key.lower()}", "name": f"{config['label']} Green Button connection",
+                           "status": "Available after utility approval", "summary": "Approve a secure connection through your utility to keep interval history updated. Manual download and upload remain available.",
+                           "action_label": "Read about Green Button Connect My Data", "action_url": GREEN_BUTTON_CONNECT_URL,
+                           "secondary_label": "", "secondary_url": ""})
+    return guides
 
 
 def clean_energy_company(value: str | None) -> str:
@@ -7623,6 +7667,44 @@ def mask_duke_account_number(value: object) -> str:
     return f"Duke account ending {normalized[-4:]}" if normalized else "Duke account"
 
 
+def green_button_provider_key(provider_name: object) -> str | None:
+    normalized = re.sub(r"\s+", " ", str(provider_name or "").strip().lower())
+    return GREEN_BUTTON_PROVIDERS.get(normalized)
+
+
+def green_button_config(provider_key: str) -> dict[str, str]:
+    config = GREEN_BUTTON_CONFIG.get(provider_key) or {}
+    required = ("authorize_url", "token_url", "client_id", "client_secret", "bulk_id")
+    if not config.get("approved") or not all(config.get(key) for key in required):
+        raise ValueError("This utility connection is waiting for utility approval and configuration.")
+    return config
+
+
+def serialize_green_button_secret(provider_key: str, token_data: dict[str, Any], resource_url: str | None = None) -> str:
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise ValueError("The utility did not provide an access token. Connect again.")
+    resource_url = resource_url or str(token_data.get("resourceURI") or token_data.get("resource_uri") or "")
+    if not resource_url:
+        raise ValueError("The utility did not provide a customer data resource. Connect again.")
+    expires_in = int(token_data.get("expires_in") or 3600)
+    token_data = dict(token_data)
+    token_data["expires_at"] = int(time.time()) + max(60, expires_in)
+    return json.dumps({"version": 1, "provider_key": provider_key, "resource_url": resource_url,
+                       "tokens": {key: token_data.get(key) for key in ("access_token", "refresh_token", "token_type", "expires_at")}},
+                      sort_keys=True, separators=(",", ":"))
+
+
+def parse_green_button_secret(value: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("The saved utility connection could not be read. Connect again.") from exc
+    if not isinstance(payload, dict) or not payload.get("provider_key") or not payload.get("resource_url") or not isinstance(payload.get("tokens"), dict):
+        raise ValueError("The saved utility connection is incomplete. Connect again.")
+    return payload
+
+
 def select_duke_account(
     accounts: dict[str, dict[str, Any]],
     expected_account_number: str,
@@ -8212,6 +8294,72 @@ def fetch_utility_connection_export(connection: dict[str, object]) -> dict[str, 
     return {"filename": filename, "content": content}
 
 
+def save_green_button_connection(account_number: str, provider_key: str, secret_payload: str, resource_url: str) -> dict[str, object]:
+    parse_green_button_secret(secret_payload)
+    provider_name = GREEN_BUTTON_CONFIG[provider_key]["label"]
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        existing = conn.execute("SELECT id FROM utility_connections WHERE account_id = ? AND provider_name = ? AND access_method = ?",
+                                (account["id"], provider_name, GREEN_BUTTON_ACCESS_METHOD)).fetchone()
+        values = (GREEN_BUTTON_ACCESS_METHOD, resource_url, build_secret_hash(secret_payload), seal_secret_value(secret_payload), timestamp, account["id"])
+        if existing is None:
+            conn.execute("""INSERT INTO utility_connections
+                (account_id, provider_name, connection_label, access_method, access_identifier, secret_hash, secret_token, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'Connected', ?, ?)""",
+                         (account["id"], provider_name, f"{provider_name} Green Button", *values[:5], timestamp))
+        else:
+            conn.execute("""UPDATE utility_connections SET access_identifier=?, secret_hash=?, secret_token=?, status='Connected', updated_at=?
+                WHERE account_id=? AND id=?""", (resource_url, values[2], values[3], timestamp, account["id"], int(existing["id"])))
+        conn.commit()
+    return list_utility_connections(account_number)[0]
+
+
+def update_green_button_connection_secret(account_number: str, connection_id: int, secret_payload: str) -> None:
+    parse_green_button_secret(secret_payload)
+    with get_db_connection() as conn:
+        account = get_or_create_account(conn, account_number)
+        cursor = conn.execute("""UPDATE utility_connections SET secret_hash=?, secret_token=?, updated_at=?
+            WHERE account_id=? AND id=? AND access_method=?""",
+            (build_secret_hash(secret_payload), seal_secret_value(secret_payload), timestamp_now(), account["id"], int(connection_id), GREEN_BUTTON_ACCESS_METHOD))
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError("That utility connection could not be updated.")
+        conn.commit()
+
+
+def fetch_green_button_export(connection: dict[str, object]) -> dict[str, object]:
+    payload = parse_green_button_secret(str(connection.get("access_secret") or ""))
+    provider_key = str(payload["provider_key"])
+    config = green_button_config(provider_key)
+    tokens = dict(payload["tokens"])
+    token = str(tokens.get("access_token") or "")
+    if not token or float(tokens.get("expires_at") or 0) <= time.time() + 60:
+        refresh_token = str(tokens.get("refresh_token") or "")
+        if not refresh_token:
+            raise ValueError("The utility access has expired. Reconnect the utility account.")
+        form = urlencode({"grant_type": "refresh_token", "refresh_token": refresh_token,
+                          "scope": config.get("scope", "")}).encode()
+        basic = base64.b64encode(f"{config['client_id']}:{config.get('client_secret', '')}".encode()).decode()
+        refresh_request = Request(config["token_url"], data=form, method="POST",
+                                  headers={"Authorization": f"Basic {basic}", "Accept": "application/json",
+                                           "Content-Type": "application/x-www-form-urlencoded"})
+        with urlopen(refresh_request, timeout=30) as response:
+            refreshed = json.loads(response.read().decode("utf-8"))
+        refreshed["refresh_token"] = refreshed.get("refresh_token") or refresh_token
+        refreshed_payload = serialize_green_button_secret(provider_key, refreshed, str(payload["resource_url"]))
+        update_green_button_connection_secret(str(connection["account_number"]), int(connection["id"]), refreshed_payload)
+        tokens = parse_green_button_secret(refreshed_payload)["tokens"]
+        token = str(tokens["access_token"])
+    headers = {"Accept": "application/xml, text/xml", "Authorization": f"Bearer {token}"}
+    request_obj = Request(str(payload["resource_url"]), headers=headers)
+    with urlopen(request_obj, timeout=60) as response:
+        content = response.read(200 * 1024 * 1024 + 1)
+    if len(content) > 200 * 1024 * 1024:
+        raise ValueError("The utility response exceeded the supported batch size.")
+    return {"filename": f"{provider_key.lower()}-green-button.xml", "content": content}
+
+
 def clean_sync_error(error: Exception | str, max_length: int = 240) -> str:
     message = str(error).strip()
     if not message and isinstance(error, Exception):
@@ -8262,6 +8410,12 @@ def sync_utility_connection(account_number: str | None, connection_id: int) -> d
     connection = load_utility_connection_for_sync(account_number, connection_id)
     if connection["access_method"] == DUKE_OAUTH_ACCESS_METHOD:
         imported = sync_duke_oauth_connection(connection)
+    elif connection["access_method"] == GREEN_BUTTON_ACCESS_METHOD:
+        exported = fetch_green_button_export(connection)
+        filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
+        destination = INPUT_DIR / f"utility-sync-{connection_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{filename}"
+        destination.write_bytes(exported.get("content") or b"")
+        imported = import_interval_file_to_db(destination, account_number=connection["account_number"])
     else:
         exported = fetch_utility_connection_export(connection)
         filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
@@ -12729,6 +12883,8 @@ def create_web_app() -> Flask:
             "billing_plans": list_billing_plans(),
             "supported_feeds": list_supported_utility_adapters(),
             "utility_access_guides": list_utility_access_guides(),
+            "configured_green_button_providers": [key.lower() for key, config in GREEN_BUTTON_CONFIG.items()
+                                                   if config.get("approved") and config.get("authorize_url") and config.get("token_url") and config.get("client_id")],
             "duke_oauth_helper_download_url": DUKE_OAUTH_HELPER_DOWNLOAD_URL,
             "csrf_token": get_csrf_token,
             "today_iso": ddate.today().isoformat(),
@@ -15373,6 +15529,66 @@ def create_web_app() -> Flask:
         except Exception as exc:
             flash(str(exc))
         return redirect_back_or_account(account_number)
+
+    @app.post("/utility-connection/green-button/<provider_key>/start")
+    def start_green_button_connection(provider_key):
+        account_number = request.form.get("account_number")
+        actor = require_account_actor(account_number, write=True)
+        if not isinstance(actor, dict):
+            return actor
+        try:
+            account = find_account(account_number)
+            provider_key = provider_key.upper()
+            config = green_button_config(provider_key)
+            if not account or green_button_provider_key(account.get("energy_company")) != provider_key:
+                raise ValueError("Choose the matching utility on the Account page first.")
+            if not account_has_active_data_authorization(account_number):
+                raise ValueError("Customer authorization is required before connecting a utility.")
+            state = secrets.token_urlsafe(32)
+            callback = url_for("green_button_callback", provider_key=provider_key, _external=True)
+            scope = str(config.get("scope") or GREEN_BUTTON_DEFAULT_SCOPE)
+            if ";BR=" not in scope:
+                scope = f"{scope};BR={config['bulk_id']}"
+            params = {"response_type": "code", "client_id": config["client_id"], "redirect_uri": callback,
+                      "state": state, "scope": scope}
+            session[GREEN_BUTTON_PENDING_SESSION_KEY] = {"provider_key": provider_key, "account_number": str(account["account_number"]),
+                                                         "state": state, "started_at": timestamp_now()}
+            return redirect(f"{config['authorize_url']}?{urlencode(params)}")
+        except Exception as exc:
+            flash(str(exc))
+            return redirect_back_or_account(account_number)
+
+    @app.get("/utility-connection/green-button/<provider_key>/callback")
+    def green_button_callback(provider_key):
+        pending = session.get(GREEN_BUTTON_PENDING_SESSION_KEY)
+        try:
+            if not isinstance(pending, dict) or pending.get("provider_key") != provider_key.upper() or request.args.get("state") != pending.get("state"):
+                raise ValueError("The utility authorization could not be matched to this account. Start again.")
+            started_at = datetime.fromisoformat(str(pending.get("started_at") or ""))
+            if started_at + timedelta(minutes=GREEN_BUTTON_EXPIRY_MINUTES) <= datetime.now():
+                raise ValueError("The utility authorization session expired. Start again.")
+            actor = require_account_actor(str(pending.get("account_number") or ""), write=True)
+            if not isinstance(actor, dict) or not account_has_active_data_authorization(str(pending["account_number"])):
+                raise ValueError("Customer authorization is required before connecting a utility.")
+            if request.args.get("error"):
+                raise ValueError("The utility authorization was declined or cancelled.")
+            config = green_button_config(provider_key.upper())
+            callback = url_for("green_button_callback", provider_key=provider_key.upper(), _external=True)
+            body = urlencode({"grant_type": "authorization_code", "code": request.args.get("code", ""), "redirect_uri": callback}).encode()
+            auth = base64.b64encode(f"{config['client_id']}:{config['client_secret']}".encode()).decode()
+            headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+            headers["Authorization"] = f"Basic {auth}"
+            with urlopen(Request(config["token_url"], data=body, headers=headers, method="POST"), timeout=30) as response:
+                tokens = json.loads(response.read().decode("utf-8"))
+            secret_payload = serialize_green_button_secret(provider_key.upper(), tokens, config["resource_url"])
+            save_green_button_connection(str(pending["account_number"]), provider_key.upper(), secret_payload, config["resource_url"])
+            session.pop(GREEN_BUTTON_PENDING_SESSION_KEY, None)
+            flash(f"{config['label']} is connected. Use Sync now for an immediate refresh.")
+            return redirect(url_for("customer_utility_page", account_number=pending["account_number"]))
+        except Exception as exc:
+            session.pop(GREEN_BUTTON_PENDING_SESSION_KEY, None)
+            flash(str(exc) if isinstance(exc, ValueError) else "The utility connection could not be completed. Start again.")
+            return redirect(url_for("customer_utility_page", account_number=(pending or {}).get("account_number")))
 
     @app.post("/utility-connection/duke/start")
     def start_duke_connection():
