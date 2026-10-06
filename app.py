@@ -32,7 +32,8 @@ from datetime import date as ddate, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.error import HTTPError
 from uuid import uuid4
 
 import aiohttp
@@ -387,6 +388,15 @@ GREEN_BUTTON_CONFIG = {
         "approved": os.getenv("POWER_ORU_GREEN_BUTTON_APPROVED", "false").lower() == "true",
     },
 }
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("The utility returned an unexpected redirect.")
+
+
+def no_redirect_opener():
+    return build_opener(_RejectRedirects)
 GREEN_BUTTON_CONNECT_URL = "https://www.greenbuttonalliance.org/green-button-connect-my-data-cmd"
 GREEN_BUTTON_DOWNLOAD_URL = "https://www.greenbuttonalliance.org/green-button-download-my-data-dmd"
 XCEL_GREEN_BUTTON_APPLICATION_URL = "https://www.xcelenergy.com/staticfiles/xe-responsive/Partners/Green_Button_Program_Service_Application.pdf"
@@ -7703,7 +7713,7 @@ def serialize_green_button_secret(provider_key: str, token_data: dict[str, Any],
     token_data = dict(token_data)
     token_data["expires_at"] = int(time.time()) + max(60, expires_in)
     return json.dumps({"version": 1, "provider_key": provider_key, "resource_url": resource_url,
-                       "tokens": {key: token_data.get(key) for key in ("access_token", "refresh_token", "token_type", "expires_at")}},
+                       "tokens": {key: token_data.get(key) for key in ("access_token", "refresh_token", "token_type", "expires_at", "scope")}},
                       sort_keys=True, separators=(",", ":"))
 
 
@@ -8355,13 +8365,16 @@ def fetch_green_button_export(connection: dict[str, object]) -> dict[str, object
         if not refresh_token:
             raise ValueError("The utility access has expired. Reconnect the utility account.")
         form = urlencode({"grant_type": "refresh_token", "refresh_token": refresh_token,
-                          "scope": config.get("scope", "")}).encode()
+                          "scope": str(tokens.get("scope") or config.get("scope", ""))}).encode()
         basic = base64.b64encode(f"{config['client_id']}:{config.get('client_secret', '')}".encode()).decode()
         refresh_request = Request(config["token_url"], data=form, method="POST",
                                   headers={"Authorization": f"Basic {basic}", "Accept": "application/json",
                                            "Content-Type": "application/x-www-form-urlencoded"})
         with urlopen(refresh_request, timeout=30) as response:
-            refreshed = json.loads(response.read().decode("utf-8"))
+            raw = response.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("The utility token response exceeded the supported size.")
+        refreshed = json.loads(raw.decode("utf-8"))
         refreshed["refresh_token"] = refreshed.get("refresh_token") or refresh_token
         refreshed_payload = serialize_green_button_secret(provider_key, refreshed, str(payload["resource_url"]))
         update_green_button_connection_secret(str(connection["account_number"]), int(connection["id"]), refreshed_payload)
@@ -8369,7 +8382,7 @@ def fetch_green_button_export(connection: dict[str, object]) -> dict[str, object
         token = str(tokens["access_token"])
     headers = {"Accept": "application/xml, text/xml", "Authorization": f"Bearer {token}"}
     request_obj = Request(str(payload["resource_url"]), headers=headers)
-    with urlopen(request_obj, timeout=60) as response:
+    with no_redirect_opener().open(request_obj, timeout=60) as response:
         content = response.read(200 * 1024 * 1024 + 1)
     if len(content) > 200 * 1024 * 1024:
         raise ValueError("The utility response exceeded the supported batch size.")
@@ -15596,8 +15609,9 @@ def create_web_app() -> Flask:
             headers["Authorization"] = f"Basic {auth}"
             with urlopen(Request(config["token_url"], data=body, headers=headers, method="POST"), timeout=30) as response:
                 tokens = json.loads(response.read().decode("utf-8"))
-            secret_payload = serialize_green_button_secret(provider_key.upper(), tokens, config["resource_url"])
-            save_green_button_connection(str(pending["account_number"]), provider_key.upper(), secret_payload, config["resource_url"])
+            secret_payload = serialize_green_button_secret(provider_key.upper(), tokens)
+            parsed_secret = parse_green_button_secret(secret_payload)
+            save_green_button_connection(str(pending["account_number"]), provider_key.upper(), secret_payload, str(parsed_secret["resource_url"]))
             session.pop(GREEN_BUTTON_PENDING_SESSION_KEY, None)
             flash(f"{config['label']} is connected. Use Sync now for an immediate refresh.")
             return redirect(url_for("customer_utility_page", account_number=pending["account_number"]))
