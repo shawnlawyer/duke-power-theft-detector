@@ -1,6 +1,6 @@
 # Xcel Energy Green Button provider registration
 
-Prepared for Epistemic Cognition Inc. on October 6, 2026. Xcel has retired the older PDF application. The current registration is [Xcel's Green Button vendor form](https://myenergy.xcelenergy.com/greenbutton/green-vendor). This packet is not a submitted registration.
+Prepared for Epistemic Cognition Inc. on October 6, 2026. Xcel directed us to the current [Green Button vendor form](https://myenergy.xcelenergy.com/greenbutton/green-vendor) and said it is in the process of removing the older PDF application. This packet is not a submitted registration.
 
 ## Values ready to transfer to Xcel's current form
 
@@ -19,12 +19,12 @@ Prepared for Epistemic Cognition Inc. on October 6, 2026. Xcel has retired the o
 - Physical company address
 - Mailing address, if different
 - State and ZIP for each address
-- Primary and per-service-area contact information
-- Logo URI and privacy-policy URI, if required by the current form
-- Notification URL and redirect URL, after Xcel provides or confirms the technical endpoint requirements
+- One business contact shown by the current form
+- Required logo URI and policy URI
+- Required notification URL and redirect URL, only after those endpoints are implemented and verified against the confirmed protocol
 - Any new password requested by Xcel, entered directly into Xcel's form and never stored here
 
-Do not place the tax identifier, private address, passwords, or operational endpoint values in this repository.
+Do not place the tax identifier, private address, passwords, tokens, credentials, or secret-bearing URLs in this repository. Public operational URLs may be tracked once their implementation and protocol behavior are verified.
 
 ## Current product and data path
 
@@ -35,9 +35,9 @@ Xcel's October 6, 2026 response confirmed that no Green Button certification is 
 ## Submission checklist
 
 1. Complete the current online registration with verified business and contact details.
-2. Add only truthful logo/privacy URLs and service-area selections.
-3. Do not invent notification or redirect URLs; defer those fields until Xcel's current technical instructions identify the correct values.
+2. Add the required logo and policy URIs and truthful service-area selections.
+3. Implement and verify notification and redirect endpoints against the confirmed protocol before entering their public URLs.
 4. Treat the confirmed no-certification/no-fee/no-sandbox facts as onboarding information, not as approval or live access.
 5. Submit the current registration only through the authorized owner workflow.
 
-The older PDF application is retired. Xcel's current registration form and vendor/service-provider guides are the source for the remaining fields and technical workflow. No callback or notification endpoint is represented as operational in this repository.
+Xcel's current registration form and vendor/service-provider guides are the source for the remaining fields and technical workflow. No callback or notification endpoint is represented as operational in this repository.

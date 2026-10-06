@@ -1,4 +1,10 @@
-Status: Sent October 6, 2026. Do not resend.
+Status: Historical draft only; this text is not exact sent correspondence. Do not resend.
+
+Verified transmission metadata:
+
+- Initial onboarding message sent: October 6, 2026, 12:11:42 UTC (Sent285)
+- Xcel reply received: October 6, 2026, 12:50:05 UTC (INBOX154)
+- Separate technical clarification reply sent: October 6, 2026, 13:14:24 UTC (Sent287)
 
 Subject: Home Energy Watch — Green Button provider onboarding questions
 

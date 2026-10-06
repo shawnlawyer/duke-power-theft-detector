@@ -349,8 +349,10 @@ def test_xcel_customer_guidance_uses_download_path_without_live_connect_claim():
     assert xcel["action_url"] == app.XCEL_MY_ACCOUNT_URL
     assert "Green Button" in xcel["summary"]
     assert "live" not in xcel["summary"].lower()
+    assert xcel["secondary_url"] == "https://myenergy.xcelenergy.com/greenbutton/green-vendor"
     assert xcel["secondary_url"] == app.XCEL_GREEN_BUTTON_APPLICATION_URL
     assert xcel["secondary_label"] == "Open Xcel provider registration"
+    assert "Green_Button_Program_Service_Application.pdf" not in json.dumps(xcel)
 
 
 def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(tmp_path, monkeypatch):
