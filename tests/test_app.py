@@ -9,6 +9,7 @@ from io import BytesIO, StringIO
 from datetime import date as ddate, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from xml.etree import ElementTree as ET
 
 import app
 import pandas as pd
@@ -365,9 +366,14 @@ def test_xcel_logo_assets_are_public_safe_and_dimensioned(tmp_path, monkeypatch)
     svg_text = svg.get_data(as_text=True)
     assert 'width="260"' in svg_text
     assert 'height="260"' in svg_text
-    assert "<script" not in svg_text.lower()
-    assert "external" not in svg_text.lower()
-    assert "xlink:href" not in svg_text.lower()
+    root = ET.fromstring(svg.data)
+    assert {element.tag.rsplit("}", 1)[-1] for element in root.iter()} <= {"svg", "title", "desc", "rect", "text"}
+    allowed_attributes = {
+        "width", "height", "viewBox", "role", "aria-labelledby", "id", "fill", "x", "y",
+        "font-family", "font-size", "font-weight", "letter-spacing", "text-anchor",
+    }
+    assert all(attribute.rsplit("}", 1)[-1] in allowed_attributes for element in root.iter() for attribute in element.attrib)
+    assert all(not attribute.lower().startswith("on") for element in root.iter() for attribute in element.attrib)
 
     png = client.get("/static/home-energy-watch-mark.png")
     assert png.status_code == 200
