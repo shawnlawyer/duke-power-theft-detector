@@ -1,8 +1,8 @@
-# Xcel Energy Green Button provider application
+# Xcel Energy Green Button provider registration
 
-Prepared for Epistemic Cognition Inc. on October 6, 2026. This is a working packet, not a submitted application.
+Prepared for Epistemic Cognition Inc. on October 6, 2026. Xcel has retired the older PDF application. The current registration is [Xcel's Green Button vendor form](https://myenergy.xcelenergy.com/greenbutton/green-vendor). This packet is not a submitted registration.
 
-## Values ready to transfer to Xcel's form
+## Values ready to transfer to Xcel's current form
 
 - Legal company name: Epistemic Cognition Inc.
 - Website: https://homeenergywatch.com
@@ -11,29 +11,33 @@ Prepared for Epistemic Cognition Inc. on October 6, 2026. This is a working pack
 - Email: shawn@epistemiccognition.com
 - Display name: Home Energy Watch
 - Service description (150 characters maximum): Review your Xcel Energy Green Button usage history and keep overlapping interval files in one customer-owned record.
-- Service areas: Select only the Xcel service areas that Epistemic Cognition Inc. is prepared to support after confirming coverage with Xcel.
+- Service areas: The current form lists Colorado, Michigan, Minnesota, Wisconsin, New Mexico, Texas, North Dakota, and South Dakota. Select intended coverage directly in Xcel's form.
 
-## Values that must be supplied from business records
+## Values that must be supplied from business records or the current form
 
 - Tax Identification Number
 - Physical company address
 - Mailing address, if different
 - State and ZIP for each address
-- Primary contact first and last name as used on the application
-- Per-service-area contact information, if Xcel requires it for the selected areas
+- Primary and per-service-area contact information
+- Logo URI and privacy-policy URI, if required by the current form
+- Notification URL and redirect URL, after Xcel provides or confirms the technical endpoint requirements
+- Any new password requested by Xcel, entered directly into Xcel's form and never stored here
 
-Do not place the tax identifier or private address in this repository. Enter those fields directly into Xcel's current form.
+Do not place the tax identifier, private address, passwords, or operational endpoint values in this repository.
 
 ## Current product and data path
 
 Home Energy Watch accepts Green Button ESPI XML through its existing upload flow. It parses `IntervalBlock` and `IntervalReading` values, preserves the source interval duration and units, scopes readings to the selected customer account, and keeps existing readings when a later file overlaps or conflicts. The product currently supports customer download/upload for Xcel; it does not claim a live Xcel Connect My Data connection.
 
+Xcel's October 6, 2026 response confirmed that no Green Button certification is required, Xcel does not charge Green Button Connect fees, and Xcel does not provide a test environment. Those facts do not establish live approval or customer access for Home Energy Watch.
+
 ## Submission checklist
 
-1. Confirm the missing legal fields from the company's records.
-2. Confirm the service areas and any current Xcel technical or testing requirements.
-3. Confirm whether registration, required testing, certification, or ongoing data access has any fee. The reviewed application does not publish a fee schedule.
-4. Complete and sign Xcel's current form only after reviewing those answers.
-5. Email the completed application to `greenbuttonsupport@xcelenergy.com` only after Shawn authorizes submission.
+1. Complete the current online registration with verified business and contact details.
+2. Add only truthful logo/privacy URLs and service-area selections.
+3. Do not invent notification or redirect URLs; defer those fields until Xcel's current technical instructions identify the correct values.
+4. Treat the confirmed no-certification/no-fee/no-sandbox facts as onboarding information, not as approval or live access.
+5. Submit the current registration only through the authorized owner workflow.
 
-Source: [Xcel Energy Green Button Program Service Application](https://www.xcelenergy.com/staticfiles/xe-responsive/Partners/Green_Button_Program_Service_Application.pdf). The reviewed form says providers must use Connect My Data and be Green Button compliant, lists Colorado, Michigan, Minnesota, Wisconsin, New Mexico, Texas, North Dakota, and South Dakota, and says processing may take up to ten business days.
+The older PDF application is retired. Xcel's current registration form and vendor/service-provider guides are the source for the remaining fields and technical workflow. No callback or notification endpoint is represented as operational in this repository.

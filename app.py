@@ -352,7 +352,7 @@ DUKE_OAUTH_EXPIRY_MINUTES = 10
 DUKE_SYNC_LOOKBACK_DAYS = 30
 GREEN_BUTTON_CONNECT_URL = "https://www.greenbuttonalliance.org/green-button-connect-my-data-cmd"
 GREEN_BUTTON_DOWNLOAD_URL = "https://www.greenbuttonalliance.org/green-button-download-my-data-dmd"
-XCEL_GREEN_BUTTON_APPLICATION_URL = "https://www.xcelenergy.com/staticfiles/xe-responsive/Partners/Green_Button_Program_Service_Application.pdf"
+XCEL_GREEN_BUTTON_APPLICATION_URL = "https://myenergy.xcelenergy.com/greenbutton/green-vendor"
 XCEL_MY_ACCOUNT_URL = "https://myenergy.xcelenergy.com/"
 NCUC_DATA_ACCESS_ORDER_URL = "https://starw1.ncuc.gov/NCUC/ViewFile.aspx?Id=b18eb0c3-6968-47d0-adbf-9f1b6ea8f680"
 UTILITY_ACCESS_GUIDES = (
@@ -393,7 +393,7 @@ UTILITY_ACCESS_GUIDES = (
         "summary": "In Xcel Energy My Account, use Green Button Download My Data to save your usage file, then upload the Green Button XML from History. Home Energy Watch accepts the standard Green Button format and keeps overlapping readings from replacing older records.",
         "action_label": "Open Xcel My Account",
         "action_url": XCEL_MY_ACCOUNT_URL,
-        "secondary_label": "View Xcel provider application",
+        "secondary_label": "Open Xcel provider registration",
         "secondary_url": XCEL_GREEN_BUTTON_APPLICATION_URL,
     },
     {

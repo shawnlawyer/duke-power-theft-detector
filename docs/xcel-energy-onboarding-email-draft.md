@@ -1,8 +1,10 @@
+Status: Sent October 6, 2026. Do not resend.
+
 Subject: Home Energy Watch — Green Button provider onboarding questions
 
 Hello Xcel Energy Green Button Support,
 
-Epistemic Cognition Inc. is preparing an application for Home Energy Watch, a customer-facing tool that reviews a customer's Xcel Energy Green Button usage history. We are reviewing the Green Button Program Service Application and would appreciate the current technical onboarding instructions before submitting it.
+Epistemic Cognition Inc. is preparing the current online Green Button vendor registration for Home Energy Watch, a customer-facing tool that reviews a customer's Xcel Energy Green Button usage history. We would appreciate the current technical onboarding instructions before completing registration.
 
 Could you please confirm:
 

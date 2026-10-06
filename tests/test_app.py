@@ -350,6 +350,7 @@ def test_xcel_customer_guidance_uses_download_path_without_live_connect_claim():
     assert "Green Button" in xcel["summary"]
     assert "live" not in xcel["summary"].lower()
     assert xcel["secondary_url"] == app.XCEL_GREEN_BUTTON_APPLICATION_URL
+    assert xcel["secondary_label"] == "Open Xcel provider registration"
 
 
 def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(tmp_path, monkeypatch):
