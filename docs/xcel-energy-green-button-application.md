@@ -10,6 +10,7 @@ Prepared for Epistemic Cognition Inc. on October 6, 2026. Xcel directed us to th
 - Phone: 718-864-2801
 - Email: shawn@epistemiccognition.com
 - Display name: Home Energy Watch
+- Candidate logo URI (pending deployment and public HTTP verification): https://app.homeenergywatch.com/static/home-energy-watch-mark.svg
 - Service description (150 characters maximum): Review your Xcel Energy Green Button usage history and keep overlapping interval files in one customer-owned record.
 - Service areas: The current form lists Colorado, Michigan, Minnesota, Wisconsin, New Mexico, Texas, North Dakota, and South Dakota. Select intended coverage directly in Xcel's form.
 
