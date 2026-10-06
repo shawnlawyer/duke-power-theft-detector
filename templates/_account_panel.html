@@ -446,6 +446,7 @@
   </div>
 
   {% set provider_is_duke = 'duke' in ((selected_connection_provider or '')|lower) %}
+  {% set provider_is_xcel = 'xcel' in ((selected_connection_provider or '')|lower) %}
   {% if provider_is_duke %}
     <div class="connection-workflow">
       <div class="section-header">
@@ -504,23 +505,22 @@
     </div>
   {% endif %}
 
-  {% set green_button_provider = (selected_connection_provider or '')|lower %}
-  {% set green_button_key = 'CONED' if 'con edison' in green_button_provider else ('ORU' if ('orange & rockland' in green_button_provider or 'orange and rockland' in green_button_provider) else '') %}
-  {% if green_button_key and green_button_key|lower in (configured_green_button_providers|default([])) %}
+  {% if provider_is_xcel %}
     <div class="connection-workflow">
-      <div class="section-header"><div>
-        <p class="section-kicker">Green Button Connect My Data</p>
-        <h3>Keep {{ selected_connection_provider }} history updated.</h3>
-        <p class="plain-note">You approve access through your utility. Home Energy Watch stores the resulting connection securely and keeps file upload available.</p>
-      </div></div>
-      {% if can_manage_account %}
-        <form action="{{ url_for('start_green_button_connection', provider_key=green_button_key) }}" method="post">
-          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
-          <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
-          <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Connect through {{ selected_connection_provider }}</button>
-        </form>
-      {% endif %}
-      {% if not data_permission_active %}<p class="plain-note">Give account permission above before starting the utility connection.</p>{% endif %}
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Xcel Energy file connection</p>
+          <h3>Download your Xcel history, then upload it here.</h3>
+          <p class="plain-note">Xcel's customer download is available now. Home Energy Watch reads the Green Button XML file and adds it to this account's existing history. A live Xcel connection is not available until Xcel approves the provider registration and supplies the technical onboarding details.</p>
+        </div>
+      </div>
+      <ol class="workflow-steps">
+        <li><strong>Open Xcel My Account.</strong><span>Sign in to Xcel Energy and open the usage or Green Button Download My Data area.</span><a class="inline-link" href="https://myenergy.xcelenergy.com/" target="_blank" rel="noopener">Open Xcel My Account</a></li>
+        <li><strong>Download the Green Button file.</strong><span>Choose the account and date range, then save the XML file to your computer.</span></li>
+        <li><strong>Upload it from History.</strong><span>Use the History page for this account. New readings are added without overwriting older readings when files overlap.</span>
+          {% if is_customer %}<a class="inline-link" href="{{ url_for('customer_history_page', account_number=current_account.account_number) }}">Open History</a>{% else %}<a class="inline-link" href="{{ url_for('history_page', account_number=current_account.account_number) }}">Open History</a>{% endif %}
+        </li>
+      </ol>
     </div>
   {% endif %}
 
