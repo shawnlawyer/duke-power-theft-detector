@@ -121,6 +121,52 @@ Connections use `access_method=duke_oauth`. `sync_utility_connection()` dispatch
 
 Production must run `python app.py --sync-utilities` daily. A failed or expired Duke token should mark the connection failed and tell the customer to connect again; it must not remove existing readings. Keep the manual Duke Usage Details link and History upload UI available even when a Duke automatic connection exists.
 
+### Con Edison and Orange & Rockland connector draft
+
+This connector is **unfinished and disabled**. `GREEN_BUTTON_IMPLEMENTATION_READY`
+is deliberately false in source, independent of deployment settings or utility
+approval. The same check gates the displayed connection controls, authorization
+start/callback, connection save, and manual/scheduled fetch. Do not remove it to
+make a registration or demonstration appear complete. Customer uploads remain
+the supported launch path.
+
+The draft uses provider-returned resource URIs, encrypted token storage, bounded
+HTTPS requests with no redirects, preserved customer-granted refresh scope, and
+a stored account/subscription binding. Consent and credential checks guard
+refresh and import; conditional credential updates cannot restore a connection
+that was revoked or replaced. Imports acquire consent and connection locks in
+the same transaction as the interval writes. SQLite regression tests exercise
+revocation before import and during refresh/download; PostgreSQL concurrency
+behavior still needs integration testing.
+
+The account check currently accepts only the explicit `AuthorizationModel`
+shape in the published utility Swagger: the selected account, returned resource,
+retail customer, and one matching subscription must agree. Unknown wrappers or
+XML identity responses fail closed. Fixtures are synthetic and do **not** prove
+compatibility with the utility's actual responses. The existing configured
+`resource_url` value is not used to override the customer-specific token response.
+
+Before activation, finish and verify with utility-issued test credentials:
+
+1. Exact authorization/customer/usage-point relationships, scopes, expiry,
+   revocation responses, and the supported JSON/XML response shapes.
+2. The documented asynchronous batch lifecycle: persist pending requests,
+   authenticate and correlate notifications, fetch every authorized chunk,
+   validate each file's account identity, retry idempotently without duplicate
+   pending requests, and handle expiry. HTTP 202 currently raises an error; it
+   is never recorded as a completed empty export.
+3. Any separately hosted batch-download origins and their credential rules.
+   The draft currently allows only the token endpoint's full HTTPS origin.
+4. Real PostgreSQL concurrent revocation/reconnect/import tests, utility
+   acceptance, documented no-cost access, and explicit approval to activate.
+
+The current unit/SQLite tests are in `tests/test_green_button.py`. They do not
+replace the utility's acceptance tests or establish provider certification.
+
+Source: [Con Edison Share My Data onboarding guide](https://www.coned.com/-/media/files/coned/documents/accountandbilling/share-my-data/onboarding-doc.pdf),
+including the Swagger and Postman downloads linked on pages 22–23. Do not commit
+signed download URLs, utility credentials, or customer response payloads.
+
 ## Weather, inventory, and baselines
 
 Household inventory is stored through `account_load_items`; the all-on check compares inventory wattage assumptions with measured load. Weather is fetched and cached through the account weather helpers, then added to suspicious-day and hourly views.
