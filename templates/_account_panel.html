@@ -446,6 +446,7 @@
   </div>
 
   {% set provider_is_duke = 'duke' in ((selected_connection_provider or '')|lower) %}
+  {% set provider_is_xcel = 'xcel' in ((selected_connection_provider or '')|lower) %}
   {% if provider_is_duke %}
     <div class="connection-workflow">
       <div class="section-header">
@@ -501,6 +502,26 @@
           <a class="inline-link" href="{{ url_for('history_page', account_number=current_account.account_number) }}">Upload it from History</a>.
         {% endif %}
       </p>
+    </div>
+  {% endif %}
+
+  {% if provider_is_xcel %}
+    <div class="connection-workflow">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Xcel Energy file connection</p>
+          <h3>Download your Xcel history, then upload it here.</h3>
+          <p class="plain-note">Xcel's customer download is available now. Home Energy Watch reads the Green Button XML file and adds it to this account's existing history. A live Xcel connection is not available until Xcel approves the provider registration and supplies the technical onboarding details.</p>
+        </div>
+      </div>
+      <ol class="workflow-steps">
+        <li><strong>Open Xcel My Account.</strong><span>Sign in to Xcel Energy and open the usage or Green Button Download My Data area.</span><a class="inline-link" href="https://myenergy.xcelenergy.com/" target="_blank" rel="noopener">Open Xcel My Account</a></li>
+        <li><strong>Download the Green Button file.</strong><span>Choose the account and date range, then save the XML file to your computer.</span></li>
+        <li><strong>Upload it from History.</strong><span>Use the History page for this account. New readings are added without overwriting older readings when files overlap.</span>
+          {% if is_customer %}<a class="inline-link" href="{{ url_for('customer_history_page', account_number=current_account.account_number) }}">Open History</a>{% else %}<a class="inline-link" href="{{ url_for('history_page', account_number=current_account.account_number) }}">Open History</a>{% endif %}
+        </li>
+      </ol>
+      <p class="plain-note">The provider application is prepared for review, but it has not been submitted and Xcel approval or ongoing access should not be assumed.</p>
     </div>
   {% endif %}
 

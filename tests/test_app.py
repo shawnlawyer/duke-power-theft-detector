@@ -343,6 +343,30 @@ def test_supported_utility_adapter_registry_lists_current_formats():
     assert all(item["status"] == "supported" for item in supported)
 
 
+def test_xcel_customer_guidance_uses_download_path_without_live_connect_claim():
+    guides = app.list_utility_access_guides()
+    xcel = next(item for item in guides if item["id"] == "xcel_download")
+    assert xcel["action_url"] == app.XCEL_MY_ACCOUNT_URL
+    assert "Green Button" in xcel["summary"]
+    assert "live" not in xcel["summary"].lower()
+    assert xcel["secondary_url"] == app.XCEL_GREEN_BUTTON_APPLICATION_URL
+
+
+def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.save_account_profile(
+        "xcel-1",
+        display_name="Xcel home",
+        energy_company="Xcel Energy",
+    )
+    client = app.web_app.test_client()
+    response = client.get("/account", query_string={"account_number": "xcel-1"})
+    assert response.status_code in {200, 302}
+    if response.status_code == 200:
+        body = response.get_data(as_text=True)
+        assert "Download your Xcel history" in body
+        assert "Xcel's customer download is available now" in body
+        assert "Start Xcel sign-in" not in body
 def test_energy_company_lookup_uses_service_location_and_territory(monkeypatch):
     requested_urls = []
 
@@ -4307,6 +4331,7 @@ def test_utility_access_guides_cover_manual_connect_and_ncuc_paths():
         "duke_download",
         "green_button_connect",
         "ncuc_data_access",
+        "xcel_download",
     }
     automatic_guide = next(guide for guide in guides if guide["id"] == "duke_automatic")
     assert automatic_guide["action_label"] == "Download the Chrome helper"
