@@ -9,6 +9,7 @@ from io import BytesIO, StringIO
 from datetime import date as ddate, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from xml.etree import ElementTree as ET
 
 import app
 import pandas as pd
@@ -353,6 +354,33 @@ def test_xcel_customer_guidance_uses_download_path_without_live_connect_claim():
     assert xcel["secondary_url"] == app.XCEL_GREEN_BUTTON_APPLICATION_URL
     assert xcel["secondary_label"] == "Open Xcel provider registration"
     assert "Green_Button_Program_Service_Application.pdf" not in json.dumps(xcel)
+
+
+def test_xcel_logo_assets_are_public_safe_and_dimensioned(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    client = app.web_app.test_client()
+
+    svg = client.get("/static/home-energy-watch-mark.svg")
+    assert svg.status_code == 200
+    assert svg.mimetype == "image/svg+xml"
+    svg_text = svg.get_data(as_text=True)
+    assert 'width="260"' in svg_text
+    assert 'height="260"' in svg_text
+    root = ET.fromstring(svg.data)
+    assert {element.tag.rsplit("}", 1)[-1] for element in root.iter()} <= {"svg", "title", "desc", "rect", "text"}
+    allowed_attributes = {
+        "width", "height", "viewBox", "role", "aria-labelledby", "id", "fill", "x", "y",
+        "font-family", "font-size", "font-weight", "letter-spacing", "text-anchor",
+    }
+    assert all(attribute.rsplit("}", 1)[-1] in allowed_attributes for element in root.iter() for attribute in element.attrib)
+    assert all(not attribute.lower().startswith("on") for element in root.iter() for attribute in element.attrib)
+
+    png = client.get("/static/home-energy-watch-mark.png")
+    assert png.status_code == 200
+    assert png.mimetype == "image/png"
+    from io import BytesIO
+    from PIL import Image
+    assert Image.open(BytesIO(png.data)).size == (260, 260)
 
 
 def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(tmp_path, monkeypatch):
