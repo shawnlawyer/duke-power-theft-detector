@@ -7727,6 +7727,47 @@ def parse_green_button_secret(value: str) -> dict[str, Any]:
     return payload
 
 
+def _find_values(value: Any, names: set[str]) -> list[str]:
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if str(key).lower() in {name.lower() for name in names} and child not in (None, ""):
+                found.append(str(child))
+            found.extend(_find_values(child, names))
+    elif isinstance(value, list):
+        for child in value:
+            found.extend(_find_values(child, names))
+    elif isinstance(value, etree._Element):
+        for element in value.iter():
+            if xml_local_name(element.tag).lower() in {name.lower() for name in names} and element.text:
+                found.append(element.text)
+    return found
+
+
+def validate_green_button_customer_resource(provider_key: str, token_data: dict[str, Any], expected_account: str) -> None:
+    resource = str(token_data.get("customerResourceURI") or token_data.get("customer_resource_uri") or "")
+    if not resource:
+        raise ValueError("The utility authorization did not return a customer resource.")
+    config = green_button_config(provider_key)
+    resource_parts = urlsplit(resource)
+    token_parts = urlsplit(config["token_url"])
+    if resource_parts.scheme != "https" or resource_parts.hostname != token_parts.hostname:
+        raise ValueError("The utility returned an unexpected customer resource.")
+    request_obj = Request(resource, headers={"Accept": "application/json, application/xml, text/xml"})
+    with no_redirect_opener().open(request_obj, timeout=30) as response:
+        raw = response.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ValueError("The utility customer response exceeded the supported size.")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        document = etree.fromstring(raw)
+    accounts = _find_values(document, {"AccountNumber", "accountNumber", "accountId"})
+    normalized_expected = normalize_account_number(expected_account)
+    if not accounts or not any(normalize_account_number(item) == normalized_expected for item in accounts):
+        raise ValueError("The utility did not return the selected account.")
+
+
 def select_duke_account(
     accounts: dict[str, dict[str, Any]],
     expected_account_number: str,
@@ -15609,6 +15650,7 @@ def create_web_app() -> Flask:
             headers["Authorization"] = f"Basic {auth}"
             with urlopen(Request(config["token_url"], data=body, headers=headers, method="POST"), timeout=30) as response:
                 tokens = json.loads(response.read().decode("utf-8"))
+            validate_green_button_customer_resource(provider_key.upper(), tokens, str(pending["account_number"]))
             secret_payload = serialize_green_button_secret(provider_key.upper(), tokens)
             parsed_secret = parse_green_button_secret(secret_payload)
             save_green_button_connection(str(pending["account_number"]), provider_key.upper(), secret_payload, str(parsed_secret["resource_url"]))
