@@ -8344,6 +8344,10 @@ def fetch_green_button_export(connection: dict[str, object]) -> dict[str, object
     payload = parse_green_button_secret(str(connection.get("access_secret") or ""))
     provider_key = str(payload["provider_key"])
     config = green_button_config(provider_key)
+    resource_parts = urlsplit(str(payload["resource_url"]))
+    token_parts = urlsplit(str(config["token_url"]))
+    if resource_parts.scheme != "https" or not resource_parts.hostname or resource_parts.hostname != token_parts.hostname:
+        raise ValueError("The utility returned an unexpected data resource.")
     tokens = dict(payload["tokens"])
     token = str(tokens.get("access_token") or "")
     if not token or float(tokens.get("expires_at") or 0) <= time.time() + 60:
