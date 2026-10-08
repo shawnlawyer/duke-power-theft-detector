@@ -524,6 +524,26 @@
     </div>
   {% endif %}
 
+  {% set green_button_provider = (selected_connection_provider or '')|lower %}
+  {% set green_button_key = 'CONED' if 'con edison' in green_button_provider else ('ORU' if ('orange & rockland' in green_button_provider or 'orange and rockland' in green_button_provider) else '') %}
+  {% if green_button_key and green_button_key|lower in (configured_green_button_providers|default([])) %}
+    <div class="connection-workflow">
+      <div class="section-header"><div>
+        <p class="section-kicker">Green Button Connect My Data</p>
+        <h3>Keep {{ selected_connection_provider }} history updated.</h3>
+        <p class="plain-note">You approve access through your utility. Home Energy Watch stores the resulting connection securely and keeps file upload available.</p>
+      </div></div>
+      {% if can_manage_account %}
+        <form action="{{ url_for('start_green_button_connection', provider_key=green_button_key) }}" method="post">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+          <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Connect through {{ selected_connection_provider }}</button>
+        </form>
+      {% endif %}
+      {% if not data_permission_active %}<p class="plain-note">Give account permission above before starting the utility connection.</p>{% endif %}
+    </div>
+  {% endif %}
+
   {% if can_manage_account %}
     <div class="section-header connection-form-heading">
       <div>

@@ -31,8 +31,9 @@ import zipfile
 from datetime import date as ddate, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.error import HTTPError
 from uuid import uuid4
 
 import aiohttp
@@ -350,6 +351,55 @@ DUKE_OAUTH_CONNECTION_LABEL = "Duke automatic feed"
 DUKE_OAUTH_PENDING_SESSION_KEY = "pending_duke_oauth"
 DUKE_OAUTH_EXPIRY_MINUTES = 10
 DUKE_SYNC_LOOKBACK_DAYS = 30
+GREEN_BUTTON_ACCESS_METHOD = "green_button_oauth"
+GREEN_BUTTON_PENDING_SESSION_KEY = "pending_green_button"
+GREEN_BUTTON_EXPIRY_MINUTES = 10
+# Deliberately not an environment flag: batch delivery and utility acceptance
+# tests must be completed before any customer-facing entry point is enabled.
+GREEN_BUTTON_IMPLEMENTATION_READY = False
+GREEN_BUTTON_PROVIDERS = {
+    "con edison": "CONED",
+    "con edison company of new york": "CONED",
+    "orange & rockland": "ORU",
+    "orange and rockland": "ORU",
+}
+GREEN_BUTTON_DEFAULT_SCOPE = os.getenv(
+    "POWER_GREEN_BUTTON_SCOPE",
+    "FB=1_3_4_5_7_8_10_15_16_51_53_56_57_58_60;IntervalDuration=Monthly_3600_900_300;BlockDuration=Monthly_Daily;HistoryLength=63072000",
+).strip()
+GREEN_BUTTON_CONFIG = {
+    "CONED": {
+        "label": "Con Edison",
+        "authorize_url": os.getenv("POWER_CONED_GREEN_BUTTON_AUTHORIZE_URL", "").strip(),
+        "token_url": os.getenv("POWER_CONED_GREEN_BUTTON_TOKEN_URL", "").strip(),
+        "resource_url": os.getenv("POWER_CONED_GREEN_BUTTON_RESOURCE_URL", "").strip(),
+        "client_id": os.getenv("POWER_CONED_GREEN_BUTTON_CLIENT_ID", "").strip(),
+        "client_secret": os.getenv("POWER_CONED_GREEN_BUTTON_CLIENT_SECRET", "").strip(),
+        "bulk_id": os.getenv("POWER_CONED_GREEN_BUTTON_BULK_ID", "").strip(),
+        "scope": os.getenv("POWER_CONED_GREEN_BUTTON_SCOPE", GREEN_BUTTON_DEFAULT_SCOPE).strip(),
+        "approved": os.getenv("POWER_CONED_GREEN_BUTTON_APPROVED", "false").lower() == "true",
+    },
+    "ORU": {
+        "label": "Orange & Rockland",
+        "authorize_url": os.getenv("POWER_ORU_GREEN_BUTTON_AUTHORIZE_URL", "").strip(),
+        "token_url": os.getenv("POWER_ORU_GREEN_BUTTON_TOKEN_URL", "").strip(),
+        "resource_url": os.getenv("POWER_ORU_GREEN_BUTTON_RESOURCE_URL", "").strip(),
+        "client_id": os.getenv("POWER_ORU_GREEN_BUTTON_CLIENT_ID", "").strip(),
+        "client_secret": os.getenv("POWER_ORU_GREEN_BUTTON_CLIENT_SECRET", "").strip(),
+        "bulk_id": os.getenv("POWER_ORU_GREEN_BUTTON_BULK_ID", "").strip(),
+        "scope": os.getenv("POWER_ORU_GREEN_BUTTON_SCOPE", GREEN_BUTTON_DEFAULT_SCOPE).strip(),
+        "approved": os.getenv("POWER_ORU_GREEN_BUTTON_APPROVED", "false").lower() == "true",
+    },
+}
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("The utility returned an unexpected redirect.")
+
+
+def no_redirect_opener():
+    return build_opener(_RejectRedirects)
 GREEN_BUTTON_CONNECT_URL = "https://www.greenbuttonalliance.org/green-button-connect-my-data-cmd"
 GREEN_BUTTON_DOWNLOAD_URL = "https://www.greenbuttonalliance.org/green-button-download-my-data-dmd"
 XCEL_GREEN_BUTTON_APPLICATION_URL = "https://myenergy.xcelenergy.com/greenbutton/green-vendor"
@@ -4992,7 +5042,14 @@ def list_energy_companies() -> list[str]:
 
 
 def list_utility_access_guides() -> list[dict[str, str]]:
-    return [dict(guide) for guide in UTILITY_ACCESS_GUIDES]
+    guides = [dict(guide) for guide in UTILITY_ACCESS_GUIDES]
+    for key, config in GREEN_BUTTON_CONFIG.items():
+        if green_button_provider_is_ready(key):
+            guides.append({"id": f"green_button_{key.lower()}", "name": f"{config['label']} Green Button connection",
+                           "status": "Available after utility approval", "summary": "Approve a secure connection through your utility to keep interval history updated. Manual download and upload remain available.",
+                           "action_label": "Read about Green Button Connect My Data", "action_url": GREEN_BUTTON_CONNECT_URL,
+                           "secondary_label": "", "secondary_url": ""})
+    return guides
 
 
 def clean_energy_company(value: str | None) -> str:
@@ -7635,6 +7692,135 @@ def mask_duke_account_number(value: object) -> str:
     return f"Duke account ending {normalized[-4:]}" if normalized else "Duke account"
 
 
+def green_button_provider_key(provider_name: object) -> str | None:
+    normalized = re.sub(r"\s+", " ", str(provider_name or "").strip().lower())
+    return GREEN_BUTTON_PROVIDERS.get(normalized)
+
+
+def green_button_config(provider_key: str) -> dict[str, str]:
+    if not GREEN_BUTTON_IMPLEMENTATION_READY:
+        raise ValueError("Automatic access for this utility is not available yet. Upload your usage file instead.")
+    config = GREEN_BUTTON_CONFIG.get(provider_key) or {}
+    required = ("authorize_url", "token_url", "client_id", "client_secret", "bulk_id")
+    if not config.get("approved") or not all(config.get(key) for key in required):
+        raise ValueError("This utility connection is waiting for utility approval and configuration.")
+    return config
+
+
+def green_button_provider_is_ready(provider_key: str) -> bool:
+    try:
+        green_button_config(provider_key)
+    except ValueError:
+        return False
+    return True
+
+
+def green_button_origin(url: str) -> tuple[str, str, int]:
+    try:
+        parts = urlsplit(url)
+        if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.fragment:
+            raise ValueError
+        return parts.scheme, parts.hostname.lower(), parts.port or 443
+    except ValueError as exc:
+        raise ValueError("The utility returned an unexpected resource address.") from exc
+
+
+def green_button_request(config: dict[str, Any], url: str, *, headers: dict[str, str],
+                         data: bytes | None = None, limit: int = 1024 * 1024) -> bytes:
+    if green_button_origin(url) != green_button_origin(str(config["token_url"])):
+        raise ValueError("The utility returned an unexpected resource address.")
+    request_obj = Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
+    with no_redirect_opener().open(request_obj, timeout=60) as response:
+        if response.status == 202:
+            raise ValueError("The utility is preparing a batch. Automatic batch delivery is not available yet.")
+        if response.status != 200:
+            raise ValueError("The utility did not return a completed response.")
+        content = response.read(limit + 1)
+    if len(content) > limit:
+        raise ValueError("The utility response exceeded the supported size.")
+    return content
+
+
+def serialize_green_button_secret(provider_key: str, token_data: dict[str, Any], resource_url: str | None = None,
+                                  *, binding: dict[str, str] | None = None) -> str:
+    access_token = token_data.get("access_token")
+    if not access_token:
+        raise ValueError("The utility did not provide an access token. Connect again.")
+    resource_url = resource_url or str(token_data.get("resourceURI") or token_data.get("resource_uri") or "")
+    if not resource_url:
+        raise ValueError("The utility did not provide a customer data resource. Connect again.")
+    expires_in = int(token_data.get("expires_in", 3600))
+    if expires_in < 0:
+        raise ValueError("The utility returned an invalid token expiry.")
+    token_data = dict(token_data)
+    token_data["expires_at"] = int(time.time()) + expires_in
+    return json.dumps({"version": 1, "provider_key": provider_key, "resource_url": resource_url,
+                       "binding": binding,
+                       "tokens": {key: token_data.get(key) for key in ("access_token", "refresh_token", "token_type", "expires_at", "scope")}},
+                      sort_keys=True, separators=(",", ":"))
+
+
+def parse_green_button_secret(value: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("The saved utility connection could not be read. Connect again.") from exc
+    if not isinstance(payload, dict) or not payload.get("provider_key") or not payload.get("resource_url") or not isinstance(payload.get("tokens"), dict):
+        raise ValueError("The saved utility connection is incomplete. Connect again.")
+    return payload
+
+
+def validate_green_button_customer_resource(provider_key: str, token_data: dict[str, Any],
+                                            expected_account: str) -> dict[str, str]:
+    # Only accept the explicit AuthorizationModel described by the utility.
+    # Unknown wrappers/XML shapes must be verified in utility testing, not
+    # searched recursively for a coincidentally matching account identifier.
+    config = green_button_config(provider_key)
+    resource = str(token_data.get("resourceURI") or "")
+    customer_resource = str(token_data.get("customerResourceURI") or "")
+    authorization_uri = str(token_data.get("authorizationURI") or "")
+    access_token = str(token_data.get("access_token") or "")
+    origin = green_button_origin(str(config["token_url"]))
+    for url in (resource, customer_resource, authorization_uri):
+        if green_button_origin(url) != origin:
+            raise ValueError("The utility returned an unexpected customer resource.")
+    subscription = re.fullmatch(r"(.*/resource/)Subscription/([^/]+)", urlsplit(resource).path)
+    if (not subscription or not access_token
+            or urlsplit(customer_resource).path != f"{subscription[1]}Customer/{subscription[2]}"
+            or not re.fullmatch(re.escape(subscription[1]) + r"Authorization/[^/]+", urlsplit(authorization_uri).path)
+            or any(urlsplit(url).query for url in (resource, customer_resource, authorization_uri))):
+        raise ValueError("The utility account and subscription could not be matched.")
+    raw = green_button_request(config, authorization_uri,
+                               headers={"Accept": "application/json", "Authorization": f"Bearer {access_token}"})
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("The utility account response could not be verified.") from exc
+    if not isinstance(document, dict):
+        raise ValueError("The utility account response could not be verified.")
+    subscriptions = document.get("subscriptions")
+    if (not isinstance(document.get("AccountNumber"), str)
+            or document["AccountNumber"].strip() != str(expected_account).strip()
+            or document.get("ResourceURI") != resource
+            or not document.get("RetailCustomerId")
+            or not isinstance(subscriptions, list) or len(subscriptions) != 1
+            or not isinstance(subscriptions[0], dict) or str(subscriptions[0].get("Id")) != subscription[2]
+            or (document.get("AuthorizationUri") and document["AuthorizationUri"] != authorization_uri)):
+        raise ValueError("The utility did not return an unambiguous match for the selected account.")
+    return {"account_number": str(expected_account).strip(), "subscription_id": subscription[2],
+            "retail_customer_id": str(document["RetailCustomerId"]), "resource_uri": resource,
+            "customer_resource_uri": customer_resource, "authorization_uri": authorization_uri}
+
+
+def require_green_button_binding(payload: dict[str, Any], account_number: str) -> dict[str, str]:
+    binding = payload.get("binding")
+    if (not isinstance(binding, dict) or binding.get("account_number") != account_number
+            or binding.get("resource_uri") != payload.get("resource_url")
+            or not all(binding.get(key) for key in ("subscription_id", "retail_customer_id", "customer_resource_uri", "authorization_uri"))):
+        raise ValueError("The saved utility account mapping must be verified again.")
+    return binding
+
+
 def select_duke_account(
     accounts: dict[str, dict[str, Any]],
     expected_account_number: str,
@@ -7964,6 +8150,8 @@ def save_utility_connection(account_number: str | None, form_like) -> dict[str, 
     access_method = clean_optional_text(form_like.get("access_method")) or "customer_api_key"
     if access_method == DUKE_OAUTH_ACCESS_METHOD:
         raise ValueError("Use the Duke sign-in steps to create an automatic Duke connection.")
+    if access_method == GREEN_BUTTON_ACCESS_METHOD:
+        raise ValueError("Use the utility sign-in steps to create a Green Button connection.")
     access_identifier = clean_optional_text(form_like.get("access_identifier"))
     access_secret = form_like.get("access_secret")
     secret_hash = build_secret_hash(access_secret)
@@ -8224,6 +8412,128 @@ def fetch_utility_connection_export(connection: dict[str, object]) -> dict[str, 
     return {"filename": filename, "content": content}
 
 
+def save_green_button_connection(account_number: str, provider_key: str, secret_payload: str, resource_url: str) -> dict[str, object]:
+    green_button_config(provider_key)
+    payload = parse_green_button_secret(secret_payload)
+    require_green_button_binding(payload, account_number)
+    if payload["provider_key"] != provider_key or payload["resource_url"] != resource_url:
+        raise ValueError("The utility connection does not match the verified account.")
+    provider_name = GREEN_BUTTON_CONFIG[provider_key]["label"]
+    timestamp = timestamp_now()
+    with get_db_connection() as conn:
+        lock_green_button_consent(conn, account_number)
+        account = get_or_create_account(conn, account_number)
+        existing = conn.execute("SELECT id FROM utility_connections WHERE account_id = ? AND provider_name = ? AND access_method = ?",
+                                (account["id"], provider_name, GREEN_BUTTON_ACCESS_METHOD)).fetchone()
+        values = (GREEN_BUTTON_ACCESS_METHOD, resource_url, build_secret_hash(secret_payload), seal_secret_value(secret_payload), timestamp, account["id"])
+        if existing is None:
+            conn.execute("""INSERT INTO utility_connections
+                (account_id, provider_name, connection_label, access_method, access_identifier, secret_hash, secret_token, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'Connected', ?, ?)""",
+                         (account["id"], provider_name, f"{provider_name} Green Button", *values[:5], timestamp))
+        else:
+            conn.execute("""UPDATE utility_connections SET access_identifier=?, secret_hash=?, secret_token=?, status='Connected', updated_at=?
+                WHERE account_id=? AND id=?""", (resource_url, values[2], values[3], timestamp, account["id"], int(existing["id"])))
+        saved = conn.execute("SELECT id FROM utility_connections WHERE account_id=? AND provider_name=? AND access_method=?",
+                             (account["id"], provider_name, GREEN_BUTTON_ACCESS_METHOD)).fetchone()
+        saved_id = int(saved["id"])
+        conn.commit()
+    return next(item for item in list_utility_connections(account_number) if item["id"] == saved_id)
+
+
+def lock_green_button_consent(conn: DatabaseConnection, account_number: str) -> None:
+    if conn.kind == "sqlite":
+        conn.execute("BEGIN IMMEDIATE")
+    rows = conn.execute("""SELECT account_data_authorizations.id FROM account_data_authorizations
+        JOIN accounts ON accounts.id = account_data_authorizations.account_id
+        WHERE accounts.account_number = ? AND account_data_authorizations.status = 'active'"""
+        + (" FOR SHARE OF account_data_authorizations" if conn.kind == "postgres" else ""),
+        (account_number,)).fetchall()
+    if not rows:
+        raise ValueError("Customer authorization was withdrawn.")
+
+
+def assert_green_button_connection_current(connection: dict[str, object], *,
+                                            db_conn: DatabaseConnection | None = None, lock: bool = False) -> None:
+    if db_conn is None:
+        with get_db_connection() as conn:
+            return assert_green_button_connection_current(connection, db_conn=conn)
+    if lock:
+        # Consent is locked before the connection, matching the revoke path.
+        lock_green_button_consent(db_conn, str(connection["account_number"]))
+    row = db_conn.execute("""SELECT utility_connections.secret_hash
+            FROM utility_connections JOIN accounts ON accounts.id = utility_connections.account_id
+            WHERE utility_connections.id = ? AND accounts.account_number = ? AND utility_connections.access_method = ?
+              AND EXISTS (SELECT 1 FROM account_data_authorizations
+                          WHERE account_id = accounts.id AND status = 'active')"""
+            + (" FOR UPDATE OF utility_connections" if lock and db_conn.kind == "postgres" else ""),
+            (int(connection["id"]), str(connection["account_number"]), GREEN_BUTTON_ACCESS_METHOD)).fetchone()
+    expected_hash = build_secret_hash(str(connection.get("access_secret") or ""))
+    if row is None or not expected_hash or not hmac.compare_digest(str(row["secret_hash"] or ""), expected_hash):
+        raise ValueError("Utility access changed or customer authorization was withdrawn. Start again.")
+
+
+def update_green_button_connection_secret(account_number: str, connection_id: int, secret_payload: str,
+                                          *, expected_secret: str) -> None:
+    parse_green_button_secret(secret_payload)
+    with get_db_connection() as conn:
+        lock_green_button_consent(conn, account_number)
+        account = get_or_create_account(conn, account_number)
+        cursor = conn.execute("""UPDATE utility_connections SET secret_hash=?, secret_token=?, updated_at=?
+            WHERE account_id=? AND id=? AND access_method=? AND secret_hash=? AND secret_token IS NOT NULL
+              AND EXISTS (SELECT 1 FROM account_data_authorizations WHERE account_id=? AND status='active')""",
+            (build_secret_hash(secret_payload), seal_secret_value(secret_payload), timestamp_now(), account["id"],
+             int(connection_id), GREEN_BUTTON_ACCESS_METHOD, build_secret_hash(expected_secret), account["id"]))
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise ValueError("Utility access changed or customer authorization was withdrawn. Start again.")
+        conn.commit()
+
+
+def fetch_green_button_export(connection: dict[str, object]) -> dict[str, object]:
+    payload = parse_green_button_secret(str(connection.get("access_secret") or ""))
+    provider_key = str(payload["provider_key"])
+    config = green_button_config(provider_key)
+    binding = require_green_button_binding(payload, str(connection["account_number"]))
+    assert_green_button_connection_current(connection)
+    tokens = dict(payload["tokens"])
+    token = str(tokens.get("access_token") or "")
+    if not token or float(tokens.get("expires_at") or 0) <= time.time() + 60:
+        refresh_token = str(tokens.get("refresh_token") or "")
+        if not refresh_token:
+            raise ValueError("The utility access has expired. Reconnect the utility account.")
+        form_values = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+        if tokens.get("scope"):
+            form_values["scope"] = str(tokens["scope"])
+        form = urlencode(form_values).encode()
+        basic = base64.b64encode(f"{config['client_id']}:{config.get('client_secret', '')}".encode()).decode()
+        raw = green_button_request(config, config["token_url"], data=form,
+                                   headers={"Authorization": f"Basic {basic}", "Accept": "application/json",
+                                            "Content-Type": "application/x-www-form-urlencoded"})
+        refreshed = json.loads(raw.decode("utf-8"))
+        refreshed["refresh_token"] = refreshed.get("refresh_token") or refresh_token
+        if "scope" not in refreshed:
+            refreshed["scope"] = tokens.get("scope")
+        refreshed_payload = serialize_green_button_secret(provider_key, refreshed, str(payload["resource_url"]), binding=binding)
+        update_green_button_connection_secret(str(connection["account_number"]), int(connection["id"]), refreshed_payload,
+                                              expected_secret=str(connection["access_secret"]))
+        connection["access_secret"] = refreshed_payload
+        tokens = parse_green_button_secret(refreshed_payload)["tokens"]
+        token = str(tokens["access_token"])
+    assert_green_button_connection_current(connection)
+    current_binding = validate_green_button_customer_resource(provider_key,
+        {"access_token": token, "resourceURI": binding["resource_uri"],
+         "customerResourceURI": binding["customer_resource_uri"], "authorizationURI": binding["authorization_uri"]},
+        str(connection["account_number"]))
+    if current_binding != binding:
+        raise ValueError("The utility account mapping changed. Connect again.")
+    assert_green_button_connection_current(connection)
+    headers = {"Accept": "application/xml, text/xml", "Authorization": f"Bearer {token}"}
+    content = green_button_request(config, str(payload["resource_url"]), headers=headers, limit=200 * 1024 * 1024)
+    assert_green_button_connection_current(connection)
+    return {"filename": f"{provider_key.lower()}-green-button.xml", "content": content}
+
+
 def clean_sync_error(error: Exception | str, max_length: int = 240) -> str:
     message = str(error).strip()
     if not message and isinstance(error, Exception):
@@ -8274,6 +8584,14 @@ def sync_utility_connection(account_number: str | None, connection_id: int) -> d
     connection = load_utility_connection_for_sync(account_number, connection_id)
     if connection["access_method"] == DUKE_OAUTH_ACCESS_METHOD:
         imported = sync_duke_oauth_connection(connection)
+    elif connection["access_method"] == GREEN_BUTTON_ACCESS_METHOD:
+        exported = fetch_green_button_export(connection)
+        assert_green_button_connection_current(connection)
+        filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
+        destination = INPUT_DIR / f"utility-sync-{connection_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{filename}"
+        destination.write_bytes(exported.get("content") or b"")
+        imported = import_interval_file_to_db(destination, account_number=connection["account_number"],
+                                              utility_connection_guard=connection)
     else:
         exported = fetch_utility_connection_export(connection)
         filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
@@ -10184,6 +10502,7 @@ def import_interval_frame_to_db(
     modified_time: float | None = None,
     adapter_id: str = "interval_frame",
     adapter_name: str = "Interval readings",
+    utility_connection_guard: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if frame.empty:
         raise ValueError("No interval rows were found to import.")
@@ -10195,6 +10514,10 @@ def import_interval_frame_to_db(
     conflicts_skipped_count = 0
 
     with get_db_connection() as conn:
+        if utility_connection_guard is not None:
+            if normalize_account_number(account_number) != utility_connection_guard["account_number"]:
+                raise ValueError("The utility import does not match the authorized account.")
+            assert_green_button_connection_current(utility_connection_guard, db_conn=conn, lock=True)
         account = get_or_create_account(
             conn,
             account_number,
@@ -10261,7 +10584,10 @@ def import_interval_file_to_db(
     display_name: str | None = None,
     energy_company: str | None = None,
     baseline_date: str | None = None,
+    utility_connection_guard: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    if utility_connection_guard is not None:
+        assert_green_button_connection_current(utility_connection_guard)
     path = Path(path).resolve()
     stat = path.stat()
     modified_time = stat.st_mtime
@@ -10309,6 +10635,7 @@ def import_interval_file_to_db(
         modified_time=modified_time,
         adapter_id=parsed.adapter.adapter_id,
         adapter_name=parsed.adapter.display_name,
+        utility_connection_guard=utility_connection_guard,
     )
 
 
@@ -12741,6 +13068,8 @@ def create_web_app() -> Flask:
             "billing_plans": list_billing_plans(),
             "supported_feeds": list_supported_utility_adapters(),
             "utility_access_guides": list_utility_access_guides(),
+            "configured_green_button_providers": [key.lower() for key in GREEN_BUTTON_CONFIG
+                                                   if green_button_provider_is_ready(key)],
             "duke_oauth_helper_download_url": DUKE_OAUTH_HELPER_DOWNLOAD_URL,
             "csrf_token": get_csrf_token,
             "today_iso": ddate.today().isoformat(),
@@ -15385,6 +15714,67 @@ def create_web_app() -> Flask:
         except Exception as exc:
             flash(str(exc))
         return redirect_back_or_account(account_number)
+
+    @app.post("/utility-connection/green-button/<provider_key>/start")
+    def start_green_button_connection(provider_key):
+        account_number = request.form.get("account_number")
+        actor = require_account_actor(account_number, write=True)
+        if not isinstance(actor, dict):
+            return actor
+        try:
+            account = find_account(account_number)
+            provider_key = provider_key.upper()
+            config = green_button_config(provider_key)
+            if not account or green_button_provider_key(account.get("energy_company")) != provider_key:
+                raise ValueError("Choose the matching utility on the Account page first.")
+            if not account_has_active_data_authorization(account_number):
+                raise ValueError("Customer authorization is required before connecting a utility.")
+            state = secrets.token_urlsafe(32)
+            callback = url_for("green_button_callback", provider_key=provider_key, _external=True)
+            scope = str(config.get("scope") or GREEN_BUTTON_DEFAULT_SCOPE)
+            if ";BR=" not in scope:
+                scope = f"{scope};BR={config['bulk_id']}"
+            params = {"response_type": "code", "client_id": config["client_id"], "redirect_uri": callback,
+                      "state": state, "scope": scope}
+            session[GREEN_BUTTON_PENDING_SESSION_KEY] = {"provider_key": provider_key, "account_number": str(account["account_number"]),
+                                                         "state": state, "started_at": timestamp_now()}
+            return redirect(f"{config['authorize_url']}?{urlencode(params)}")
+        except Exception as exc:
+            flash(str(exc))
+            return redirect_back_or_account(account_number)
+
+    @app.get("/utility-connection/green-button/<provider_key>/callback")
+    def green_button_callback(provider_key):
+        pending = session.get(GREEN_BUTTON_PENDING_SESSION_KEY)
+        try:
+            if not isinstance(pending, dict) or pending.get("provider_key") != provider_key.upper() or request.args.get("state") != pending.get("state"):
+                raise ValueError("The utility authorization could not be matched to this account. Start again.")
+            started_at = datetime.fromisoformat(str(pending.get("started_at") or ""))
+            if started_at + timedelta(minutes=GREEN_BUTTON_EXPIRY_MINUTES) <= datetime.now():
+                raise ValueError("The utility authorization session expired. Start again.")
+            actor = require_account_actor(str(pending.get("account_number") or ""), write=True)
+            if not isinstance(actor, dict) or not account_has_active_data_authorization(str(pending["account_number"])):
+                raise ValueError("Customer authorization is required before connecting a utility.")
+            if request.args.get("error"):
+                raise ValueError("The utility authorization was declined or cancelled.")
+            config = green_button_config(provider_key.upper())
+            callback = url_for("green_button_callback", provider_key=provider_key.upper(), _external=True)
+            body = urlencode({"grant_type": "authorization_code", "code": request.args.get("code", ""), "redirect_uri": callback}).encode()
+            auth = base64.b64encode(f"{config['client_id']}:{config['client_secret']}".encode()).decode()
+            headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+            headers["Authorization"] = f"Basic {auth}"
+            tokens = json.loads(green_button_request(config, config["token_url"], data=body, headers=headers).decode("utf-8"))
+            binding = validate_green_button_customer_resource(provider_key.upper(), tokens, str(pending["account_number"]))
+            secret_payload = serialize_green_button_secret(provider_key.upper(), tokens, binding=binding)
+            parsed_secret = parse_green_button_secret(secret_payload)
+            save_green_button_connection(str(pending["account_number"]), provider_key.upper(), secret_payload, str(parsed_secret["resource_url"]))
+            session.pop(GREEN_BUTTON_PENDING_SESSION_KEY, None)
+            flash(f"{config['label']} is connected. Use Sync now for an immediate refresh.")
+            return redirect(url_for("customer_utility_page", account_number=pending["account_number"]))
+        except Exception as exc:
+            session.pop(GREEN_BUTTON_PENDING_SESSION_KEY, None)
+            flash(str(exc) if isinstance(exc, ValueError) else "The utility connection could not be completed. Start again.")
+            return redirect(url_for("customer_utility_page", account_number=(pending or {}).get("account_number")))
 
     @app.post("/utility-connection/duke/start")
     def start_duke_connection():
