@@ -5,6 +5,7 @@ import json
 import os
 import re
 import zipfile
+from html import unescape
 from io import BytesIO, StringIO
 from datetime import date as ddate, datetime, timedelta
 from pathlib import Path
@@ -15,6 +16,7 @@ import app
 import pandas as pd
 import pyotp
 import pytest
+from lxml import html as lxml_html
 from cryptography.hazmat.primitives.asymmetric import ec
 from fido2.cose import ES256
 
@@ -398,10 +400,154 @@ def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(t
     assert response.status_code == 200
     body = response.get_data(as_text=True)
     assert "Download your Xcel history" in body
-    assert "Xcel's customer download is available now" in body
+    assert "Xcel's customer download is available now" in unescape(body)
     assert "Start Xcel sign-in" not in body
     assert "provider application is prepared" not in body
     assert "it has not been submitted" not in body
+
+
+@pytest.mark.parametrize("provider,slug", [
+    ("Duke Energy Progress, LLC", "duke"),
+    ("Xcel Energy Inc.", "xcel"),
+    ("Central Maine Power Company", "cmp"),
+    ("  CMP  ", "cmp"),
+    ("New York State Electric and Gas Corporation", "nyseg"),
+    ("NYSEG", "nyseg"),
+    ("Rochester Gas & Electric Corporation", "rge"),
+    ("RG&E", "rge"),
+    ("PSEG Long Island LLC", "pseg-long-island"),
+    ("The United Illuminating Company", "united-illuminating"),
+])
+def test_download_guide_matches_only_named_provider_aliases(provider, slug):
+    assert app.get_utility_download_guide(provider).slug == slug
+
+
+@pytest.mark.parametrize("provider", [None, "", "PSE&G", "PSEG", "National Grid", "Not Duke Energy", "UI Services"])
+def test_download_guide_does_not_guess_a_different_utility(provider):
+    assert app.get_utility_download_guide(provider) is None
+
+
+@pytest.mark.parametrize("guide", app.UTILITY_DOWNLOAD_GUIDES, ids=lambda guide: guide.slug)
+@pytest.mark.parametrize("route", ["/customer/utility", "/customer/history"])
+def test_customer_download_guide_is_account_specific_on_utility_and_history(tmp_path, monkeypatch, guide, route):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setitem(app.web_app.config, "TESTING", True)
+    authorize_account("guide-account", "guide-owner@example.com")
+    app.save_account_profile("guide-account", display_name="Guide account", energy_company=guide.provider)
+    client = app.web_app.test_client()
+    customer_sign_in(client, "guide-owner@example.com")
+
+    response = client.get(route, query_string={"account_number": "guide-account"})
+    assert response.status_code == 200
+    document = lxml_html.fromstring(response.data)
+    selected = document.xpath('//*[@data-selected-utility]')
+    assert len(selected) == 1
+    assert selected[0].get("data-selected-utility") == guide.slug
+    assert guide.title in selected[0].text_content()
+    assert len(selected[0].xpath('.//ol/li')) == 3
+    external_link = selected[0].xpath('.//a[@target="_blank"]')[0]
+    assert external_link.get("href") == guide.url
+    assert {"noopener", "noreferrer"} <= set(external_link.get("rel").split())
+    assert "not an automatic connection" in document.text_content()
+    if guide.slug != "duke":
+        assert not document.xpath('//form[contains(@action, "/utility-connection/duke/")]')
+    if route == "/customer/utility":
+        assert selected[0].xpath('.//a[contains(@href, "account_number=guide-account") and contains(@href, "#history-import")]')
+    else:
+        assert document.xpath('//form[@action="/analyze"]/input[@name="account_number" and @value="guide-account"]')
+    assert app.list_utility_connections("guide-account") == []
+
+
+def test_download_guidance_changes_when_customer_switches_accounts(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setitem(app.web_app.config, "TESTING", True)
+    for number, provider in [("home", "NYSEG"), ("business", "PSEG Long Island")]:
+        authorize_account(number, "shared@example.com")
+        app.save_account_profile(number, display_name=number, energy_company=provider)
+    client = app.web_app.test_client()
+    customer_sign_in(client, "shared@example.com")
+    for number, slug in [("home", "nyseg"), ("business", "pseg-long-island"), ("home", "nyseg")]:
+        response = client.get("/customer/utility", query_string={"account_number": number})
+        document = lxml_html.fromstring(response.data)
+        assert document.xpath('//*[@data-selected-utility]/@data-selected-utility') == [slug]
+
+
+def test_unknown_utility_has_guidance_directory_without_incorrect_primary(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setitem(app.web_app.config, "TESTING", True)
+    authorize_account("unknown", "unknown@example.com")
+    app.save_account_profile("unknown", energy_company="PSE&G")
+    client = app.web_app.test_client()
+    customer_sign_in(client, "unknown@example.com")
+    response = client.get("/customer/utility", query_string={"account_number": "unknown"})
+    document = lxml_html.fromstring(response.data)
+    assert not document.xpath('//*[@data-selected-utility]')
+    assert len(document.xpath('//details[@class="utility-download-option"]')) == len(app.UTILITY_DOWNLOAD_GUIDES)
+    assert document.xpath('//a[contains(@href, "/customer/account?account_number=unknown")]')
+
+
+@pytest.mark.parametrize("route", ["/utility", "/history"])
+def test_staff_download_guidance_uses_staff_account_routes(tmp_path, monkeypatch, route):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setitem(app.web_app.config, "TESTING", True)
+    authorize_account("cmp-staff")
+    app.save_account_profile("cmp-staff", energy_company="Central Maine Power")
+    client = app.web_app.test_client()
+    sign_in(client)
+    response = client.get(route, query_string={"account_number": "cmp-staff"})
+    assert response.status_code == 200
+    document = lxml_html.fromstring(response.data)
+    selected = document.xpath('//*[@data-selected-utility="cmp"]')[0]
+    assert not selected.xpath('.//a[contains(@href, "/customer/")]')
+
+
+def test_united_illuminating_guide_warns_about_daily_totals_and_paid_requests():
+    guide = app.get_utility_download_guide("United Illuminating")
+    assert "hourly downloads are not confirmed" in guide.note
+    assert "may charge fees" in guide.note
+    assert "only daily totals" in guide.steps[-1]
+    assert "cannot show overnight usage" in guide.steps[-1]
+
+
+def test_download_guide_provider_names_are_available_in_company_list():
+    assert {guide.provider for guide in app.UTILITY_DOWNLOAD_GUIDES if guide.slug != "duke"} <= set(app.list_energy_companies())
+
+
+def test_download_guide_provider_suggestions_render_without_restricting_manual_input(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setitem(app.web_app.config, "TESTING", True)
+    client = app.web_app.test_client()
+    signup = client.get("/signup")
+    document = lxml_html.fromstring(signup.data)
+    choices = document.xpath('//datalist[@id="utility-provider-options"]/option/@value')
+    assert "Central Maine Power" in choices
+    assert "United Illuminating" in choices
+    assert document.xpath('//input[@name="energy_company" and @type="text" and @list="utility-provider-options"]')
+    authorize_account("suggestions", "suggestions@example.com")
+    customer_sign_in(client, "suggestions@example.com")
+    account = client.get("/customer/account", query_string={"account_number": "suggestions"})
+    document = lxml_html.fromstring(account.data)
+    assert document.xpath('//datalist[@id="utility-provider-options"]/option[@value="PSEG Long Island"]')
+
+
+@pytest.mark.parametrize("provider", ["Central Maine Power", "NYSEG", "RG&E", "PSEG Long Island", "United Illuminating"])
+def test_new_provider_account_can_upload_supported_csv_without_connection(tmp_path, monkeypatch, provider):
+    # A synthetic supported-format fixture checks the app workflow, not vendor certification.
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setitem(app.web_app.config, "TESTING", True)
+    authorize_account("upload-account", "upload@example.com")
+    app.save_account_profile("upload-account", energy_company=provider)
+    client = app.web_app.test_client()
+    customer_sign_in(client, "upload@example.com")
+    response = client.post("/analyze", data={
+        "account_number": "upload-account",
+        "xml_file": (BytesIO(CSV_FIXTURE.read_bytes()), "supported-intervals.csv"),
+    }, content_type="multipart/form-data")
+    assert response.status_code == 200
+    assert app.find_account("upload-account")["energy_company"] == provider
+    assert len(app.load_intervals_from_db("upload-account")) == 3
+    assert app.count_imported_files("upload-account") == 1
+    assert app.list_utility_connections("upload-account") == []
 
 
 def test_energy_company_lookup_uses_service_location_and_territory(monkeypatch):
@@ -1526,8 +1672,8 @@ def test_customer_can_connect_duke_with_helper_without_exposing_tokens(tmp_path,
         ).fetchone()["secret_token"]
 
     assert response.status_code == 200
-    assert b"Keep Duke history updated" in response.data
-    assert b"Download the Chrome helper" in response.data
+    assert b"Duke automatic updates" in response.data
+    assert b"Download the helper" in response.data
     assert app.DUKE_OAUTH_HELPER_DOWNLOAD_URL.encode() in response.data
     assert b"Start Duke sign-in" in response.data
     assert "form-action 'self' https://app.homeenergywatch.com https://login.duke-energy.com" in response.headers["Content-Security-Policy"]
@@ -1541,8 +1687,7 @@ def test_customer_can_connect_duke_with_helper_without_exposing_tokens(tmp_path,
     assert b"Download your Duke history" in response.data
     assert b"Open Duke Usage Details" in response.data
     assert b"my-account/usage?tab=day" in response.data
-    assert b"Green Button customer connection" in response.data
-    assert b"North Carolina data-access track" in response.data
+    assert b'data-selected-utility="duke"' in response.data
     assert b"Upload it from History" in response.data
     assert start_response.status_code == 302
     assert start_response.headers["Location"] == "https://login.duke-energy.com/authorize-test"
@@ -2021,7 +2166,7 @@ def test_customer_signup_rolls_back_every_record_when_account_creation_fails(tmp
     assert int(account_count) == 0
 
 
-def test_account_forms_match_energy_company_from_zip_instead_of_listing_providers(tmp_path, monkeypatch):
+def test_account_forms_keep_zip_lookup_and_allow_manual_provider_names(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
     client = app.web_app.test_client()
@@ -2042,7 +2187,11 @@ def test_account_forms_match_energy_company_from_zip_instead_of_listing_provider
     assert b'name="energy_company"' in signup.data
     assert b'name="meter_value"' in home.data
     assert b'name="meter_value"' in signup.data
-    assert b"ENERGYUNITED EMC" not in home.data
+    for response in (home, signup):
+        document = lxml_html.fromstring(response.data)
+        assert document.xpath('//input[@name="energy_company"]')
+        assert not document.xpath('//select[@name="energy_company"]')
+        assert document.xpath('//datalist[@id="utility-provider-options"]/option[@value="NYSEG"]')
     assert b"Home name" not in home.data
     assert b"Home name" not in signup.data
 
