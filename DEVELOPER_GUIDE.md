@@ -113,6 +113,14 @@ Adapters are selected by `select_utility_feed_adapter()` and return a common int
 
 Keep utility-specific parsing out of route handlers and analysis functions.
 
+### Customer download instructions
+
+`utility_guides.py` holds account-matched download instructions, exact provider aliases, official source links, and the date each source was checked. `_utility_download_guides.html` renders the same instructions on Utility and History, keeping links tied to the selected account. The provider field offers suggestions without restricting manual entry or replacing the existing ZIP lookup.
+
+These guides are not feed adapters, vendor approvals, or automatic connections. The first set covers Duke, Xcel, Central Maine Power, NYSEG, RG&E, PSEG Long Island, and United Illuminating. Do not match PSE&G in New Jersey to PSEG Long Island. United Illuminating's hourly export availability remains unconfirmed; daily totals do not support overnight analysis. Custom paid data services are outside the free-only launch.
+
+Tests cover alias matching, account switching, page rendering, and the existing upload workflow using synthetic supported-format fixtures. A provider's real export must still be checked for timestamps, duration, units, account identity, and quality flags before claiming provider-specific compatibility. Add a guide only with verified official instructions; add or change an adapter separately when a real export requires it.
+
 ### Duke automatic connection
 
 `POST /utility-connection/duke/start` creates a short-lived PKCE flow for an account manager. `POST /utility-connection/duke/complete` exchanges the one-time code, confirms that Duke returned the selected account and an electric meter, and stores only encrypted OAuth material. Never log the authorization code, verifier, access token, refresh token, or ID token.

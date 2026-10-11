@@ -98,7 +98,8 @@
       </label>
       <label>
         <span>Utility / provider name</span>
-        <input type="text" name="energy_company" value="{{ current_account.energy_company }}" maxlength="100" placeholder="Duke Energy, Xcel Energy, or your local utility">
+        <input type="text" name="energy_company" value="{{ current_account.energy_company }}" list="utility-provider-options" maxlength="100" placeholder="Duke Energy, Xcel Energy, or your local utility">
+        {% include "_utility_provider_options.html" %}
         <small>Leave this blank if you want the ZIP code to suggest the provider.</small>
       </label>
       <label>
@@ -380,7 +381,7 @@
     <div>
       <p class="section-kicker">Utility connection</p>
       <h2>Keep the data source clear.</h2>
-      <p class="plain-note">Connect Duke for daily updates, or download and upload a utility file whenever you prefer. Both paths stay available.</p>
+      <p class="plain-note">Download your electricity history from your utility, then upload it here. The instructions below follow the utility saved on this account.</p>
     </div>
   </div>
 
@@ -429,24 +430,9 @@
     {% endif %}
   </div>
 
-  <div class="access-guide-grid" aria-label="Ways to bring in utility history">
-    {% for guide in utility_access_guides %}
-      <article class="access-guide-card">
-        <p class="section-kicker">{{ guide.status }}</p>
-        <h3>{{ guide.name }}</h3>
-        <p class="plain-note">{{ guide.summary }}</p>
-        <div class="guide-actions">
-          <a class="button-link" href="{{ guide.action_url }}" target="_blank" rel="noopener">{{ guide.action_label }}</a>
-          {% if guide.secondary_url %}
-            <a class="inline-link" href="{{ guide.secondary_url }}" target="_blank" rel="noopener">{{ guide.secondary_label }}</a>
-          {% endif %}
-        </div>
-      </article>
-    {% endfor %}
-  </div>
+  {% include "_utility_download_guides.html" %}
 
   {% set provider_is_duke = 'duke' in ((selected_connection_provider or '')|lower) %}
-  {% set provider_is_xcel = 'xcel' in ((selected_connection_provider or '')|lower) %}
   {% if provider_is_duke %}
     <div class="connection-workflow">
       <div class="section-header">
@@ -502,25 +488,6 @@
           <a class="inline-link" href="{{ url_for('history_page', account_number=current_account.account_number) }}">Upload it from History</a>.
         {% endif %}
       </p>
-    </div>
-  {% endif %}
-
-  {% if provider_is_xcel %}
-    <div class="connection-workflow">
-      <div class="section-header">
-        <div>
-          <p class="section-kicker">Xcel Energy file connection</p>
-          <h3>Download your Xcel history, then upload it here.</h3>
-          <p class="plain-note">Xcel's customer download is available now. Home Energy Watch reads the Green Button XML file and adds it to this account's existing history. A live Xcel connection is not available until Xcel approves the provider registration and supplies the technical onboarding details.</p>
-        </div>
-      </div>
-      <ol class="workflow-steps">
-        <li><strong>Open Xcel My Account.</strong><span>Sign in to Xcel Energy and open the usage or Green Button Download My Data area.</span><a class="inline-link" href="https://myenergy.xcelenergy.com/" target="_blank" rel="noopener">Open Xcel My Account</a></li>
-        <li><strong>Download the Green Button file.</strong><span>Choose the account and date range, then save the XML file to your computer.</span></li>
-        <li><strong>Upload it from History.</strong><span>Use the History page for this account. New readings are added without overwriting older readings when files overlap.</span>
-          {% if is_customer %}<a class="inline-link" href="{{ url_for('customer_history_page', account_number=current_account.account_number) }}">Open History</a>{% else %}<a class="inline-link" href="{{ url_for('history_page', account_number=current_account.account_number) }}">Open History</a>{% endif %}
-        </li>
-      </ol>
     </div>
   {% endif %}
 

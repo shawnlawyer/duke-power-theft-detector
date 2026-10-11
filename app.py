@@ -62,6 +62,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
+from utility_guides import UTILITY_DOWNLOAD_GUIDES, get_utility_download_guide
+
 try:
     import psycopg
     from psycopg.rows import dict_row
@@ -4981,12 +4983,15 @@ def list_energy_company_groups() -> list[dict[str, object]]:
     return [
         {"label": group["label"], "companies": list(group["companies"])}
         for group in ENERGY_COMPANY_GROUPS
-    ]
+    ] + [{
+        "label": "More electric companies",
+        "companies": [guide.provider for guide in UTILITY_DOWNLOAD_GUIDES if guide.slug != "duke"],
+    }]
 
 
 def list_energy_companies() -> list[str]:
     companies: list[str] = []
-    for group in ENERGY_COMPANY_GROUPS:
+    for group in list_energy_company_groups():
         companies.extend(str(company) for company in group["companies"])
     return companies
 
@@ -12741,6 +12746,9 @@ def create_web_app() -> Flask:
             "billing_plans": list_billing_plans(),
             "supported_feeds": list_supported_utility_adapters(),
             "utility_access_guides": list_utility_access_guides(),
+            "utility_download_guides": UTILITY_DOWNLOAD_GUIDES,
+            "get_utility_download_guide": get_utility_download_guide,
+            "energy_company_choices": list_energy_companies(),
             "duke_oauth_helper_download_url": DUKE_OAUTH_HELPER_DOWNLOAD_URL,
             "csrf_token": get_csrf_token,
             "today_iso": ddate.today().isoformat(),

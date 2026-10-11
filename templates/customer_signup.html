@@ -50,7 +50,8 @@
           </label>
           <label>
             <span>Utility / provider name</span>
-            <input type="text" name="energy_company" value="{{ signup_form.energy_company }}" maxlength="100" placeholder="Duke Energy, Entergy, or your local utility">
+            <input type="text" name="energy_company" value="{{ signup_form.energy_company }}" list="utility-provider-options" maxlength="100" placeholder="Duke Energy, Entergy, or your local utility">
+            {% include "_utility_provider_options.html" %}
             <small>Leave this blank if you want the ZIP code to suggest the provider.</small>
           </label>
           <label>
