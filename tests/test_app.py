@@ -417,12 +417,21 @@ def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(t
     ("RG&E", "rge"),
     ("PSEG Long Island LLC", "pseg-long-island"),
     ("The United Illuminating Company", "united-illuminating"),
+    ("San Diego Gas and Electric Company", "sdge"),
+    ("SDG&E", "sdge"),
+    ("SDGE", "sdge"),
+    ("Southern California Edison Company", "sce"),
+    ("SCE", "sce"),
+    ("Pacific Gas and Electric Company", "pge"),
+    ("PG&E", "pge"),
+    ("Central Hudson Gas & Electric Corporation", "central-hudson"),
+    ("Delmarva Power & Light Company", "delmarva"),
 ])
 def test_download_guide_matches_only_named_provider_aliases(provider, slug):
     assert app.get_utility_download_guide(provider).slug == slug
 
 
-@pytest.mark.parametrize("provider", [None, "", "PSE&G", "PSEG", "National Grid", "Not Duke Energy", "UI Services"])
+@pytest.mark.parametrize("provider", [None, "", "PSE&G", "PSEG", "National Grid", "Not Duke Energy", "UI Services", "PGE", "Portland General Electric", "Southern California Gas", "Edison International"])
 def test_download_guide_does_not_guess_a_different_utility(provider):
     assert app.get_utility_download_guide(provider) is None
 
@@ -509,6 +518,21 @@ def test_united_illuminating_guide_warns_about_daily_totals_and_paid_requests():
     assert "cannot show overnight usage" in guide.steps[-1]
 
 
+def test_new_guides_keep_downloads_separate_from_unverified_feeds():
+    sce = app.get_utility_download_guide("SCE")
+    assert "verification SCE asks for on its own site" in sce.steps[0]
+    assert "verification codes on SCE's site" in sce.note
+    assert "does not create an automatic SCE connection" in sce.note
+    central_hudson = app.get_utility_download_guide("Central Hudson")
+    assert "hourly download is not confirmed" in central_hudson.note
+    assert "no charge" in central_hudson.steps[1]
+    assert "eligibility and fees" in central_hudson.note
+    delmarva = app.get_utility_download_guide("Delmarva Power")
+    assert "level of detail need to be checked" in delmarva.note
+    assert "not just daily or monthly totals" in delmarva.steps[1]
+    assert "not Portland General Electric" in app.get_utility_download_guide("PG&E").note
+
+
 def test_download_guide_provider_names_are_available_in_company_list():
     assert {guide.provider for guide in app.UTILITY_DOWNLOAD_GUIDES if guide.slug != "duke"} <= set(app.list_energy_companies())
 
@@ -522,6 +546,7 @@ def test_download_guide_provider_suggestions_render_without_restricting_manual_i
     choices = document.xpath('//datalist[@id="utility-provider-options"]/option/@value')
     assert "Central Maine Power" in choices
     assert "United Illuminating" in choices
+    assert {"San Diego Gas & Electric", "Southern California Edison", "Pacific Gas & Electric", "Central Hudson", "Delmarva Power"} <= set(choices)
     assert document.xpath('//input[@name="energy_company" and @type="text" and @list="utility-provider-options"]')
     authorize_account("suggestions", "suggestions@example.com")
     customer_sign_in(client, "suggestions@example.com")
@@ -530,7 +555,7 @@ def test_download_guide_provider_suggestions_render_without_restricting_manual_i
     assert document.xpath('//datalist[@id="utility-provider-options"]/option[@value="PSEG Long Island"]')
 
 
-@pytest.mark.parametrize("provider", ["Central Maine Power", "NYSEG", "RG&E", "PSEG Long Island", "United Illuminating"])
+@pytest.mark.parametrize("provider", [guide.provider for guide in app.UTILITY_DOWNLOAD_GUIDES])
 def test_new_provider_account_can_upload_supported_csv_without_connection(tmp_path, monkeypatch, provider):
     # A synthetic supported-format fixture checks the app workflow, not vendor certification.
     configure_tmp_paths(tmp_path, monkeypatch)
