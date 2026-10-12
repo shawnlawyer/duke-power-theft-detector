@@ -426,14 +426,39 @@ def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(t
     ("PG&E", "pge"),
     ("Central Hudson Gas & Electric Corporation", "central-hudson"),
     ("Delmarva Power & Light Company", "delmarva"),
+    ("ConEd", "coned"),
+    ("Consolidated Edison Company of New York, Inc.", "coned"),
+    ("Orange and Rockland Utilities, Inc.", "orange-rockland"),
+    ("O&R", "orange-rockland"),
+    ("ORU", "orange-rockland"),
+    ("National Grid USA Service Company, Inc.", "national-grid"),
+    ("National Grid", "national-grid"),
+    ("Eversource Energy - Massachusetts", "eversource-ma"),
+    ("Eversource MA", "eversource-ma"),
+    ("Southwestern Electric Power Company", "swepco"),
+    ("SWEPCO", "swepco"),
 ])
 def test_download_guide_matches_only_named_provider_aliases(provider, slug):
     assert app.get_utility_download_guide(provider).slug == slug
 
 
-@pytest.mark.parametrize("provider", [None, "", "PSE&G", "PSEG", "National Grid", "Not Duke Energy", "UI Services", "PGE", "Portland General Electric", "Southern California Gas", "Edison International"])
+@pytest.mark.parametrize("provider", [None, "", "PSE&G", "PSEG", "Not Duke Energy", "UI Services", "PGE", "Portland General Electric", "Southern California Gas", "Edison International", "ComEd", "Commonwealth Edison", "Eversource", "Eversource Connecticut", "Eversource New Hampshire", "National Grid Gas", "Rockland Electric", "AEP Ohio"])
 def test_download_guide_does_not_guess_a_different_utility(provider):
     assert app.get_utility_download_guide(provider) is None
+
+
+def test_download_guide_names_and_aliases_are_unambiguous():
+    from utility_guides import normalize_provider_name
+
+    assert len({guide.slug for guide in app.UTILITY_DOWNLOAD_GUIDES}) == len(app.UTILITY_DOWNLOAD_GUIDES)
+    providers_by_name = {}
+    for guide in app.UTILITY_DOWNLOAD_GUIDES:
+        assert guide.url.startswith("https://")
+        assert guide.source_url.startswith("https://")
+        for name in (guide.provider, *guide.aliases):
+            normalized = normalize_provider_name(name)
+            assert normalized
+            assert providers_by_name.setdefault(normalized, guide.slug) == guide.slug
 
 
 @pytest.mark.parametrize("guide", app.UTILITY_DOWNLOAD_GUIDES, ids=lambda guide: guide.slug)
@@ -533,6 +558,19 @@ def test_new_guides_keep_downloads_separate_from_unverified_feeds():
     assert "not Portland General Electric" in app.get_utility_download_guide("PG&E").note
 
 
+def test_additional_guides_keep_regions_detail_and_automatic_access_clear():
+    assert "not ComEd in Illinois" in app.get_utility_download_guide("ConEd").note
+    assert "does not enroll you in Share My Data" in app.get_utility_download_guide("ORU").note
+    national_grid = app.get_utility_download_guide("National Grid")
+    assert "Access your own data" in national_grid.steps[0]
+    assert "not an automatic National Grid connection" in national_grid.note
+    assert "gas service cannot provide electricity readings" in national_grid.note
+    eversource = app.get_utility_download_guide("Eversource MA")
+    assert "does not guarantee hourly readings" in eversource.note
+    assert "Massachusetts town" in eversource.steps[0]
+    assert "Green Button download, rather than Green Button view" in app.get_utility_download_guide("SWEPCO").steps[0]
+
+
 def test_download_guide_provider_names_are_available_in_company_list():
     assert {guide.provider for guide in app.UTILITY_DOWNLOAD_GUIDES if guide.slug != "duke"} <= set(app.list_energy_companies())
 
@@ -547,6 +585,7 @@ def test_download_guide_provider_suggestions_render_without_restricting_manual_i
     assert "Central Maine Power" in choices
     assert "United Illuminating" in choices
     assert {"San Diego Gas & Electric", "Southern California Edison", "Pacific Gas & Electric", "Central Hudson", "Delmarva Power"} <= set(choices)
+    assert {"Con Edison", "Orange & Rockland", "National Grid", "Eversource Massachusetts", "SWEPCO"} <= set(choices)
     assert document.xpath('//input[@name="energy_company" and @type="text" and @list="utility-provider-options"]')
     authorize_account("suggestions", "suggestions@example.com")
     customer_sign_in(client, "suggestions@example.com")
@@ -556,7 +595,8 @@ def test_download_guide_provider_suggestions_render_without_restricting_manual_i
 
 
 @pytest.mark.parametrize("provider", [guide.provider for guide in app.UTILITY_DOWNLOAD_GUIDES])
-def test_new_provider_account_can_upload_supported_csv_without_connection(tmp_path, monkeypatch, provider):
+@pytest.mark.parametrize("fixture,reading_count", [(CSV_FIXTURE, 3), (FIXTURE, 6)], ids=["csv", "xml"])
+def test_new_provider_account_can_upload_supported_file_without_connection(tmp_path, monkeypatch, provider, fixture, reading_count):
     # A synthetic supported-format fixture checks the app workflow, not vendor certification.
     configure_tmp_paths(tmp_path, monkeypatch)
     monkeypatch.setitem(app.web_app.config, "TESTING", True)
@@ -566,11 +606,11 @@ def test_new_provider_account_can_upload_supported_csv_without_connection(tmp_pa
     customer_sign_in(client, "upload@example.com")
     response = client.post("/analyze", data={
         "account_number": "upload-account",
-        "xml_file": (BytesIO(CSV_FIXTURE.read_bytes()), "supported-intervals.csv"),
+        "xml_file": (BytesIO(fixture.read_bytes()), fixture.name),
     }, content_type="multipart/form-data")
     assert response.status_code == 200
     assert app.find_account("upload-account")["energy_company"] == provider
-    assert len(app.load_intervals_from_db("upload-account")) == 3
+    assert len(app.load_intervals_from_db("upload-account")) == reading_count
     assert app.count_imported_files("upload-account") == 1
     assert app.list_utility_connections("upload-account") == []
 
