@@ -444,6 +444,14 @@ def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(t
     ("PECO", "peco"),
     ("Commonwealth Edison Company", "comed"),
     ("  ComEd  ", "comed"),
+    ("Hawaiian Electric Company, Inc.", "hawaiian-electric"),
+    ("HECO", "hawaiian-electric"),
+    ("Louisville Gas and Electric Company", "lge"),
+    ("LG&E", "lge"),
+    ("Kentucky Utilities Company", "kentucky-utilities"),
+    ("KU", "kentucky-utilities"),
+    ("Old Dominion Power Company", "old-dominion-power"),
+    ("ODP", "old-dominion-power"),
 ])
 def test_download_guide_matches_only_named_provider_aliases(provider, slug):
     assert app.get_utility_download_guide(provider).slug == slug
@@ -452,6 +460,33 @@ def test_download_guide_matches_only_named_provider_aliases(provider, slug):
 @pytest.mark.parametrize("provider", [None, "", "PSE&G", "PSEG", "Not Duke Energy", "UI Services", "PGE", "Portland General Electric", "Southern California Gas", "Edison International", "Exelon", "Pepco Holdings", "Eversource", "Eversource Connecticut", "Eversource New Hampshire", "National Grid Gas", "Rockland Electric", "AEP Ohio"])
 def test_download_guide_does_not_guess_a_different_utility(provider):
     assert app.get_utility_download_guide(provider) is None
+
+
+@pytest.mark.parametrize("provider", ["Dominion Energy", "Dominion Energy Virginia", "Hawaiian Telcom", "Kauai Island Utility Cooperative", "HECO Services", "LG&E and KU Energy"])
+def test_new_download_guides_do_not_guess_parent_or_unrelated_companies(provider):
+    assert app.get_utility_download_guide(provider) is None
+
+
+@pytest.mark.parametrize("provider", ["LG&E", "KU", "ODP"])
+def test_mymeter_guides_use_customer_login_and_single_meter_download(provider):
+    guide = app.get_utility_download_guide(provider)
+    assert "My Account" in guide.steps[0]
+    assert "Account History" in guide.steps[0]
+    assert "Data, then Download" in guide.steps[1]
+    assert "15-minute" in guide.steps[1]
+    assert "listed interval format" in guide.steps[2]
+    assert "advanced meter" in guide.note
+    assert "single electric meter" in guide.note
+    assert "not Dominion Energy" in guide.note
+    assert "registration code" not in " ".join(guide.steps)
+
+
+def test_hawaiian_guide_keeps_downloads_separate_from_vendor_registration():
+    guide = app.get_utility_download_guide("HECO")
+    assert "Account Overview" in guide.steps[0]
+    assert "Green Button XML" in guide.steps[1]
+    assert "key account manager" in guide.note
+    assert "does not enable automatic updates" in guide.note
 
 
 def test_download_guide_names_and_aliases_are_unambiguous():
@@ -607,6 +642,10 @@ def test_similar_utility_names_follow_selected_account_without_cross_linking(tmp
         ("new-york", "Con Edison", "coned"),
         ("dc", "Pepco", "pepco"),
         ("pennsylvania", "PECO", "peco"),
+        ("louisville", "LG&E", "lge"),
+        ("kentucky", "Kentucky Utilities", "kentucky-utilities"),
+        ("virginia", "Old Dominion Power", "old-dominion-power"),
+        ("hawaii", "Hawaiian Electric", "hawaiian-electric"),
     ]
     for number, provider, _ in accounts:
         authorize_account(number, "multi-utility@example.com")
@@ -641,6 +680,7 @@ def test_download_guide_provider_suggestions_render_without_restricting_manual_i
     assert {"San Diego Gas & Electric", "Southern California Edison", "Pacific Gas & Electric", "Central Hudson", "Delmarva Power"} <= set(choices)
     assert {"Con Edison", "Orange & Rockland", "National Grid", "Eversource Massachusetts", "SWEPCO"} <= set(choices)
     assert {"Atlantic City Electric", "Pepco", "PECO", "ComEd"} <= set(choices)
+    assert {"Hawaiian Electric", "Louisville Gas & Electric", "Kentucky Utilities", "Old Dominion Power"} <= set(choices)
     assert document.xpath('//input[@name="energy_company" and @type="text" and @list="utility-provider-options"]')
     authorize_account("suggestions", "suggestions@example.com")
     customer_sign_in(client, "suggestions@example.com")

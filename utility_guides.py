@@ -277,6 +277,47 @@ UTILITY_DOWNLOAD_GUIDES = (
         source_url="https://www.comed.com/my-account/my-dashboard/my-usage",
     ),
     UtilityDownloadGuide(
+        slug="hawaiian-electric",
+        provider="Hawaiian Electric",
+        aliases=("HECO",),
+        title="Download your Hawaiian Electric history",
+        summary="My Energy Use lets you download electricity readings from your advanced meter.",
+        steps=(
+            "Sign in to Hawaiian Electric's Online Customer Service Center. From Account Overview, open My Energy Use for the account you want to review.",
+            "Choose your dates and download Green Button XML with 15-minute readings. If you choose CSV instead, check that it includes interval readings rather than daily or monthly totals.",
+            "Return to the matching account's History page and upload the XML file or a CSV that matches the listed interval format. Keep the original download unchanged.",
+        ),
+        url="https://www.hawaiianelectric.com/clean-energy-hawaii/grid-modernization-technologies/advanced-meters/my-energy-use-portal",
+        link_label="Open Hawaiian Electric download instructions",
+        note="Detailed readings require an advanced meter. Large business customers should ask their key account manager about portal access. Keep utility passwords and verification codes on Hawaiian Electric's site; this upload does not enable automatic updates.",
+        source_url="https://www.hawaiianelectric.com/clean-energy-hawaii/grid-modernization-technologies/advanced-meters",
+        checked_on="2026-10-12",
+    ),
+    *(
+        UtilityDownloadGuide(
+            slug=slug,
+            provider=provider,
+            aliases=aliases,
+            title=f"Download your {provider} history",
+            summary=f"Use My Meter to download electricity readings for your {provider} account.",
+            steps=(
+                "Sign in to My Account on the LG&E and KU website. Choose your electric account, then open View My Meter under Account History.",
+                "In My Meter, choose Data, then Download. Select electricity, the correct meter, your dates, and 15-minute readings; download the CSV file.",
+                "Return to the matching account's History page and check the CSV against the listed interval format before uploading. You can also use a Green Button XML download if available. Keep the original file unchanged.",
+            ),
+            url="https://lge-ku.com/mymeter-learnmore",
+            link_label="Open My Meter download instructions",
+            note="My Meter requires an advanced meter. Choose a single electric meter, not gas usage, a group of meters, or monthly totals. Sign in through My Account; you do not need a separate vendor registration for this file upload. Old Dominion Power is not Dominion Energy.",
+            source_url="https://lge-ku.com/sites/default/files/media/files/downloads/My-Meter-How-to-download-data.pdf",
+            checked_on="2026-10-12",
+        )
+        for slug, provider, aliases in (
+            ("lge", "Louisville Gas & Electric", ("LG&E", "Louisville Gas and Electric")),
+            ("kentucky-utilities", "Kentucky Utilities", ("KU",)),
+            ("old-dominion-power", "Old Dominion Power", ("ODP",)),
+        )
+    ),
+    UtilityDownloadGuide(
         slug="cmp",
         provider="Central Maine Power",
         aliases=("CMP",),
