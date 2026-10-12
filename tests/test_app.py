@@ -437,12 +437,19 @@ def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(t
     ("Eversource MA", "eversource-ma"),
     ("Southwestern Electric Power Company", "swepco"),
     ("SWEPCO", "swepco"),
+    ("Atlantic City Electric Company", "atlantic-city-electric"),
+    ("Potomac Electric Power Company", "pepco"),
+    ("Pepco", "pepco"),
+    ("PECO Energy Company", "peco"),
+    ("PECO", "peco"),
+    ("Commonwealth Edison Company", "comed"),
+    ("  ComEd  ", "comed"),
 ])
 def test_download_guide_matches_only_named_provider_aliases(provider, slug):
     assert app.get_utility_download_guide(provider).slug == slug
 
 
-@pytest.mark.parametrize("provider", [None, "", "PSE&G", "PSEG", "Not Duke Energy", "UI Services", "PGE", "Portland General Electric", "Southern California Gas", "Edison International", "ComEd", "Commonwealth Edison", "Eversource", "Eversource Connecticut", "Eversource New Hampshire", "National Grid Gas", "Rockland Electric", "AEP Ohio"])
+@pytest.mark.parametrize("provider", [None, "", "PSE&G", "PSEG", "Not Duke Energy", "UI Services", "PGE", "Portland General Electric", "Southern California Gas", "Edison International", "Exelon", "Pepco Holdings", "Eversource", "Eversource Connecticut", "Eversource New Hampshire", "National Grid Gas", "Rockland Electric", "AEP Ohio"])
 def test_download_guide_does_not_guess_a_different_utility(provider):
     assert app.get_utility_download_guide(provider) is None
 
@@ -571,6 +578,53 @@ def test_additional_guides_keep_regions_detail_and_automatic_access_clear():
     assert "Green Button download, rather than Green Button view" in app.get_utility_download_guide("SWEPCO").steps[0]
 
 
+@pytest.mark.parametrize("provider,domain", [
+    ("Atlantic City Electric", "atlanticcityelectric.com"),
+    ("Pepco", "pepco.com"),
+    ("PECO", "peco.com"),
+    ("ComEd", "comed.com"),
+])
+def test_exelon_download_guides_use_customer_routes_without_promising_format_or_access(provider, domain):
+    guide = app.get_utility_download_guide(provider)
+    assert guide.url == f"https://www.{domain}/my-account/my-dashboard/my-usage"
+    assert guide.source_url == guide.url
+    assert "My Green Button Data" in guide.steps[0]
+    assert "hourly or shorter readings" in guide.steps[1]
+    assert "CSV that matches the listed interval format" in guide.steps[2]
+    assert "stop" in guide.note.lower()
+    assert "separate data request" in guide.note
+    assert "Pepco, not PECO" in app.get_utility_download_guide("Pepco").note
+    assert "PECO and Pepco are different" in app.get_utility_download_guide("PECO").note
+    assert "not gas service" in app.get_utility_download_guide("PECO").steps[1]
+    assert "not Con Edison in New York" in app.get_utility_download_guide("ComEd").note
+
+
+def test_similar_utility_names_follow_selected_account_without_cross_linking(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setitem(app.web_app.config, "TESTING", True)
+    accounts = [
+        ("illinois", "ComEd", "comed"),
+        ("new-york", "Con Edison", "coned"),
+        ("dc", "Pepco", "pepco"),
+        ("pennsylvania", "PECO", "peco"),
+    ]
+    for number, provider, _ in accounts:
+        authorize_account(number, "multi-utility@example.com")
+        app.save_account_profile(number, energy_company=provider)
+    client = app.web_app.test_client()
+    customer_sign_in(client, "multi-utility@example.com")
+    for number, provider, slug in [*accounts, accounts[0]]:
+        response = client.get("/customer/utility", query_string={"account_number": number})
+        assert response.status_code == 200
+        document = lxml_html.fromstring(response.data)
+        selected = document.xpath('//*[@data-selected-utility]')
+        assert len(selected) == 1
+        assert selected[0].get("data-selected-utility") == slug
+        assert selected[0].xpath('.//a[@target="_blank"]/@href') == [app.get_utility_download_guide(provider).url]
+        assert selected[0].xpath(f'.//a[contains(@href, "account_number={number}") and contains(@href, "#history-import")]')
+        assert app.list_utility_connections(number) == []
+
+
 def test_download_guide_provider_names_are_available_in_company_list():
     assert {guide.provider for guide in app.UTILITY_DOWNLOAD_GUIDES if guide.slug != "duke"} <= set(app.list_energy_companies())
 
@@ -586,6 +640,7 @@ def test_download_guide_provider_suggestions_render_without_restricting_manual_i
     assert "United Illuminating" in choices
     assert {"San Diego Gas & Electric", "Southern California Edison", "Pacific Gas & Electric", "Central Hudson", "Delmarva Power"} <= set(choices)
     assert {"Con Edison", "Orange & Rockland", "National Grid", "Eversource Massachusetts", "SWEPCO"} <= set(choices)
+    assert {"Atlantic City Electric", "Pepco", "PECO", "ComEd"} <= set(choices)
     assert document.xpath('//input[@name="energy_company" and @type="text" and @list="utility-provider-options"]')
     authorize_account("suggestions", "suggestions@example.com")
     customer_sign_in(client, "suggestions@example.com")
