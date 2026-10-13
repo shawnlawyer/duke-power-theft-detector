@@ -3536,7 +3536,9 @@ def start_passkey_login(
     server = build_passkey_server(origin)
     options, state = server.authenticate_begin(
         descriptors,
-        user_verification=passkey_user_verification(normalized_kind),
+        # Same value for every account so the challenge does not reveal who is staff;
+        # staff user verification is enforced when the assertion is checked.
+        user_verification=PASSKEY_USER_VERIFICATION,
     )
     session[passkey_session_key(normalized_kind, "login")] = {
         "user_id": int(user["id"]),
@@ -3547,12 +3549,15 @@ def start_passkey_login(
     return normalize_passkey_json_value(dict(options.public_key))
 
 
-def start_decoy_passkey_login(origin: str | None = None) -> dict[str, object]:
+def start_decoy_passkey_login(email: str | None, origin: str | None = None) -> dict[str, object]:
     server = build_passkey_server(origin)
-    fake_credential = PublicKeyCredentialDescriptor(
-        type=PublicKeyCredentialType.PUBLIC_KEY,
-        id=hashlib.sha256(f"decoy:{secrets.token_hex(16)}".encode("utf-8")).digest(),
-    )
+    # Stable per email (like a real credential ID) so repeated calls look the same.
+    decoy_id = hmac.new(
+        get_app_secret().encode("utf-8"),
+        f"passkey-decoy:{(email or '').strip().lower()}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    fake_credential = PublicKeyCredentialDescriptor(type=PublicKeyCredentialType.PUBLIC_KEY, id=decoy_id)
     options, _ = server.authenticate_begin([fake_credential], user_verification=PASSKEY_USER_VERIFICATION)
     for kind in PASSKEY_USER_KINDS:
         session.pop(passkey_session_key(kind, "login"), None)
@@ -3594,6 +3599,12 @@ def complete_passkey_login(
     )
     if matching_row is None:
         raise ValueError("That sign-in did not work.")
+    if (
+        passkey_user_verification(normalized_kind) == UserVerificationRequirement.REQUIRED
+        and not auth_response.response.authenticator_data.is_user_verified()
+    ):
+        session.pop(session_key, None)
+        raise ValueError("Use a passkey that asks for your PIN, fingerprint, or face to sign in.")
     current_sign_count = int(matching_row.get("sign_count") or 0)
     auth_counter = int(auth_response.response.authenticator_data.counter)
     if auth_counter > 0 and current_sign_count > 0 and auth_counter <= current_sign_count:
@@ -5854,11 +5865,16 @@ def stripe_event_created_epoch(event: object) -> int | None:
 
 def stripe_event_subscription_id(event: object) -> str:
     event_type = str(extract_mapping_value(event, "type") or "")
-    if not event_type.startswith("customer.subscription."):
-        return ""
     data = extract_mapping_value(event, "data") or {}
     event_object = extract_mapping_value(data, "object") if not isinstance(data, dict) else data.get("object")
-    return normalize_stripe_id(event_object) if event_object is not None else ""
+    if event_object is None:
+        return ""
+    if event_type.startswith("customer.subscription."):
+        return normalize_stripe_id(event_object)
+    if event_type == "checkout.session.completed":
+        # A late checkout completion must not revive a subscription that was deleted since.
+        return normalize_stripe_id(extract_mapping_value(event_object, "subscription"))
+    return ""
 
 
 def process_stripe_event(event: object) -> str:
@@ -5867,13 +5883,7 @@ def process_stripe_event(event: object) -> str:
     event_type = str(extract_mapping_value(event, "type") or "")
     created = stripe_event_created_epoch(event)
     subscription_id = stripe_event_subscription_id(event)
-    if event_id:
-        with get_db_connection() as conn:
-            if conn.execute(
-                "SELECT 1 FROM processed_stripe_events WHERE event_id = ?", (event_id,)
-            ).fetchone() is not None:
-                return "duplicate"
-    outcome = "processed"
+    last_created = None
     if subscription_id and created is not None:
         with get_db_connection() as conn:
             row = conn.execute(
@@ -5881,13 +5891,11 @@ def process_stripe_event(event: object) -> str:
                 (subscription_id,),
             ).fetchone()
         last_created = row["last_created"] if row is not None else None
-        if last_created is not None and created < int(last_created):
-            outcome = "stale"
-    if outcome == "processed":
-        handle_stripe_event(event)
+    outcome = "stale" if last_created is not None and created < int(last_created) else "processed"
     if event_id:
+        # Claim the event first so two concurrent deliveries cannot both apply it.
         with get_db_connection() as conn:
-            conn.execute(
+            claimed = conn.execute(
                 """
                 INSERT INTO processed_stripe_events (event_id, event_type, created, subscription_id, processed_at)
                 VALUES (?, ?, ?, ?, ?)
@@ -5897,12 +5905,24 @@ def process_stripe_event(event: object) -> str:
                     event_id,
                     event_type,
                     created,
-                    # Stale events are recorded for idempotency but do not advance the subscription watermark.
-                    subscription_id if outcome == "processed" else None,
+                    # Stale events are recorded for idempotency but do not advance the watermark.
+                    subscription_id or None if outcome == "processed" else None,
                     timestamp_now(),
                 ),
-            )
+            ).rowcount
             conn.commit()
+        if not claimed:
+            return "duplicate"
+    if outcome == "processed":
+        try:
+            handle_stripe_event(event)
+        except Exception:
+            if event_id:
+                # Release the claim so Stripe's retry can apply the event.
+                with get_db_connection() as conn:
+                    conn.execute("DELETE FROM processed_stripe_events WHERE event_id = ?", (event_id,))
+                    conn.commit()
+            raise
     return outcome
 
 
@@ -8507,8 +8527,17 @@ def is_public_ip_address(value: str) -> bool:
         address = ipaddress.ip_address(value.split("%", 1)[0])
     except ValueError:
         return False
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = address.ipv4_mapped
+        if embedded is None and (
+            address in ipaddress.ip_network("64:ff9b::/96")  # NAT64 well-known prefix
+            or address in ipaddress.ip_network("::/96")  # IPv4-compatible (deprecated)
+        ):
+            embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        if embedded is None and address in ipaddress.ip_network("64:ff9b:1::/48"):
+            return False  # local-use NAT64 prefix
+        if embedded is not None:
+            address = embedded
     return address.is_global and not address.is_multicast
 
 
@@ -12540,7 +12569,12 @@ def create_web_app() -> Flask:
         normalized = str(identifier or "").strip().lower()
         if not normalized:
             return False
-        return not consume_rate_limit(f"{scope}.account", normalized, max_attempts, window_seconds)["allowed"]
+        blocked = not consume_rate_limit(f"{scope}.account", normalized, max_attempts, window_seconds)["allowed"]
+        if blocked:
+            # Someone can trip this on purpose to block a person's sign-in, so log it
+            # for alerting. The email itself is not logged.
+            emit_application_log("auth.account_limit_reached", scope=scope)
+        return blocked
 
     def auth_limit_message(retry_after: int) -> str:
         minutes = max(1, (int(retry_after) + 59) // 60)
@@ -14310,7 +14344,7 @@ def create_web_app() -> Flask:
         if resolved is None:
             # Answer exactly like a real challenge so this endpoint cannot be used to
             # learn which emails have accounts. The decoy can never be completed.
-            return jsonify({"publicKey": start_decoy_passkey_login(build_public_base_url(request.url_root))})
+            return jsonify({"publicKey": start_decoy_passkey_login(email, build_public_base_url(request.url_root))})
         kind, user = resolved
         try:
             options = start_passkey_login(
@@ -14321,7 +14355,7 @@ def create_web_app() -> Flask:
             )
         except Exception as exc:
             log_handled_exception("passkey.login_start_failed", exc)
-            return jsonify({"publicKey": start_decoy_passkey_login(build_public_base_url(request.url_root))})
+            return jsonify({"publicKey": start_decoy_passkey_login(email, build_public_base_url(request.url_root))})
         record_audit_event(
             f"{kind}.passkey_challenge_started",
             actor_type="anonymous",
@@ -14574,8 +14608,11 @@ def create_web_app() -> Flask:
         staff_user = require_staff_user()
         if not isinstance(staff_user, dict):
             return staff_user
-        if staff_user.get("mfa_enabled") and verify_staff_mfa_code(int(staff_user["id"]), request.form.get("code")) is None:
-            return jsonify({"error": "Enter a current authenticator code to add a passkey."}), 400
+        if staff_user.get("mfa_enabled"):
+            if account_limit_blocked("staff_passkey_code", str(staff_user["email"]), 5, 900):
+                return jsonify({"error": "Too many code attempts. Try again in 15 minutes."}), 429
+            if verify_staff_mfa_code(int(staff_user["id"]), request.form.get("code")) is None:
+                return jsonify({"error": "Enter a current authenticator code to add a passkey."}), 400
         try:
             options = start_passkey_enrollment(
                 "staff",

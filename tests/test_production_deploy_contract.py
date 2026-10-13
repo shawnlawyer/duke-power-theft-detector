@@ -192,7 +192,9 @@ class ProductionDeployContractTest(unittest.TestCase):
 
         self.assertIn("DEFAULT_IMAGE=home-energy-watch:current", sync)
         self.assertIn("LEGACY_IMAGE=home-energy-watch:latest", sync)
-        self.assertIn('--env-file "$ENV_FILE"', sync)
+        self.assertIn('--env-file "$RUNTIME_ENV_FILE"', sync)
+        self.assertNotIn('--env-file "$ENV_FILE"', sync)
+        self.assertIn('source "$ENV_FILE"', sync)
 
     def test_rds_cutover_runbook_pauses_sync_and_has_no_live_identifiers(self):
         runbook = (ROOT / "deploy" / "ec2" / "RDS_ENCRYPTED_MULTIAZ_CUTOVER.md").read_text()

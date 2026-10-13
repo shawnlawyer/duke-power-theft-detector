@@ -105,6 +105,13 @@ Run the Docker stack:
 docker compose up --build
 ```
 
+The container runs as a non-root user. On Linux, run it as your own user so it can write to `./data`:
+
+```bash
+mkdir -p data/input data/output
+HEW_UID=$(id -u) HEW_GID=$(id -g) docker compose up --build
+```
+
 Then open [http://localhost:8001](http://localhost:8001).
 
 Local Docker keeps uploaded files in `./data/input`, generated reports in `./data/output`, and SQLite data at `./data/output/power-history.db`.

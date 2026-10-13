@@ -2892,7 +2892,7 @@ def install_fake_passkeys(monkeypatch):
     monkeypatch.setattr(
         app.AuthenticationResponse,
         "from_dict",
-        staticmethod(lambda payload: SimpleNamespace(response=SimpleNamespace(authenticator_data=SimpleNamespace(counter=9)))),
+        staticmethod(lambda payload: SimpleNamespace(response=SimpleNamespace(authenticator_data=SimpleNamespace(counter=9, is_user_verified=lambda: True)))),
     )
     return server
 

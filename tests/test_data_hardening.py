@@ -373,7 +373,7 @@ def test_passkey_login_rejects_non_advancing_sign_count(tmp_path, monkeypatch):
         monkeypatch.setattr(
             app.AuthenticationResponse,
             "from_dict",
-            staticmethod(lambda payload: SimpleNamespace(response=SimpleNamespace(authenticator_data=SimpleNamespace(counter=value)))),
+            staticmethod(lambda payload: SimpleNamespace(response=SimpleNamespace(authenticator_data=SimpleNamespace(counter=value, is_user_verified=lambda: True)))),
         )
 
     def attempt_login():

@@ -5,8 +5,11 @@ import socket
 import pytest
 
 import app
+from types import SimpleNamespace
+
 from tests.test_app import (
     FIXTURE,
+    install_fake_passkeys,
     authorize_account,
     bootstrap_staff,
     configure_tmp_paths,
@@ -426,12 +429,64 @@ def test_passkey_start_answers_the_same_for_unknown_emails(tmp_path, monkeypatch
     app.web_app.config["TESTING"] = True
     client = app.web_app.test_client()
 
-    response = client.post("/login/passkey/start", data={"email": "nobody@example.com"})
+    first = client.post("/login/passkey/start", data={"email": "nobody@example.com"})
+    second = client.post("/login/passkey/start", data={"email": "nobody@example.com"})
+    other = client.post("/login/passkey/start", data={"email": "someone-else@example.com"})
 
-    assert response.status_code == 200
-    assert "challenge" in response.get_json()["publicKey"]
-    finish = client.post("/login/passkey/finish", json={})
+    assert first.status_code == second.status_code == 200
+    first_key, second_key = first.get_json()["publicKey"], second.get_json()["publicKey"]
+    # Stable like a real credential, and the same verification setting real accounts get.
+    assert first_key["allowCredentials"] == second_key["allowCredentials"]
+    assert first_key["allowCredentials"] != other.get_json()["publicKey"]["allowCredentials"]
+    assert first_key.get("userVerification") == "preferred"
+    assert client.post("/login/passkey/finish", json={}).status_code == 400
+
+
+def test_passkey_login_start_uses_one_verification_setting_for_everyone(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    staff_user = app.create_first_staff_user("commission@example.gov", "Commissioner One", "test-password-123")
+    server = install_fake_passkeys(monkeypatch)
+    client = app.web_app.test_client()
+    sign_in(client)
+    client.post("/staff/security/passkeys/start", data={"nickname": "Laptop"})
+    client.post("/staff/security/passkeys/finish", json={"id": "ignored"})
+    client.post("/logout")
+
+    client.post("/login/passkey/start", data={"email": "commission@example.gov"})
+
+    login_call = [call for call in server.begin_calls if call["mode"] == "authenticate"][-1]
+    assert login_call["user_verification"] == app.PASSKEY_USER_VERIFICATION
+    assert staff_user is not None
+
+
+def test_staff_passkey_sign_in_without_user_verification_is_refused(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    staff_user = app.create_first_staff_user("commission@example.gov", "Commissioner One", "test-password-123")
+    install_fake_passkeys(monkeypatch)
+    client = app.web_app.test_client()
+    sign_in(client)
+    client.post("/staff/security/passkeys/start", data={"nickname": "Laptop"})
+    client.post("/staff/security/passkeys/finish", json={"id": "ignored"})
+    client.post("/logout")
+    monkeypatch.setattr(
+        app.AuthenticationResponse,
+        "from_dict",
+        staticmethod(
+            lambda payload: SimpleNamespace(
+                response=SimpleNamespace(authenticator_data=SimpleNamespace(counter=9, is_user_verified=lambda: False))
+            )
+        ),
+    )
+
+    client.post("/login/passkey/start", data={"email": "commission@example.gov"})
+    finish = client.post("/login/passkey/finish", json={"id": "ignored"})
+
     assert finish.status_code == 400
+    with client.session_transaction() as flask_session:
+        assert flask_session.get("staff_user_id") is None
+    assert staff_user is not None
 
 
 def test_staff_passkeys_require_user_verification():
@@ -462,6 +517,12 @@ def test_staff_with_mfa_must_enter_a_code_to_add_a_passkey(tmp_path, monkeypatch
     assert "authenticator code" in refused.get_json()["error"]
     assert accepted.status_code == 200
     assert "challenge" in accepted.get_json()["publicKey"]
+
+    statuses = [
+        client.post("/staff/security/passkeys/start", data={"nickname": "Laptop", "code": "000000"}).status_code
+        for _ in range(5)
+    ]
+    assert statuses[-1] == 429
 
 
 def test_forwarded_host_header_is_ignored_without_trusted_proxy(tmp_path, monkeypatch):
@@ -496,3 +557,70 @@ def test_postgres_query_translation_escapes_literal_percent_signs():
     connection.kind = "postgres"
     translated = connection._translate_query("SELECT 1 FROM t WHERE a LIKE 'x_%' AND b = ?")
     assert translated == "SELECT 1 FROM t WHERE a LIKE 'x_%%' AND b = %s"
+
+
+# --- Review follow-ups --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("address", ["64:ff9b::a9fe:a9fe", "::a9fe:a9fe", "64:ff9b:1::1", "::ffff:10.0.0.1", "::1"])
+def test_ipv6_forms_of_private_addresses_are_not_public(address):
+    assert app.is_public_ip_address(address) is False
+
+
+def test_connection_level_check_refuses_a_private_peer(monkeypatch):
+    class FakeSocket:
+        closed = False
+
+        def getpeername(self):
+            return ("169.254.169.254", 443)
+
+        def close(self):
+            self.closed = True
+
+    fake_socket = FakeSocket()
+
+    def fake_connect(self):
+        self.sock = fake_socket
+
+    monkeypatch.setattr(app.http.client.HTTPSConnection, "connect", fake_connect)
+    connection = app._PublicOnlyHTTPSConnection("rebind.example.com")
+
+    with pytest.raises(ValueError, match="private address"):
+        connection.connect()
+    assert fake_socket.closed
+
+
+def stripe_event(event_id, event_type, created, obj):
+    return {"id": event_id, "type": event_type, "created": created, "data": {"object": obj}}
+
+
+def test_late_checkout_completion_does_not_revive_a_deleted_subscription(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    applied = []
+    monkeypatch.setattr(app, "handle_stripe_event", lambda event: applied.append(event["id"]))
+
+    deleted = stripe_event("evt_deleted", "customer.subscription.deleted", 200, {"id": "sub_1", "status": "canceled"})
+    late_checkout = stripe_event("evt_checkout", "checkout.session.completed", 100, {"id": "cs_1", "subscription": "sub_1"})
+
+    assert app.process_stripe_event(deleted) == "processed"
+    assert app.process_stripe_event(late_checkout) == "stale"
+    assert applied == ["evt_deleted"]
+
+
+def test_failed_stripe_event_can_be_retried(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    calls = []
+
+    def flaky(event):
+        calls.append(event["id"])
+        if len(calls) == 1:
+            raise RuntimeError("database hiccup")
+
+    monkeypatch.setattr(app, "handle_stripe_event", flaky)
+    event = stripe_event("evt_retry", "customer.subscription.updated", 100, {"id": "sub_2", "status": "active"})
+
+    with pytest.raises(RuntimeError):
+        app.process_stripe_event(event)
+    assert app.process_stripe_event(event) == "processed"
+    assert app.process_stripe_event(event) == "duplicate"
+    assert calls == ["evt_retry", "evt_retry"]
