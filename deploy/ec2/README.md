@@ -24,9 +24,14 @@ The current control status and remaining enterprise gates are tracked in `ENTERP
    - `STRIPE_WEBHOOK_SECRET`
    - `STRIPE_PRICE_HOME`
    - `STRIPE_PRICE_REVIEW`
-4. Create the host folders:
-   - `/opt/home-energy-watch/input`
-   - `/opt/home-energy-watch/output`
+4. Create the host folders and give them to the container user. The image runs as the unprivileged `app` user, uid/gid `10001`, so the bind-mounted host folders must be owned (or at least writable) by uid `10001`:
+
+```bash
+sudo mkdir -p /opt/home-energy-watch/input /opt/home-energy-watch/output
+sudo chown -R 10001:10001 /opt/home-energy-watch/input /opt/home-energy-watch/output
+```
+
+   `scripts/deploy-production.sh deploy` re-applies this `chown` on every deploy before switching images, so files written by older root-run containers are fixed automatically. Run it by hand if you start the service without that script.
 5. Install the production systemd units and launch production:
 
 ```bash
@@ -38,10 +43,12 @@ sudo systemctl enable --now home-energy-watch
 sudo systemctl enable --now home-energy-watch-utility-sync.timer
 ```
 
+   On first start, if `home-energy-watch:current` does not exist yet, `home-energy-watch-direct.sh` builds it once from the checkout. Later service restarts reuse the existing image and never rebuild; new images come only from `scripts/deploy-production.sh deploy`.
+
 6. Point your DNS at the EC2 public IP:
    - `homeenergywatch.com`
    - `app.homeenergywatch.com`
-7. Put TLS in front of the container with your preferred reverse proxy or load balancer.
+7. Put TLS in front of the container with your preferred reverse proxy or load balancer. The published port is controlled by `POWER_WEB_PORT` (default `80`) and `POWER_BIND_ADDRESS`. Leaving `POWER_BIND_ADDRESS` blank keeps the historical behavior of publishing on every host interface. When the TLS proxy runs on the same host, set `POWER_BIND_ADDRESS=127.0.0.1` (and point the proxy at `127.0.0.1:$POWER_WEB_PORT`) so the plain-HTTP port is not reachable from the network. With a load balancer in the VPC, keep the bind address blank and restrict the port with the instance security group instead.
 8. Set the public base URLs so billing and cross-host links stay on the right hostname:
    - `POWER_PUBLIC_BASE_URL=https://app.homeenergywatch.com`
    - `POWER_MARKETING_BASE_URL=https://homeenergywatch.com`
@@ -56,7 +63,7 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 
 Generate a separate random value of at least 32 characters for `POWER_AUDIT_SIGNING_KEY`. Store all three values only in the ignored production env file or approved secret store. The app refuses to start in production when any value is missing or invalid. Keep the audit-signing key stable across deploys; changing it invalidates verification of existing audit records. Set `POWER_TRUST_PROXY=true` only when the container is behind the configured reverse proxy or load balancer.
 
-The production Postgres URL must require TLS with `?sslmode=require` or a stricter certificate-verifying mode. Production startup fails when the URL points anywhere other than Postgres or does not require TLS.
+The production Postgres URL must require TLS with `?sslmode=require` or a stricter certificate-verifying mode. Production startup fails when the URL points anywhere other than Postgres or does not require TLS. `sslmode=require` encrypts but does not authenticate the server; prefer `sslmode=verify-full` with the AWS RDS CA bundle. Because `.env.production` is read both by bash and by `docker --env-file`, avoid `&` in values: use `?sslmode=verify-full` in the URL and set `PGSSLROOTCERT=/srv/home-energy-watch/input/rds-global-bundle.pem` as its own line, with the bundle from `https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem` saved as `/opt/home-energy-watch/input/rds-global-bundle.pem` on the host.
 
 Production email uses Amazon SES through the EC2 instance role. Verify `homeenergywatch.com` in SES, publish the SES DKIM records in DNS, and use a verified sender in `POWER_EMAIL_FROM`. `POWER_EMAIL_REPLY_TO` is optional. Production startup fails when SES delivery or the sender address is missing.
 
@@ -75,6 +82,21 @@ AWS_PROFILE=shawn-admin AWS_REGION=us-east-1 aws ec2 describe-instances --filter
 curl -fsS https://app.homeenergywatch.com/health
 ```
 
+## Releases, image tags, and rollback
+
+`scripts/deploy-production.sh deploy --confirm-production` is the supported release path. It:
+
+1. After local tests and packaging pass, optionally creates an RDS snapshot and waits until it is `available`. Set `HEW_RDS_INSTANCE_ID` (for example `home-energy-watch-pg`) in the operator shell to enable this; when unset the step is skipped with a notice.
+2. Ships the clean merged commit to the host, backs up the current source tree, and replaces the application source.
+3. Chowns the bind-mounted data folders to uid `10001`.
+4. Builds the image once as `home-energy-watch:<git-sha>`. The running service is untouched until this succeeds.
+5. Retags the running image as `home-energy-watch:previous`, tags the new image as `home-energy-watch:current` (and `:latest` for older runbooks), restarts `home-energy-watch`, and verifies `/health`.
+6. If the restart or health check fails, it retags `:previous` as `:current`, restarts, re-verifies, and exits non-zero with a message saying whether the rollback restored health.
+
+The web service and the utility-sync timer both run `home-energy-watch:current` (override with `HEW_IMAGE` in `.env.production` only for an emergency pin). The image defines a Docker `HEALTHCHECK` on `/health`; read it with `sudo docker inspect --format '{{.State.Health.Status}}' home-energy-watch`.
+
+`scripts/deploy-production.sh rollback --confirm-production [--backup FILE]` restores a source backup, rebuilds it, tags it `:current`, and restarts. See `INCIDENT_RESPONSE.md` for the manual image rollback.
+
 ## Scheduled utility sync
 
 The production timer runs the saved utility-connection sync every day at about 2:15 a.m. Eastern time. Install and verify it with:
@@ -91,7 +113,9 @@ sudo docker run --rm \
   --env-file deploy/ec2/.env.production \
   -v /opt/home-energy-watch/input:/srv/home-energy-watch/input \
   -v /opt/home-energy-watch/output:/srv/home-energy-watch/output \
-  home-energy-watch:latest python app.py --sync-utilities
+  -e POWER_INPUT_DIR=/srv/home-energy-watch/input \
+  -e POWER_OUTPUT_DIR=/srv/home-energy-watch/output \
+  home-energy-watch:current python app.py --sync-utilities
 ```
 
 To limit the job to one account:
@@ -101,7 +125,9 @@ sudo docker run --rm \
   --env-file deploy/ec2/.env.production \
   -v /opt/home-energy-watch/input:/srv/home-energy-watch/input \
   -v /opt/home-energy-watch/output:/srv/home-energy-watch/output \
-  home-energy-watch:latest python app.py --sync-utilities --account-number primary
+  -e POWER_INPUT_DIR=/srv/home-energy-watch/input \
+  -e POWER_OUTPUT_DIR=/srv/home-energy-watch/output \
+  home-energy-watch:current python app.py --sync-utilities --account-number primary
 ```
 
 The command exits `0` when all saved connections sync and exits `1` when any connection fails. The app still records per-connection status, last attempt time, last successful sync time, and the latest error so the account page shows what happened after the timer run. Use `journalctl -u home-energy-watch-utility-sync.service` for the job log; do not print environment values while troubleshooting.

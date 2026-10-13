@@ -20,7 +20,13 @@ HEALTH_URL="${PRODUCTION_HEALTH_URL:-https://app.homeenergywatch.com/health}"
 HEALTH_RETRIES="${PRODUCTION_HEALTH_RETRIES:-30}"
 HEALTH_DELAY_SECONDS="${PRODUCTION_HEALTH_DELAY_SECONDS:-2}"
 HEALTH_MAX_TIME="${PRODUCTION_HEALTH_MAX_TIME:-5}"
+REMOTE_IMAGE_REPO="${PRODUCTION_IMAGE_REPO:-home-energy-watch}"
+REMOTE_DATA_DIRS="${PRODUCTION_REMOTE_DATA_DIRS:-/opt/home-energy-watch/input /opt/home-energy-watch/output}"
+# UID/GID of the unprivileged "app" user baked into the Dockerfile.
+CONTAINER_UID="10001"
+RDS_INSTANCE_ID="${HEW_RDS_INSTANCE_ID:-}"
 PACKAGE_ARCHIVE=""
+RELEASE_SHA=""
 
 cd "$ROOT_DIR"
 
@@ -63,11 +69,18 @@ Commands:
               PRODUCTION_SSH_TARGET is set, also checks remote prerequisites.
   package     Run tests by default, build the Docker image, and create a source
               archive under .tmp-deploy without changing production.
-  deploy      Package, copy the archive to the production EC2 host, back up the
-              current release, replace only application source, restart the
-              home-energy-watch systemd service, and verify /health.
-  rollback    Restore the latest backup, or the backup named with --backup,
-              restart the home-energy-watch service, and verify /health.
+  deploy      Package, optionally snapshot RDS (HEW_RDS_INSTANCE_ID), copy the
+              archive to the production EC2 host, back up the current release,
+              replace only application source, build the image once tagged
+              home-energy-watch:<git-sha>, retag the running image as
+              :previous and the new one as :current, restart the
+              home-energy-watch systemd service, and verify /health. If the
+              restart or health verification fails, :previous is retagged as
+              :current, the service is restarted and re-verified, and the
+              command exits non-zero.
+  rollback    Restore the latest source backup, or the backup named with
+              --backup, rebuild and tag it as :current, restart the
+              home-energy-watch service, and verify /health.
   help        Show this message.
 
 Production-changing commands require:
@@ -84,6 +97,14 @@ Environment:
   PRODUCTION_RELEASE_BRANCH   Defaults to main
   PRODUCTION_RELEASE_REMOTE_REF Defaults to origin/main
   PRODUCTION_HEALTH_URL       Defaults to https://app.homeenergywatch.com/health
+  PRODUCTION_IMAGE_REPO       Defaults to home-energy-watch (tags :<sha>, :current, :previous)
+  PRODUCTION_REMOTE_DATA_DIRS Host bind-mount dirs chowned to the container
+                              user (uid 10001) on every deploy. Defaults to
+                              "/opt/home-energy-watch/input /opt/home-energy-watch/output"
+  HEW_RDS_INSTANCE_ID         Optional. When set, deploy first runs
+                              aws rds create-db-snapshot for this instance and
+                              waits until the snapshot is available. Uses the
+                              caller's AWS CLI profile/region.
   PYTHON_BIN                  Defaults to .venv/bin/python when present, otherwise python3
 
 The deployment archive contains only files tracked by the clean, merged Git
@@ -146,6 +167,8 @@ run_syntax_checks() {
 
   log "Checking shell script syntax"
   bash -n "$ROOT_DIR/scripts/deploy-production.sh"
+  bash -n "$ROOT_DIR/deploy/ec2/home-energy-watch-direct.sh"
+  bash -n "$ROOT_DIR/deploy/ec2/home-energy-watch-utility-sync.sh"
 }
 
 run_tests() {
@@ -203,6 +226,10 @@ build_id() {
     revision="$(git -C "$ROOT_DIR" rev-parse --short HEAD)"
   fi
   printf '%s-%s' "$timestamp" "$revision"
+}
+
+release_sha() {
+  git -C "$ROOT_DIR" rev-parse --short=12 HEAD
 }
 
 create_archive() {
@@ -267,7 +294,7 @@ check_remote_prerequisites() {
   remote_run "command -v docker >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && command -v curl >/dev/null && command -v sudo >/dev/null && test -f $(remote_quote "$REMOTE_ROOT/$REMOTE_ENV_FILE_RELATIVE")"
 }
 
-verify_health() {
+check_health() {
   log "Verifying runtime health"
   local attempt
   attempt=1
@@ -281,25 +308,53 @@ verify_health() {
     fi
     attempt=$((attempt + 1))
   done
-  die "Health check failed after $HEALTH_RETRIES attempts: $HEALTH_URL"
+  printf '%s\n' "Health check failed after $HEALTH_RETRIES attempts: $HEALTH_URL" >&2
+  return 1
+}
+
+verify_health() {
+  check_health || die "Health check failed after $HEALTH_RETRIES attempts: $HEALTH_URL"
+}
+
+snapshot_rds_before_deploy() {
+  if [[ -z "$RDS_INSTANCE_ID" ]]; then
+    log "Skipping pre-deploy RDS snapshot because HEW_RDS_INSTANCE_ID is not set"
+    return 0
+  fi
+  require_command aws
+  local snapshot_id
+  snapshot_id="home-energy-watch-predeploy-$(date -u +%Y%m%d-%H%M%S)-${RELEASE_SHA:-nogit}"
+  log "Creating pre-deploy RDS snapshot $snapshot_id of $RDS_INSTANCE_ID"
+  aws rds create-db-snapshot \
+    --db-instance-identifier "$RDS_INSTANCE_ID" \
+    --db-snapshot-identifier "$snapshot_id" >/dev/null \
+    || die "RDS snapshot request failed for $RDS_INSTANCE_ID; production was not changed."
+  log "Waiting for RDS snapshot $snapshot_id to become available"
+  aws rds wait db-snapshot-available --db-snapshot-identifier "$snapshot_id" \
+    || die "RDS snapshot $snapshot_id did not become available; production was not changed."
+  printf '%s\n' "RDS snapshot available: $snapshot_id"
 }
 
 deploy_archive() {
   local archive="$1"
-  local remote_archive="/tmp/$(basename "$archive")"
+  local remote_archive
+  remote_archive="/tmp/$(basename "$archive")"
   require_remote_target
   log "Copying release archive to production host"
   remote_copy "$archive" "$remote_archive"
 
-  log "Installing release on production host"
-  remote_run "bash -s -- $(remote_quote "$REMOTE_ROOT") $(remote_quote "$REMOTE_BACKUP_DIR") $(remote_quote "$REMOTE_RELEASE_DIR") $(remote_quote "$REMOTE_SERVICE") $(remote_quote "$remote_archive")" <<'REMOTE_DEPLOY'
+  log "Installing release source and building image $REMOTE_IMAGE_REPO:$RELEASE_SHA on production host"
+  remote_run "bash -s -- $(remote_quote "$REMOTE_ROOT") $(remote_quote "$REMOTE_BACKUP_DIR") $(remote_quote "$REMOTE_RELEASE_DIR") $(remote_quote "$remote_archive") $(remote_quote "$REMOTE_IMAGE_REPO") $(remote_quote "$RELEASE_SHA") $(remote_quote "$CONTAINER_UID") $(remote_quote "$REMOTE_DATA_DIRS")" <<'REMOTE_DEPLOY'
 set -euo pipefail
 
 remote_root="$1"
 backup_dir="$2"
 release_dir="$3"
-service="$4"
-artifact="$5"
+artifact="$4"
+image_repo="$5"
+release_sha="$6"
+container_uid="$7"
+data_dirs="$8"
 env_file="$remote_root/deploy/ec2/.env.production"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 staging="$release_dir/$timestamp"
@@ -339,8 +394,59 @@ if [[ ! -f "$env_file" ]]; then
   exit 1
 fi
 
+# The container runs as the unprivileged app user (uid/gid 10001). Host
+# bind-mount directories must be writable by that uid. Idempotent.
+for data_dir in $data_dirs; do
+  sudo mkdir -p "$data_dir"
+  sudo chown -R "$container_uid:$container_uid" "$data_dir"
+done
+
 cd "$remote_root"
-docker build -t home-energy-watch:latest .
+# Build once, tagged by commit. The running service is not touched here.
+docker build -t "$image_repo:$release_sha" .
+rm -f "$artifact"
+printf '%s\n' "Backup created: $backup"
+printf '%s\n' "Built image: $image_repo:$release_sha"
+REMOTE_DEPLOY
+
+  if switch_remote_image && check_health; then
+    printf '%s\n' "Deployed $REMOTE_IMAGE_REPO:$RELEASE_SHA as $REMOTE_IMAGE_REPO:current"
+    return 0
+  fi
+
+  rollback_image_after_failed_deploy
+}
+
+switch_remote_image() {
+  log "Promoting $REMOTE_IMAGE_REPO:$RELEASE_SHA to :current (running image retagged :previous) and restarting $REMOTE_SERVICE"
+  remote_run "bash -s -- $(remote_quote "$REMOTE_ROOT") $(remote_quote "$REMOTE_SERVICE") $(remote_quote "$REMOTE_IMAGE_REPO") $(remote_quote "$RELEASE_SHA")" <<'REMOTE_SWITCH'
+set -euo pipefail
+
+remote_root="$1"
+service="$2"
+image_repo="$3"
+release_sha="$4"
+
+new_id="$(docker image inspect --format '{{.Id}}' "$image_repo:$release_sha")"
+current_ref=""
+if docker image inspect "$image_repo:current" >/dev/null 2>&1; then
+  current_ref="$image_repo:current"
+elif docker image inspect "$image_repo:latest" >/dev/null 2>&1; then
+  # First tagged release: the legacy :latest image is what is running.
+  current_ref="$image_repo:latest"
+fi
+if [[ -n "$current_ref" ]]; then
+  current_id="$(docker image inspect --format '{{.Id}}' "$current_ref")"
+  if [[ "$current_id" != "$new_id" ]]; then
+    docker tag "$current_ref" "$image_repo:previous"
+    printf '%s\n' "Retagged $current_ref as $image_repo:previous"
+  fi
+fi
+docker tag "$image_repo:$release_sha" "$image_repo:current"
+# Keep :latest pointing at the running release for older runbooks/scripts.
+docker tag "$image_repo:$release_sha" "$image_repo:latest"
+
+cd "$remote_root"
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.service /etc/systemd/system/home-energy-watch-utility-sync.service
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.timer /etc/systemd/system/home-energy-watch-utility-sync.timer
 sudo systemctl daemon-reload
@@ -348,17 +454,44 @@ sudo systemctl enable --now home-energy-watch-utility-sync.timer
 sudo systemctl restart "$service"
 sudo systemctl is-active --quiet "$service"
 sudo systemctl is-active --quiet home-energy-watch-utility-sync.timer
-rm -f "$artifact"
-printf '%s\n' "Backup created: $backup"
-REMOTE_DEPLOY
+REMOTE_SWITCH
+}
 
-  verify_health
+rollback_image_after_failed_deploy() {
+  printf '%s\n' "Error: release $RELEASE_SHA failed restart or health verification. Rolling back to $REMOTE_IMAGE_REPO:previous." >&2
+  local rollback_ok=false
+  if remote_run "bash -s -- $(remote_quote "$REMOTE_SERVICE") $(remote_quote "$REMOTE_IMAGE_REPO")" <<'REMOTE_IMAGE_ROLLBACK'
+set -euo pipefail
+
+service="$1"
+image_repo="$2"
+
+if ! docker image inspect "$image_repo:previous" >/dev/null 2>&1; then
+  echo "No $image_repo:previous image exists on the host; cannot roll back automatically." >&2
+  exit 1
+fi
+docker tag "$image_repo:previous" "$image_repo:current"
+docker tag "$image_repo:previous" "$image_repo:latest"
+sudo systemctl restart "$service"
+sudo systemctl is-active --quiet "$service"
+printf '%s\n' "Restored $image_repo:previous as $image_repo:current"
+REMOTE_IMAGE_ROLLBACK
+  then
+    if check_health; then
+      rollback_ok=true
+    fi
+  fi
+
+  if [[ "$rollback_ok" == "true" ]]; then
+    die "Deploy of $RELEASE_SHA FAILED and was rolled back to the previous image, which is healthy. The host source tree still contains the failed release; run 'scripts/deploy-production.sh rollback --confirm-production' to restore the source backup as well."
+  fi
+  die "Deploy of $RELEASE_SHA FAILED and the automatic image rollback did NOT restore health. Production is degraded: follow deploy/ec2/INCIDENT_RESPONSE.md now."
 }
 
 rollback_release() {
   require_remote_target
   log "Restoring production from backup"
-  remote_run "bash -s -- $(remote_quote "$REMOTE_ROOT") $(remote_quote "$REMOTE_BACKUP_DIR") $(remote_quote "$REMOTE_RELEASE_DIR") $(remote_quote "$REMOTE_SERVICE") $(remote_quote "$requested_backup")" <<'REMOTE_ROLLBACK'
+  remote_run "bash -s -- $(remote_quote "$REMOTE_ROOT") $(remote_quote "$REMOTE_BACKUP_DIR") $(remote_quote "$REMOTE_RELEASE_DIR") $(remote_quote "$REMOTE_SERVICE") $(remote_quote "$requested_backup") $(remote_quote "$REMOTE_IMAGE_REPO")" <<'REMOTE_ROLLBACK'
 set -euo pipefail
 
 remote_root="$1"
@@ -366,6 +499,7 @@ backup_dir="$2"
 release_dir="$3"
 service="$4"
 requested_backup="$5"
+image_repo="$6"
 env_file="$remote_root/deploy/ec2/.env.production"
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 pre_rollback_backup="$backup_dir/home-energy-watch-pre-rollback-$timestamp.tgz"
@@ -417,7 +551,11 @@ if [[ ! -f "$env_file" ]]; then
 fi
 
 cd "$remote_root"
-docker build -t home-energy-watch:latest .
+# Rebuild the restored source and make it the image systemd runs.
+rollback_tag="$image_repo:rollback-$timestamp"
+docker build -t "$rollback_tag" .
+docker tag "$rollback_tag" "$image_repo:current"
+docker tag "$rollback_tag" "$image_repo:latest"
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.service /etc/systemd/system/home-energy-watch-utility-sync.service
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.timer /etc/systemd/system/home-energy-watch-utility-sync.timer
 sudo systemctl daemon-reload
@@ -471,7 +609,9 @@ case "$command" in
     require_command scp
     require_command curl
     require_release_commit
+    RELEASE_SHA="$(release_sha)"
     package_release
+    snapshot_rds_before_deploy
     deploy_archive "$PACKAGE_ARCHIVE"
     ;;
   rollback)
