@@ -442,7 +442,8 @@ Production uses:
 
 - EC2 host checkout at `/home/ubuntu/home-energy-watch`
 - production env file at `/home/ubuntu/home-energy-watch/deploy/ec2/.env.production`
-- Docker image tag `home-energy-watch:latest`
+- Docker image tags `home-energy-watch:<git-sha>` (each release), `home-energy-watch:current` (what systemd runs), and `home-energy-watch:previous` (automatic rollback target); `:latest` is kept pointing at `:current` for older runbooks
+- a non-root container user (uid/gid `10001`); host folders `/opt/home-energy-watch/input` and `/opt/home-energy-watch/output` must be owned by that uid (the deploy script chowns them)
 - systemd service `home-energy-watch`
 - public health check `https://app.homeenergywatch.com/health`
 
@@ -466,6 +467,8 @@ export PRODUCTION_RELEASE_BRANCH=main
 export PRODUCTION_RELEASE_REMOTE_REF=origin/main
 export PRODUCTION_HEALTH_URL=https://app.homeenergywatch.com/health
 export PYTHON_BIN="$PWD/.venv/bin/python"
+# Optional: snapshot RDS before every deploy (uses your AWS CLI profile/region)
+export HEW_RDS_INSTANCE_ID=home-energy-watch-pg
 ```
 
 Check locally without changing production:
@@ -495,12 +498,15 @@ Deploy flow:
 3. Runs `git diff --check`.
 4. Builds the Docker image from the repo Dockerfile.
 5. Creates a source archive from the merged Git commit under `.tmp-deploy`.
-6. Copies the archive to the EC2 host over SSH.
-7. Backs up the current production release to the remote backup directory.
-8. Replaces application source while preserving `deploy/ec2/.env.production`.
-9. Builds `home-energy-watch:latest` on EC2.
-10. Restarts only the `home-energy-watch` systemd service.
-11. Verifies `PRODUCTION_HEALTH_URL`.
+6. When `HEW_RDS_INSTANCE_ID` is set, creates an RDS snapshot and waits until it is available (skipped with a notice otherwise).
+7. Copies the archive to the EC2 host over SSH.
+8. Backs up the current production release to the remote backup directory.
+9. Replaces application source while preserving `deploy/ec2/.env.production`.
+10. Chowns the host data folders to the container uid `10001`.
+11. Builds `home-energy-watch:<git-sha>` once on EC2.
+12. Retags the running image as `home-energy-watch:previous` and the new image as `home-energy-watch:current`.
+13. Restarts only the `home-energy-watch` systemd service (which runs `:current` and never rebuilds).
+14. Verifies `PRODUCTION_HEALTH_URL`. If the restart or health check fails, retags `:previous` as `:current`, restarts, re-verifies, and exits non-zero.
 
 Use `--skip-tests` only when tests were already run for the exact source being deployed:
 
@@ -528,7 +534,7 @@ Rollback flow:
 2. Selects the requested backup, or the newest backup when none is provided.
 3. Creates a pre-rollback backup of the current release.
 4. Restores source from the selected backup while preserving `deploy/ec2/.env.production`.
-5. Rebuilds `home-energy-watch:latest`.
+5. Rebuilds the restored source and tags it `home-energy-watch:current`.
 6. Restarts only the `home-energy-watch` systemd service.
 7. Verifies `PRODUCTION_HEALTH_URL`.
 

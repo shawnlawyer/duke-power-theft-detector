@@ -23,6 +23,8 @@ This ledger separates implemented controls from production proof and approval-ga
 - Audit records form a keyed hash chain. Commissioners can verify and export the filtered record; export stops when integrity fails.
 - Direct Stripe operations remain backend-only. `POWER_BILLING_ENABLED=false` keeps checkout closed until the approved Stripe Price IDs are installed, even if stale Stripe configuration remains. No live charge or refund is part of automated verification.
 - The release image uses a digest-pinned Python base and a fully hashed dependency lock. Runtime packaging tools are removed after installation.
+- The container runs as the unprivileged `app` user (uid/gid 10001); the application source is read-only to it and only the data directories are writable. The image defines a Docker `HEALTHCHECK` against `/health`, and gunicorn recycles workers (`--max-requests 1000 --max-requests-jitter 100`) with a 30-second graceful timeout.
+- Production deploys build the image once on the host as `home-energy-watch:<git-sha>`, retag the running image as `:previous`, and promote the new image to `:current`. systemd restarts reuse `:current` and never rebuild. A failed restart or `/health` check automatically retags `:previous` as `:current`, restarts, re-verifies, and fails the deploy. When `HEW_RDS_INSTANCE_ID` is set, the deploy first creates an RDS snapshot and waits for it to be available.
 - The release-security gate runs the complete test suite, `pip-audit`, and a digest-pinned Trivy scan that fails on fixed high or critical findings. The local gate passed all 120 tests with no known dependency vulnerabilities and zero container or secret findings.
 - Local, Omen staging, and EC2 candidate images pass the complete 120-test automated suite. A disposable PostgreSQL exercise also passed idempotent migration, legal-hold enforcement, and approved deletion.
 
@@ -50,7 +52,7 @@ This ledger separates implemented controls from production proof and approval-ga
 - Data-lifecycle run `29825054146` passed on pull request 6, and run `29825142636` passed after merge to `main`.
 - ZIP-utility run `29826057416` passed on pull request 8, and run `29826166342` passed after merge to `main`.
 - `main` requires pull requests and a current `verify` check. Enforcement applies to administrators; unresolved review conversations block merging, and force-pushes and branch deletion are disabled.
-- The immediately previous production image is retained as `home-energy-watch:rollback-20260721-zip-utility-predeploy`.
+- The immediately previous production image was retained as `home-energy-watch:rollback-20260721-zip-utility-predeploy` under the earlier manual process. From the tagged-release deploy onward the rollback image is `home-energy-watch:previous`, alongside each release's `home-energy-watch:<git-sha>`.
 
 ## Last verified infrastructure state
 
