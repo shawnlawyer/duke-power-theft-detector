@@ -447,6 +447,10 @@ docker tag "$image_repo:$release_sha" "$image_repo:current"
 docker tag "$image_repo:$release_sha" "$image_repo:latest"
 
 cd "$remote_root"
+if [[ "$service" == "home-energy-watch" ]]; then
+  # Keep the web unit in sync with the repo (stop timeout etc.).
+  sudo install -m 0644 deploy/ec2/home-energy-watch.service /etc/systemd/system/home-energy-watch.service
+fi
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.service /etc/systemd/system/home-energy-watch-utility-sync.service
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.timer /etc/systemd/system/home-energy-watch-utility-sync.timer
 sudo systemctl daemon-reload
@@ -556,6 +560,10 @@ rollback_tag="$image_repo:rollback-$timestamp"
 docker build -t "$rollback_tag" .
 docker tag "$rollback_tag" "$image_repo:current"
 docker tag "$rollback_tag" "$image_repo:latest"
+if [[ "$service" == "home-energy-watch" ]]; then
+  # Keep the web unit in sync with the repo (stop timeout etc.).
+  sudo install -m 0644 deploy/ec2/home-energy-watch.service /etc/systemd/system/home-energy-watch.service
+fi
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.service /etc/systemd/system/home-energy-watch-utility-sync.service
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.timer /etc/systemd/system/home-energy-watch-utility-sync.timer
 sudo systemctl daemon-reload
