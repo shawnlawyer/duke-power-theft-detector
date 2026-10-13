@@ -38,7 +38,7 @@ from uuid import uuid4
 import aiohttp
 from aiodukeenergy import Auth0Client, DukeEnergy, DukeEnergyAuth
 from dateutil import tz
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from flask import Flask, flash, g, has_request_context, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from werkzeug.exceptions import HTTPException
 import pandas as pd
@@ -129,6 +129,10 @@ LOGIN_TOKEN_EXPIRY_MINUTES = 15
 EMAIL_OUTBOX: list[dict[str, str]] = []
 CUSTOMER_ACCESS_LEVELS = ("Viewer", "Manager")
 APP_LOGGER_NAME = "home_energy_watch"
+FLAGGED_INTERVAL_CAVEAT = "Flagged intervals are prompts for review, not proof of theft, tampering, or a billing error."
+HOUSEHOLD_ASSISTANT_MAX_QUESTION_CHARS = 2000
+HOUSEHOLD_ASSISTANT_RATE_LIMIT = 20
+HOUSEHOLD_ASSISTANT_RATE_WINDOW_SECONDS = 60 * 60
 
 
 def get_application_log_level() -> int:
@@ -180,6 +184,32 @@ def emit_application_log(event: str, **fields: object) -> None:
     else:
         message = " ".join(f"{key}={value}" for key, value in record.items())
     get_application_logger().info(message)
+
+
+GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again or contact support."
+
+
+def log_handled_exception(event: str, exc: BaseException) -> None:
+    payload = {
+        "event": event,
+        "exception_type": exc.__class__.__name__,
+        "request_id": str(getattr(g, "request_id", "") or "") if has_request_context() else "",
+    }
+    get_application_logger().error(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
+USER_FACING_EXCEPTION_TYPES = (ValueError, PermissionError, FileNotFoundError)
+
+
+def user_facing_error_message(exc: BaseException, event: str = "request.handled_error") -> str:
+    """Return validation messages as-is; log anything unexpected and return a generic message."""
+    if isinstance(exc, USER_FACING_EXCEPTION_TYPES):
+        return str(exc)
+    log_handled_exception(event, exc)
+    return GENERIC_ERROR_MESSAGE
 
 
 ENERGY_COMPANY_GROUPS = (
@@ -626,6 +656,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_OWNER_FREE_PLAY_VALID_DAYS,
         help="Days until expiration for a created owner promotion code",
+    )
+    parser.add_argument(
+        "--reseal-secrets",
+        action="store_true",
+        help="Re-encrypt all sealed secrets with the first POWER_DATA_ENCRYPTION_KEY and exit",
     )
     parser.add_argument("--host", default="0.0.0.0", help="Web host to bind when using --serve")
     parser.add_argument("--port", type=int, default=8000, help="Web port to bind when using --serve")
@@ -1560,6 +1595,24 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         ON audit_events (action, occurred_at)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_stripe_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            created BIGINT,
+            subscription_id TEXT,
+            processed_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("ALTER TABLE processed_stripe_events ADD COLUMN IF NOT EXISTS subscription_id TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_processed_stripe_events_subscription
+        ON processed_stripe_events (subscription_id, created)
+        """
+    )
     backfill_audit_event_hashes(conn)
     billing_columns = table_columns(conn, "customer_billing")
     if not billing_columns:
@@ -2262,6 +2315,25 @@ def migrate_database(conn: DatabaseConnection) -> None:
         ON audit_events (action, occurred_at)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_stripe_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            created INTEGER,
+            subscription_id TEXT,
+            processed_at TEXT NOT NULL
+        )
+        """
+    )
+    if "subscription_id" not in table_columns(conn, "processed_stripe_events"):
+        conn.execute("ALTER TABLE processed_stripe_events ADD COLUMN subscription_id TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_processed_stripe_events_subscription
+        ON processed_stripe_events (subscription_id, created)
+        """
+    )
     backfill_audit_event_hashes(conn)
     billing_columns = table_columns(conn, "customer_billing")
     if not billing_columns:
@@ -2813,15 +2885,20 @@ def send_transactional_email(recipient: str, subject: str, text_body: str) -> No
     boto3.client("sesv2", region_name=get_email_region()).send_email(**message)
 
 
-def get_data_encryption_cipher() -> Fernet:
-    key = (os.getenv("POWER_DATA_ENCRYPTION_KEY") or "").strip()
-    if not key:
+def get_data_encryption_keys() -> list[str]:
+    """Comma-separated POWER_DATA_ENCRYPTION_KEY; the first key encrypts, all keys decrypt."""
+    keys = [part.strip() for part in (os.getenv("POWER_DATA_ENCRYPTION_KEY") or "").split(",") if part.strip()]
+    if not keys:
         if is_production_environment():
             raise RuntimeError("POWER_DATA_ENCRYPTION_KEY is required in production.")
         digest = hashlib.sha256(f"home-energy-watch:{get_app_secret()}".encode("utf-8")).digest()
-        key = base64.urlsafe_b64encode(digest).decode("ascii")
+        keys = [base64.urlsafe_b64encode(digest).decode("ascii")]
+    return keys
+
+
+def get_data_encryption_cipher() -> MultiFernet:
     try:
-        return Fernet(key.encode("ascii"))
+        return MultiFernet([Fernet(key.encode("ascii")) for key in get_data_encryption_keys()])
     except (TypeError, ValueError) as exc:
         raise RuntimeError("POWER_DATA_ENCRYPTION_KEY must be a valid Fernet key.") from exc
 
@@ -2935,6 +3012,52 @@ def clear_auth_failures(scope: str, identity_hash: str) -> None:
             (scope, identity_hash),
         )
         conn.commit()
+
+
+def consume_rate_limit(
+    scope: str,
+    identity: str,
+    max_attempts: int,
+    window_seconds: int,
+    now_epoch: int | None = None,
+) -> dict[str, int | bool]:
+    """Fixed-window limiter stored alongside the auth limits; returns allowed and retry_after."""
+    now = int(time.time()) if now_epoch is None else int(now_epoch)
+    identity_hash = hmac.new(
+        get_app_secret().encode("utf-8"), f"{scope}:{identity}".encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT window_start_epoch, attempt_count
+            FROM auth_rate_limits
+            WHERE scope = ? AND identity_hash = ?
+            """,
+            (scope, identity_hash),
+        ).fetchone()
+        if row is None or now - int(row["window_start_epoch"]) >= window_seconds:
+            window_start = now
+            attempt_count = 0
+        else:
+            window_start = int(row["window_start_epoch"])
+            attempt_count = int(row["attempt_count"])
+        if attempt_count >= max_attempts:
+            return {"allowed": False, "retry_after": max(1, window_start + window_seconds - now)}
+        conn.execute(
+            """
+            INSERT INTO auth_rate_limits (
+                scope, identity_hash, window_start_epoch, attempt_count, blocked_until_epoch, updated_at
+            )
+            VALUES (?, ?, ?, ?, NULL, ?)
+            ON CONFLICT(scope, identity_hash) DO UPDATE SET
+                window_start_epoch = excluded.window_start_epoch,
+                attempt_count = excluded.attempt_count,
+                updated_at = excluded.updated_at
+            """,
+            (scope, identity_hash, window_start, attempt_count + 1, timestamp_now()),
+        )
+        conn.commit()
+    return {"allowed": True, "retry_after": 0}
 
 
 def clean_role(value: str | None) -> str:
@@ -3459,6 +3582,15 @@ def complete_passkey_login(
         raise ValueError("That sign-in did not work.")
     current_sign_count = int(matching_row.get("sign_count") or 0)
     auth_counter = int(auth_response.response.authenticator_data.counter)
+    if auth_counter > 0 and current_sign_count > 0 and auth_counter <= current_sign_count:
+        # A counter that fails to advance suggests a cloned authenticator; 0 means counters are unsupported.
+        session.pop(session_key, None)
+        emit_application_log(
+            "passkey.sign_count_regressed",
+            actor_kind=normalized_kind,
+            credential_row_id=matching_row.get("id"),
+        )
+        raise ValueError("That sign-in did not work.")
     update_passkey_credential_use(
         normalized_kind,
         user_id,
@@ -4654,7 +4786,7 @@ def audit_csv_value(value: object | None) -> object:
         return ""
     if not isinstance(value, str):
         return value
-    if value.startswith(("=", "+", "-", "@")):
+    if value.startswith(("=", "+", "-", "@", "\t", "\r")):
         return f"'{value}"
     return value
 
@@ -4916,8 +5048,8 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
                         int(row["duration_s"]),
                         wh,
                         wh / 1000.0,
-                        Path(str(row["source_path"])).name,
-                        row["imported_at"],
+                        audit_csv_value(Path(str(row["source_path"])).name),
+                        audit_csv_value(row["imported_at"]),
                     )
                 )
             archive.writestr(f"{prefix}/interval-readings.csv", interval_output.getvalue())
@@ -5681,6 +5813,68 @@ def handle_stripe_event(event: object) -> None:
             stripe_subscription_id=normalize_stripe_id(event_object),
             current_period_end=normalize_stripe_timestamp(extract_mapping_value(event_object, "current_period_end")),
         )
+
+
+def stripe_event_created_epoch(event: object) -> int | None:
+    value = extract_mapping_value(event, "created")
+    try:
+        return int(value) if value is not None and str(value).strip() != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def stripe_event_subscription_id(event: object) -> str:
+    event_type = str(extract_mapping_value(event, "type") or "")
+    if not event_type.startswith("customer.subscription."):
+        return ""
+    data = extract_mapping_value(event, "data") or {}
+    event_object = extract_mapping_value(data, "object") if not isinstance(data, dict) else data.get("object")
+    return normalize_stripe_id(event_object) if event_object is not None else ""
+
+
+def process_stripe_event(event: object) -> str:
+    """Apply a verified Stripe event once and in order; returns processed, duplicate or stale."""
+    event_id = str(extract_mapping_value(event, "id") or "").strip()
+    event_type = str(extract_mapping_value(event, "type") or "")
+    created = stripe_event_created_epoch(event)
+    subscription_id = stripe_event_subscription_id(event)
+    if event_id:
+        with get_db_connection() as conn:
+            if conn.execute(
+                "SELECT 1 FROM processed_stripe_events WHERE event_id = ?", (event_id,)
+            ).fetchone() is not None:
+                return "duplicate"
+    outcome = "processed"
+    if subscription_id and created is not None:
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT MAX(created) AS last_created FROM processed_stripe_events WHERE subscription_id = ?",
+                (subscription_id,),
+            ).fetchone()
+        last_created = row["last_created"] if row is not None else None
+        if last_created is not None and created < int(last_created):
+            outcome = "stale"
+    if outcome == "processed":
+        handle_stripe_event(event)
+    if event_id:
+        with get_db_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO processed_stripe_events (event_id, event_type, created, subscription_id, processed_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (event_id) DO NOTHING
+                """,
+                (
+                    event_id,
+                    event_type,
+                    created,
+                    # Stale events are recorded for idempotency but do not advance the subscription watermark.
+                    subscription_id if outcome == "processed" else None,
+                    timestamp_now(),
+                ),
+            )
+            conn.commit()
+    return outcome
 
 
 def verify_configured_stripe_account() -> None:
@@ -7114,6 +7308,10 @@ def execute_account_data_deletion(request_id: int, staff_user_id: int) -> dict[s
                 "account_access_emails",
                 "utility_connections",
                 "report_artifacts",
+                "household_assistant_interactions",
+                "account_notes",
+                "account_equipment_history",
+                "account_commission_access",
             )
             for table in tables:
                 cursor = conn.execute(f"DELETE FROM {table} WHERE account_id = ?", (account_id,))
@@ -7234,9 +7432,61 @@ def unseal_secret_value(value: str | None) -> str | None:
         sealed = base64.urlsafe_b64decode(token.encode("ascii"))
         key_stream = build_legacy_secret_key_stream(len(sealed))
         payload = bytes(byte ^ key_stream[index] for index, byte in enumerate(sealed))
-        return payload.decode("utf-8")
+        legacy_value = payload.decode("utf-8")
+        get_application_logger().warning(
+            json.dumps(
+                {"event": "secrets.legacy_unseal", "hint": "run --reseal-secrets to re-encrypt legacy values"},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return legacy_value
     except (InvalidToken, UnicodeDecodeError, ValueError, TypeError) as exc:
         raise ValueError("The saved access key could not be read. Save the connection again.") from exc
+
+
+SEALED_SECRET_COLUMNS = (
+    ("utility_connections", "secret_token"),
+    ("staff_users", "mfa_secret_token"),
+    ("staff_users", "mfa_pending_secret_token"),
+)
+
+
+def reseal_secret_value(value: str | None) -> str | None:
+    token = (value or "").strip()
+    if not token:
+        return None
+    if token.startswith("fernet:v1:"):
+        rotated = get_data_encryption_cipher().rotate(token.removeprefix("fernet:v1:").encode("ascii"))
+        return f"fernet:v1:{rotated.decode('ascii')}"
+    return seal_secret_value(unseal_secret_value(token))
+
+
+def reseal_all_secrets() -> dict[str, int]:
+    """Re-encrypt every sealed secret column with the current primary encryption key."""
+    summary = {"resealed": 0, "failed": 0}
+    with get_db_connection() as conn:
+        for table_name, column_name in SEALED_SECRET_COLUMNS:
+            if column_name not in table_columns(conn, table_name):
+                continue
+            rows = conn.execute(
+                f"SELECT id, {column_name} AS sealed_value FROM {table_name} "
+                f"WHERE {column_name} IS NOT NULL AND {column_name} != ''"
+            ).fetchall()
+            for row in rows:
+                try:
+                    resealed = reseal_secret_value(str(row["sealed_value"]))
+                except (InvalidToken, ValueError, TypeError) as exc:
+                    summary["failed"] += 1
+                    log_handled_exception(f"secrets.reseal_failed.{table_name}.{column_name}", exc)
+                    continue
+                conn.execute(
+                    f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
+                    (resealed, row["id"]),
+                )
+                summary["resealed"] += 1
+        conn.commit()
+    return summary
 
 
 def staff_mfa_required() -> bool:
@@ -9888,8 +10138,9 @@ def list_supported_utility_adapters() -> list[dict[str, object]]:
 
 
 def parse_interval_xml_tree(path: str | Path) -> etree._ElementTree:
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False)
     with open(path, "rb") as handle:
-        return etree.parse(handle)
+        return etree.parse(handle, parser)
 
 
 def load_interval_source(path: str | Path) -> Any:
@@ -11747,6 +11998,7 @@ def print_human_report(summary: pd.DataFrame, baseline: float | None) -> None:
         print("No valid overnight intervals were found, so there is no baseline yet.")
     else:
         print(f"Estimated overnight baseline: {baseline:.2f} kW")
+    print(FLAGGED_INTERVAL_CAVEAT)
     print("")
 
     suspicious_days = summary[summary["suspicious"]]
@@ -11771,7 +12023,8 @@ def print_human_report(summary: pd.DataFrame, baseline: float | None) -> None:
 def print_comparison_report(comparison: dict[str, object], report_path: Path) -> None:
     overview = comparison["overview"]
     print("")
-    print("=== DUKE EXPORT COMPARISON ===")
+    print("=== UTILITY EXPORT COMPARISON ===")
+    print(FLAGGED_INTERVAL_CAVEAT)
     print("")
     print(
         f"Aligned {overview['matched_periods']} month(s) using {comparison['alignment_label']} matching."
@@ -12566,7 +12819,7 @@ def create_web_app() -> Flask:
             affiliate = create_affiliate_account(name, email, slug, "10", payout_method, payout_destination)
             flash(f"Your referral link is ready: {build_absolute_url(build_public_base_url(request.url_root), '/r/' + str(affiliate['slug']))}")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect(url_for("affiliate_page"))
 
     @app.get("/r/<slug>")
@@ -12733,7 +12986,7 @@ def create_web_app() -> Flask:
                 )
                 return redirect(str(session_obj["url"]))
             except Exception as exc:
-                flash(str(exc))
+                flash(user_facing_error_message(exc))
         return redirect(url_for("customer_dashboard"))
 
     @app.context_processor
@@ -12861,7 +13114,7 @@ def create_web_app() -> Flask:
                 request.form.get("password", ""),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("first_run"))
 
         session.clear()
@@ -12913,7 +13166,7 @@ def create_web_app() -> Flask:
                 authenticated_customer_user_id=(current_customer_user() or {}).get("id"),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return render_customer_signup_page(request.form)
 
         record_audit_event(
@@ -13301,7 +13554,7 @@ def create_web_app() -> Flask:
                 request.form.get("account_number") or request.args.get("account_number"),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("pricing_page"))
         record_audit_event(
             "billing.checkout_started",
@@ -13330,8 +13583,8 @@ def create_web_app() -> Flask:
                 target_id=customer_user["id"],
                 metadata={"status": str(billing.get("status") or "")},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_handled_exception("billing.status_refresh_failed", exc)
         flash("Billing is being confirmed.")
         return redirect(url_for("customer_dashboard"))
 
@@ -13377,7 +13630,9 @@ def create_web_app() -> Flask:
             payload = request.get_data()
             signature = request.headers.get("Stripe-Signature", "")
             event = stripe.Webhook.construct_event(payload, signature, webhook_secret)
-            handle_stripe_event(event)
+            outcome = process_stripe_event(event)
+            if outcome != "processed":
+                return jsonify({"received": True, "status": outcome})
             event_type = str(event.get("type") or "unknown")
             record_audit_event(
                 "billing.webhook_processed",
@@ -13387,7 +13642,8 @@ def create_web_app() -> Flask:
                 metadata={"event_type": event_type},
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            log_handled_exception("billing.webhook_failed", exc)
+            return jsonify({"error": "Webhook could not be processed."}), 400
         return jsonify({"received": True})
 
     @app.get("/customer")
@@ -13424,7 +13680,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         record_audit_event(
             "customer.passkey_enrollment_started",
             actor_type="customer",
@@ -13449,7 +13705,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         updated_user = get_customer_user_by_id(int(customer_user["id"])) or customer_user
         session["customer_auth_version"] = int(updated_user.get("auth_version") or 1)
         record_audit_event(
@@ -13470,7 +13726,7 @@ def create_web_app() -> Flask:
         try:
             removed = remove_passkey_credential("customer", int(customer_user["id"]), credential_id)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("customer_account_page"))
         updated_user = get_customer_user_by_id(int(customer_user["id"])) or customer_user
         session["customer_auth_version"] = int(updated_user.get("auth_version") or 1)
@@ -14135,7 +14391,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         record_audit_event(
             "staff.passkey_enrollment_started",
             actor_type="staff",
@@ -14159,7 +14415,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         updated_user = get_staff_user_by_id(int(staff_user["id"])) or staff_user
         session["staff_auth_version"] = int(updated_user.get("auth_version") or 1)
         record_audit_event(
@@ -14179,7 +14435,7 @@ def create_web_app() -> Flask:
         try:
             removed = remove_passkey_credential("staff", int(staff_user["id"]), credential_id)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("staff_security"))
         updated_user = get_staff_user_by_id(int(staff_user["id"])) or staff_user
         session["staff_auth_version"] = int(updated_user.get("auth_version") or 1)
@@ -14240,7 +14496,7 @@ def create_web_app() -> Flask:
                 full_name=request.form.get("full_name"),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("accept_staff_invite_route", token=token))
 
         session.clear()
@@ -14270,7 +14526,7 @@ def create_web_app() -> Flask:
                 invited_by_id=int(staff_user["id"]),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("index"))
 
         delivery = "manual"
@@ -14489,7 +14745,7 @@ def create_web_app() -> Flask:
                 request.form.get("body"),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(account_number)
         actor = {"kind": "customer", "user": customer_user}
         record_actor_event(
@@ -14518,7 +14774,7 @@ def create_web_app() -> Flask:
             flash(str(exc))
             return redirect_back_or_account(account_number)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(account_number)
         actor = {"kind": "customer", "user": customer_user}
         record_actor_event(
@@ -14559,7 +14815,7 @@ def create_web_app() -> Flask:
             record_audit_event("affiliate.created", actor_type="staff", actor_id=int(staff_user["id"]), target_type="affiliate_account", target_id=affiliate["id"], metadata={"slug": affiliate["slug"]})
             flash("Referral partner created.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect(url_for("staff_page"))
 
     @app.get("/audit")
@@ -14810,13 +15066,21 @@ def create_web_app() -> Flask:
             ):
                 raise ValueError("Customer data permission is required before exports can be compared.")
             if request.files.get("left_file") and request.files.get("right_file"):
-                left_path = save_uploaded_file(request.files.get("left_file"))
-                right_path = save_uploaded_file(request.files.get("right_file"))
-                comparison, report_path = analyze_interval_file_comparison(
-                    left_path, right_path, tz_name=settings["tz"], night_start_str=settings["night_start"],
-                    night_end_str=settings["night_end"], min_night_kw=settings["min_night_kw"],
-                    night_multiplier=settings["night_multiplier"],
-                )
+                compare_upload_paths: list[Path] = []
+                try:
+                    left_path = save_uploaded_file(request.files.get("left_file"))
+                    compare_upload_paths.append(left_path)
+                    right_path = save_uploaded_file(request.files.get("right_file"))
+                    compare_upload_paths.append(right_path)
+                    comparison, report_path = analyze_interval_file_comparison(
+                        left_path, right_path, tz_name=settings["tz"], night_start_str=settings["night_start"],
+                        night_end_str=settings["night_end"], min_night_kw=settings["min_night_kw"],
+                        night_multiplier=settings["night_multiplier"],
+                    )
+                finally:
+                    # Compare uploads are never recorded against the account, so remove them once analyzed.
+                    for compare_upload_path in compare_upload_paths:
+                        compare_upload_path.unlink(missing_ok=True)
             else:
                 comparison = analyze_history_range_comparison(
                     account_number=account_number,
@@ -14837,7 +15101,7 @@ def create_web_app() -> Flask:
                 target_id=report_path.name,
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             endpoint = "customer_history_page" if actor["kind"] == "customer" else "history_page"
             return redirect(url_for(endpoint, account_number=normalize_account_number(account_number)))
 
@@ -15031,6 +15295,20 @@ def create_web_app() -> Flask:
         question = str(payload.get("question") or "").strip()
         if not question:
             return jsonify({"error": "Ask a question about the household or its usage history."}), 400
+        if len(question) > HOUSEHOLD_ASSISTANT_MAX_QUESTION_CHARS:
+            return jsonify(
+                {"error": f"Please keep your question under {HOUSEHOLD_ASSISTANT_MAX_QUESTION_CHARS} characters."}
+            ), 400
+        assistant_limit = consume_rate_limit(
+            "household_assistant",
+            f"{actor.get('kind')}:{actor['user']['id']}",
+            HOUSEHOLD_ASSISTANT_RATE_LIMIT,
+            HOUSEHOLD_ASSISTANT_RATE_WINDOW_SECONDS,
+        )
+        if not assistant_limit["allowed"]:
+            response = jsonify({"error": "You have asked a lot of questions recently. Please try again later."})
+            response.headers["Retry-After"] = str(assistant_limit["retry_after"])
+            return response, 429
         target_date = str(payload.get("date") or "").strip() or None
         context = build_household_question_context(str(account_number), question, target_date)
         used_bedrock = False
@@ -15206,7 +15484,7 @@ def create_web_app() -> Flask:
                 metadata={"energy_company": str(account.get("energy_company") or "")},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(current_account_number)
 
         if normalize_account_number(requested_account_number) != normalize_account_number(current_account_number):
@@ -15235,7 +15513,7 @@ def create_web_app() -> Flask:
                 metadata={"access_level": str(access["access_level"])},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/customer/account-access")
@@ -15265,7 +15543,7 @@ def create_web_app() -> Flask:
             )
             flash("Account access was added.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/account-access/<int:access_id>/delete")
@@ -15331,7 +15609,7 @@ def create_web_app() -> Flask:
             )
             flash("Account access was removed.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/account/data-authorization")
@@ -15363,7 +15641,7 @@ def create_web_app() -> Flask:
             )
             flash("Permission to use this account's utility data is active.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/account/data-authorization/revoke")
@@ -15391,7 +15669,7 @@ def create_web_app() -> Flask:
             )
             flash("Permission was withdrawn. Saved utility access details were removed.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection/duke/start")
@@ -15430,7 +15708,7 @@ def create_web_app() -> Flask:
             )
             return redirect(flow["authorization_url"])
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection/duke/complete")
@@ -15497,7 +15775,7 @@ def create_web_app() -> Flask:
                 error_type=type(exc).__name__,
             )
             if isinstance(exc, ValueError):
-                flash(str(exc))
+                flash(user_facing_error_message(exc))
             elif stage == "duke_exchange":
                 flash("Duke could not complete this connection. Start Duke sign-in again and use the newest one-time code.")
             else:
@@ -15528,7 +15806,7 @@ def create_web_app() -> Flask:
                 metadata={"access_method": str(connection["access_method"])},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection/<int:connection_id>/delete")
@@ -15566,8 +15844,8 @@ def create_web_app() -> Flask:
         except Exception as exc:
             try:
                 record_utility_connection_sync_failure(account_number, connection_id, exc)
-            except Exception:
-                pass
+            except Exception as record_exc:
+                log_handled_exception("utility.connection_sync_failure_record_failed", record_exc)
             record_actor_event(
                 actor,
                 "utility.connection_sync_failed",
@@ -15576,7 +15854,7 @@ def create_web_app() -> Flask:
                 target_id=connection_id,
                 metadata={"error_type": type(exc).__name__},
             )
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/load-items")
@@ -15603,7 +15881,7 @@ def create_web_app() -> Flask:
                 metadata={"quantity": int(item["quantity"]), "watts_each": float(item["watts_each"])},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/load-items/<int:item_id>/delete")
@@ -15688,7 +15966,7 @@ def create_web_app() -> Flask:
             report_summary = attach_weather_context_to_summary(summary, weather_contexts)
             report_summary.to_csv(report_path, index=True)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("index", account_number=normalize_account_number(account_number)))
 
         analysis = build_report_context(
@@ -15801,6 +16079,18 @@ def main() -> None:
             sys.exit(1)
         return
 
+    if args.reseal_secrets:
+        try:
+            reseal_summary = reseal_all_secrets()
+        except Exception as exc:
+            print(f"Error resealing secrets: {type(exc).__name__}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Resealed secrets: {reseal_summary['resealed']}")
+        print(f"Unreadable secrets: {reseal_summary['failed']}")
+        if reseal_summary["failed"]:
+            sys.exit(1)
+        return
+
     if args.ensure_owner_free_play_code:
         try:
             promotion_summary = ensure_owner_free_play_promotion_code(
@@ -15815,7 +16105,7 @@ def main() -> None:
         return
 
     if not args.input:
-        parser.error("--input is required unless --serve, --sync-utilities, or --ensure-owner-free-play-code is used")
+        parser.error("--input is required unless --serve, --sync-utilities, --reseal-secrets, or --ensure-owner-free-play-code is used")
 
     try:
         if args.compare_to:
