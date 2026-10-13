@@ -67,3 +67,9 @@ jobs:
           -e POWER_TEST_REQUIRE_DATABASE=1
           home-energy-watch:postgres-ci
           python -m pytest -p no:cacheprovider -rs tests/test_postgres_smoke.py
+      - name: Full test suite against Postgres (inside the release image)
+        run: >-
+          docker run --rm --network host
+          -e POWER_TEST_POSTGRES_ADMIN_URL=postgresql://hew:hew-ci-only@127.0.0.1:5432/postgres
+          home-energy-watch:postgres-ci
+          python -m pytest -p no:cacheprovider -q tests/test_app.py tests/test_data_hardening.py

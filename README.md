@@ -131,6 +131,9 @@ The app reads configuration from environment variables. Do not commit real value
 | `POWER_LOG_LEVEL` | App log level, commonly `INFO`. |
 | `POWER_LOG_FORMAT` | `json` or `text`; production defaults toward JSON logs. |
 | `POWER_STAFF_MFA_REQUIRED` | Requires enrolled staff MFA when true. |
+| `POWER_FIRST_RUN_TOKEN` | Setup code required to create the first commissioner on an empty staff table. Required in production; remove it after first run. |
+| `POWER_UTILITY_EXPORT_HOSTS` | Optional comma-separated allow-list of utility export hosts (subdomains included). When set, export URLs on other hosts are refused. Export URLs must always be `https://` on a public address. |
+| `POWER_UTILITY_EXPORT_MAX_BYTES` | Largest utility export download accepted, default 50 MB. |
 | `POWER_DATA_DELETION_ENABLED` | Enables approved deletion execution. Keep false until a retention policy is approved. |
 | `POWER_DATA_DELETION_POLICY_VERSION` | Required when deletion execution is enabled. |
 | `POWER_EMAIL_BACKEND` | `disabled`, `memory`, or `ses`. Production uses `ses`. |

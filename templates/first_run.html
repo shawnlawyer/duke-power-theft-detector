@@ -25,6 +25,13 @@
           <span>Password</span>
           <input type="password" name="password" required>
         </label>
+        {% if setup_token_required %}
+        <label>
+          <span>Setup code</span>
+          <input type="password" name="setup_token" autocomplete="off" required>
+        </label>
+        <p class="plain-note">Use the POWER_FIRST_RUN_TOKEN value set on the server.</p>
+        {% endif %}
         <button type="submit">Create commissioner access</button>
       </form>
     </section>

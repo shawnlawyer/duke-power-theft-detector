@@ -105,6 +105,12 @@
             <span>Passkey label</span>
             <input type="text" name="nickname" placeholder="Work laptop, phone, security key">
           </label>
+          {% if staff_user.mfa_enabled %}
+          <label>
+            <span>Authenticator code</span>
+            <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" required>
+          </label>
+          {% endif %}
         </div>
         <button type="button" class="button-secondary" data-passkey-enroll-button>Add passkey</button>
         <p class="plain-note" data-passkey-status></p>

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <main class="app-layout auth-layout">
+    <section class="section-block auth-block">
+      <div class="section-header">
+        <div>
+          <p class="section-kicker">Sign in</p>
+          <h2>Finish signing in.</h2>
+          <p class="plain-note">Select the button below to open Home Energy Watch. The link works once and expires 15 minutes after it was sent.</p>
+        </div>
+      </div>
+      <form class="account-form" action="{{ url_for('login_token_post') }}" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="token" value="{{ token }}">
+        {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
+        <button type="submit" class="button-primary">Continue to Home Energy Watch</button>
+      </form>
+      <p class="plain-note auth-note">If you did not ask to sign in, close this page. Nothing happens until you continue.</p>
+    </section>
+  </main>
+{% endblock %}
