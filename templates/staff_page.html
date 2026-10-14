@@ -3,7 +3,25 @@
 {% block content %}
   <main class="app-layout">
     {% include "_staff_panel.html" %}
-    {% if staff_user.role == "Commissioner" %}
+    {% if commission_organizations %}
+    <section class="section-block">
+      <div class="section-header"><div><p class="section-kicker">Commission view</p><h2>See what a commission sees</h2><p class="plain-note">Preview the review desk exactly as a commission reviewer sees it: only accounts in that commission's jurisdiction, read-only, with no staff or Commissioner tools. Starting and ending a preview is recorded in the audit history.</p></div></div>
+      <form class="account-form" action="{{ url_for('start_commission_preview') }}" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <div class="field-grid">
+          <label class="wide-field"><span>Commission</span>
+            <select name="commission_id" required>
+              {% for commission in commission_organizations %}
+                <option value="{{ commission.id }}">{{ commission.name }} ({{ commission.jurisdiction_code }})</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <button type="submit">Preview as this commission</button>
+      </form>
+    </section>
+    {% endif %}
+    {% if staff_user.role == "Commissioner" and not commission_read_only|default(false) %}
     <section class="section-block">
       <div class="section-header"><div><p class="section-kicker">Referral partners</p><h2>Affiliate accounts</h2><p class="plain-note">Create a referral code and set the percentage recorded for eligible paid subscriptions. Payments are reviewed before any payout.</p></div></div>
       <form class="account-form" action="{{ url_for('create_affiliate') }}" method="post">

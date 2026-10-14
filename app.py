@@ -2532,7 +2532,55 @@ def get_staff_commission_access(staff_user_id: int | None) -> dict[str, object] 
             """,
             (int(staff_user_id),),
         ).fetchone()
+    if row is not None:
+        return dict(row)
+    return get_commission_preview(int(staff_user_id))
+
+
+COMMISSION_PREVIEW_SESSION_KEY = "commission_preview"
+
+
+def get_commission_preview(staff_user_id: int) -> dict[str, object] | None:
+    """The commission a Commissioner is previewing in this browser session, if any.
+
+    While previewing, every permission check treats the Commissioner exactly like a
+    member of that commission: read-only, limited to its jurisdiction.
+    """
+    if not has_request_context():
+        return None
+    preview = session.get(COMMISSION_PREVIEW_SESSION_KEY)
+    if not isinstance(preview, dict) or int(preview.get("staff_user_id") or 0) != int(staff_user_id):
+        return None
+    commission = get_commission_organization(int(preview.get("commission_id") or 0))
+    if commission is None:
+        return None
+    return {**commission, "preview": True}
+
+
+def get_commission_organization(commission_id: int) -> dict[str, object] | None:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id, registry_key, name, jurisdiction_code, jurisdiction_type
+            FROM commission_organizations
+            WHERE id = ? AND is_active = 1
+            """,
+            (int(commission_id),),
+        ).fetchone()
     return None if row is None else dict(row)
+
+
+def list_commission_organizations() -> list[dict[str, object]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, registry_key, name, jurisdiction_code, jurisdiction_type
+            FROM commission_organizations
+            WHERE is_active = 1
+            ORDER BY name
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def infer_jurisdiction_code(address: str | None, energy_company: str | None = None) -> str | None:
@@ -12773,6 +12821,7 @@ def create_web_app() -> Flask:
         "staff_passkey_enrollment_start",
         "staff_passkey_enrollment_finish",
         "staff_passkey_delete",
+        "stop_commission_preview",
     }
 
     def is_commission_staff(staff_user: dict[str, object] | None) -> bool:
@@ -12920,10 +12969,15 @@ def create_web_app() -> Flask:
         staff_user = require_staff_user(api=api)
         if not isinstance(staff_user, dict):
             return staff_user
-        if staff_user["role"] != "Commissioner":
+        if staff_user["role"] != "Commissioner" or is_commission_staff(staff_user):
+            message = (
+                "Exit the commission preview to use Commissioner tools."
+                if staff_user["role"] == "Commissioner"
+                else "Commissioner access is required for that action."
+            )
             if api:
-                return jsonify({"error": "Commissioner access is required for that action."}), 403
-            flash("Commissioner access is required for that action.")
+                return jsonify({"error": message}), 403
+            flash(message)
             return redirect(url_for("index"))
         return staff_user
 
@@ -13167,8 +13221,19 @@ def create_web_app() -> Flask:
 
     @app.context_processor
     def inject_layout_context():
+        layout_staff_user = current_staff_user()
+        layout_commission = (
+            get_staff_commission_access(int(layout_staff_user["id"])) if layout_staff_user is not None else None
+        )
         return {
-            "staff_user": current_staff_user(),
+            "staff_user": layout_staff_user,
+            "commission_read_only": layout_commission is not None,
+            "commission_preview": layout_commission if layout_commission and layout_commission.get("preview") else None,
+            "commission_organizations": (
+                list_commission_organizations()
+                if layout_staff_user is not None and layout_staff_user.get("role") == "Commissioner" and layout_commission is None
+                else []
+            ),
             "customer_user": current_customer_user(),
             "staff_roles": STAFF_ROLES,
             "customer_access_levels": CUSTOMER_ACCESS_LEVELS,
@@ -14697,6 +14762,51 @@ def create_web_app() -> Flask:
         )
         flash("Passkey removed.")
         return redirect(url_for("staff_security"))
+
+    @app.post("/staff/commission-preview")
+    def start_commission_preview():
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        try:
+            commission_id = int(request.form.get("commission_id") or 0)
+        except ValueError:
+            commission_id = 0
+        commission = get_commission_organization(commission_id)
+        if commission is None:
+            flash("Choose a commission to preview.")
+            return redirect(url_for("staff_page"))
+        session[COMMISSION_PREVIEW_SESSION_KEY] = {
+            "staff_user_id": int(staff_user["id"]),
+            "commission_id": int(commission["id"]),
+        }
+        record_audit_event(
+            "staff.commission_preview_started",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="commission_organization",
+            target_id=commission["id"],
+            metadata={"commission": str(commission["name"])},
+        )
+        flash(f"You are now seeing Home Energy Watch the way {commission['name']} sees it. Everything is read-only.")
+        return redirect(url_for("index"))
+
+    @app.post("/staff/commission-preview/stop")
+    def stop_commission_preview():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        preview = session.pop(COMMISSION_PREVIEW_SESSION_KEY, None)
+        if preview:
+            record_audit_event(
+                "staff.commission_preview_ended",
+                actor_type="staff",
+                actor_id=int(staff_user["id"]),
+                target_type="commission_organization",
+                target_id=preview.get("commission_id") if isinstance(preview, dict) else None,
+            )
+            flash("Commission preview ended.")
+        return redirect(url_for("staff_page"))
 
     @app.post("/logout")
     def logout():

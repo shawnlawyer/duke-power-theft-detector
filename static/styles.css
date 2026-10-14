@@ -1784,3 +1784,18 @@ label > small {
   .day-date-cell { min-width: 140px; }
   .workflow-steps > li { grid-template-columns: minmax(0, 1fr); }
 }
+
+.commission-preview-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px var(--gutter);
+  border-bottom: 1px solid var(--flag-line);
+  background: var(--flag-wash);
+  color: var(--ink);
+  font-size: 13px;
+}
+.commission-preview-banner p { margin: 0; }
+.commission-preview-banner strong { color: var(--flag); }
