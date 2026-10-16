@@ -417,14 +417,90 @@ def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(t
     ("RG&E", "rge"),
     ("PSEG Long Island LLC", "pseg-long-island"),
     ("The United Illuminating Company", "united-illuminating"),
+    ("San Diego Gas and Electric Company", "sdge"),
+    ("SDG&E", "sdge"),
+    ("SDGE", "sdge"),
+    ("Southern California Edison Company", "sce"),
+    ("SCE", "sce"),
+    ("Pacific Gas and Electric Company", "pge"),
+    ("PG&E", "pge"),
+    ("Central Hudson Gas & Electric Corporation", "central-hudson"),
+    ("Delmarva Power & Light Company", "delmarva"),
+    ("ConEd", "coned"),
+    ("Consolidated Edison Company of New York, Inc.", "coned"),
+    ("Orange and Rockland Utilities, Inc.", "orange-rockland"),
+    ("O&R", "orange-rockland"),
+    ("ORU", "orange-rockland"),
+    ("National Grid USA Service Company, Inc.", "national-grid"),
+    ("National Grid", "national-grid"),
+    ("Eversource Energy - Massachusetts", "eversource-ma"),
+    ("Eversource MA", "eversource-ma"),
+    ("Southwestern Electric Power Company", "swepco"),
+    ("SWEPCO", "swepco"),
+    ("Atlantic City Electric Company", "atlantic-city-electric"),
+    ("Potomac Electric Power Company", "pepco"),
+    ("Pepco", "pepco"),
+    ("PECO Energy Company", "peco"),
+    ("PECO", "peco"),
+    ("Commonwealth Edison Company", "comed"),
+    ("  ComEd  ", "comed"),
+    ("Hawaiian Electric Company, Inc.", "hawaiian-electric"),
+    ("HECO", "hawaiian-electric"),
+    ("Louisville Gas and Electric Company", "lge"),
+    ("LG&E", "lge"),
+    ("Kentucky Utilities Company", "kentucky-utilities"),
+    ("KU", "kentucky-utilities"),
+    ("Old Dominion Power Company", "old-dominion-power"),
+    ("ODP", "old-dominion-power"),
 ])
 def test_download_guide_matches_only_named_provider_aliases(provider, slug):
     assert app.get_utility_download_guide(provider).slug == slug
 
 
-@pytest.mark.parametrize("provider", [None, "", "PSE&G", "PSEG", "National Grid", "Not Duke Energy", "UI Services"])
+@pytest.mark.parametrize("provider", [None, "", "PSE&G", "PSEG", "Not Duke Energy", "UI Services", "PGE", "Portland General Electric", "Southern California Gas", "Edison International", "Exelon", "Pepco Holdings", "Eversource", "Eversource Connecticut", "Eversource New Hampshire", "National Grid Gas", "Rockland Electric", "AEP Ohio"])
 def test_download_guide_does_not_guess_a_different_utility(provider):
     assert app.get_utility_download_guide(provider) is None
+
+
+@pytest.mark.parametrize("provider", ["Dominion Energy", "Dominion Energy Virginia", "Hawaiian Telcom", "Kauai Island Utility Cooperative", "HECO Services", "LG&E and KU Energy"])
+def test_new_download_guides_do_not_guess_parent_or_unrelated_companies(provider):
+    assert app.get_utility_download_guide(provider) is None
+
+
+@pytest.mark.parametrize("provider", ["LG&E", "KU", "ODP"])
+def test_mymeter_guides_use_customer_login_and_single_meter_download(provider):
+    guide = app.get_utility_download_guide(provider)
+    assert "My Account" in guide.steps[0]
+    assert "Account History" in guide.steps[0]
+    assert "Data, then Download" in guide.steps[1]
+    assert "15-minute" in guide.steps[1]
+    assert "listed interval format" in guide.steps[2]
+    assert "advanced meter" in guide.note
+    assert "single electric meter" in guide.note
+    assert "not Dominion Energy" in guide.note
+    assert "registration code" not in " ".join(guide.steps)
+
+
+def test_hawaiian_guide_keeps_downloads_separate_from_vendor_registration():
+    guide = app.get_utility_download_guide("HECO")
+    assert "Account Overview" in guide.steps[0]
+    assert "Green Button XML" in guide.steps[1]
+    assert "key account manager" in guide.note
+    assert "does not enable automatic updates" in guide.note
+
+
+def test_download_guide_names_and_aliases_are_unambiguous():
+    from utility_guides import normalize_provider_name
+
+    assert len({guide.slug for guide in app.UTILITY_DOWNLOAD_GUIDES}) == len(app.UTILITY_DOWNLOAD_GUIDES)
+    providers_by_name = {}
+    for guide in app.UTILITY_DOWNLOAD_GUIDES:
+        assert guide.url.startswith("https://")
+        assert guide.source_url.startswith("https://")
+        for name in (guide.provider, *guide.aliases):
+            normalized = normalize_provider_name(name)
+            assert normalized
+            assert providers_by_name.setdefault(normalized, guide.slug) == guide.slug
 
 
 @pytest.mark.parametrize("guide", app.UTILITY_DOWNLOAD_GUIDES, ids=lambda guide: guide.slug)
@@ -509,6 +585,85 @@ def test_united_illuminating_guide_warns_about_daily_totals_and_paid_requests():
     assert "cannot show overnight usage" in guide.steps[-1]
 
 
+def test_new_guides_keep_downloads_separate_from_unverified_feeds():
+    sce = app.get_utility_download_guide("SCE")
+    assert "verification SCE asks for on its own site" in sce.steps[0]
+    assert "verification codes on SCE's site" in sce.note
+    assert "does not create an automatic SCE connection" in sce.note
+    central_hudson = app.get_utility_download_guide("Central Hudson")
+    assert "hourly download is not confirmed" in central_hudson.note
+    assert "no charge" in central_hudson.steps[1]
+    assert "eligibility and fees" in central_hudson.note
+    delmarva = app.get_utility_download_guide("Delmarva Power")
+    assert "level of detail need to be checked" in delmarva.note
+    assert "not just daily or monthly totals" in delmarva.steps[1]
+    assert "not Portland General Electric" in app.get_utility_download_guide("PG&E").note
+
+
+def test_additional_guides_keep_regions_detail_and_automatic_access_clear():
+    assert "not ComEd in Illinois" in app.get_utility_download_guide("ConEd").note
+    assert "does not enroll you in Share My Data" in app.get_utility_download_guide("ORU").note
+    national_grid = app.get_utility_download_guide("National Grid")
+    assert "Access your own data" in national_grid.steps[0]
+    assert "not an automatic National Grid connection" in national_grid.note
+    assert "gas service cannot provide electricity readings" in national_grid.note
+    eversource = app.get_utility_download_guide("Eversource MA")
+    assert "does not guarantee hourly readings" in eversource.note
+    assert "Massachusetts town" in eversource.steps[0]
+    assert "Green Button download, rather than Green Button view" in app.get_utility_download_guide("SWEPCO").steps[0]
+
+
+@pytest.mark.parametrize("provider,domain", [
+    ("Atlantic City Electric", "atlanticcityelectric.com"),
+    ("Pepco", "pepco.com"),
+    ("PECO", "peco.com"),
+    ("ComEd", "comed.com"),
+])
+def test_exelon_download_guides_use_customer_routes_without_promising_format_or_access(provider, domain):
+    guide = app.get_utility_download_guide(provider)
+    assert guide.url == f"https://www.{domain}/my-account/my-dashboard/my-usage"
+    assert guide.source_url == guide.url
+    assert "My Green Button Data" in guide.steps[0]
+    assert "hourly or shorter readings" in guide.steps[1]
+    assert "CSV that matches the listed interval format" in guide.steps[2]
+    assert "stop" in guide.note.lower()
+    assert "separate data request" in guide.note
+    assert "Pepco, not PECO" in app.get_utility_download_guide("Pepco").note
+    assert "PECO and Pepco are different" in app.get_utility_download_guide("PECO").note
+    assert "not gas service" in app.get_utility_download_guide("PECO").steps[1]
+    assert "not Con Edison in New York" in app.get_utility_download_guide("ComEd").note
+
+
+def test_similar_utility_names_follow_selected_account_without_cross_linking(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    monkeypatch.setitem(app.web_app.config, "TESTING", True)
+    accounts = [
+        ("illinois", "ComEd", "comed"),
+        ("new-york", "Con Edison", "coned"),
+        ("dc", "Pepco", "pepco"),
+        ("pennsylvania", "PECO", "peco"),
+        ("louisville", "LG&E", "lge"),
+        ("kentucky", "Kentucky Utilities", "kentucky-utilities"),
+        ("virginia", "Old Dominion Power", "old-dominion-power"),
+        ("hawaii", "Hawaiian Electric", "hawaiian-electric"),
+    ]
+    for number, provider, _ in accounts:
+        authorize_account(number, "multi-utility@example.com")
+        app.save_account_profile(number, energy_company=provider)
+    client = app.web_app.test_client()
+    customer_sign_in(client, "multi-utility@example.com")
+    for number, provider, slug in [*accounts, accounts[0]]:
+        response = client.get("/customer/utility", query_string={"account_number": number})
+        assert response.status_code == 200
+        document = lxml_html.fromstring(response.data)
+        selected = document.xpath('//*[@data-selected-utility]')
+        assert len(selected) == 1
+        assert selected[0].get("data-selected-utility") == slug
+        assert selected[0].xpath('.//a[@target="_blank"]/@href') == [app.get_utility_download_guide(provider).url]
+        assert selected[0].xpath(f'.//a[contains(@href, "account_number={number}") and contains(@href, "#history-import")]')
+        assert app.list_utility_connections(number) == []
+
+
 def test_download_guide_provider_names_are_available_in_company_list():
     assert {guide.provider for guide in app.UTILITY_DOWNLOAD_GUIDES if guide.slug != "duke"} <= set(app.list_energy_companies())
 
@@ -522,6 +677,10 @@ def test_download_guide_provider_suggestions_render_without_restricting_manual_i
     choices = document.xpath('//datalist[@id="utility-provider-options"]/option/@value')
     assert "Central Maine Power" in choices
     assert "United Illuminating" in choices
+    assert {"San Diego Gas & Electric", "Southern California Edison", "Pacific Gas & Electric", "Central Hudson", "Delmarva Power"} <= set(choices)
+    assert {"Con Edison", "Orange & Rockland", "National Grid", "Eversource Massachusetts", "SWEPCO"} <= set(choices)
+    assert {"Atlantic City Electric", "Pepco", "PECO", "ComEd"} <= set(choices)
+    assert {"Hawaiian Electric", "Louisville Gas & Electric", "Kentucky Utilities", "Old Dominion Power"} <= set(choices)
     assert document.xpath('//input[@name="energy_company" and @type="text" and @list="utility-provider-options"]')
     authorize_account("suggestions", "suggestions@example.com")
     customer_sign_in(client, "suggestions@example.com")
@@ -530,8 +689,9 @@ def test_download_guide_provider_suggestions_render_without_restricting_manual_i
     assert document.xpath('//datalist[@id="utility-provider-options"]/option[@value="PSEG Long Island"]')
 
 
-@pytest.mark.parametrize("provider", ["Central Maine Power", "NYSEG", "RG&E", "PSEG Long Island", "United Illuminating"])
-def test_new_provider_account_can_upload_supported_csv_without_connection(tmp_path, monkeypatch, provider):
+@pytest.mark.parametrize("provider", [guide.provider for guide in app.UTILITY_DOWNLOAD_GUIDES])
+@pytest.mark.parametrize("fixture,reading_count", [(CSV_FIXTURE, 3), (FIXTURE, 6)], ids=["csv", "xml"])
+def test_new_provider_account_can_upload_supported_file_without_connection(tmp_path, monkeypatch, provider, fixture, reading_count):
     # A synthetic supported-format fixture checks the app workflow, not vendor certification.
     configure_tmp_paths(tmp_path, monkeypatch)
     monkeypatch.setitem(app.web_app.config, "TESTING", True)
@@ -541,11 +701,11 @@ def test_new_provider_account_can_upload_supported_csv_without_connection(tmp_pa
     customer_sign_in(client, "upload@example.com")
     response = client.post("/analyze", data={
         "account_number": "upload-account",
-        "xml_file": (BytesIO(CSV_FIXTURE.read_bytes()), "supported-intervals.csv"),
+        "xml_file": (BytesIO(fixture.read_bytes()), fixture.name),
     }, content_type="multipart/form-data")
     assert response.status_code == 200
     assert app.find_account("upload-account")["energy_company"] == provider
-    assert len(app.load_intervals_from_db("upload-account")) == 3
+    assert len(app.load_intervals_from_db("upload-account")) == reading_count
     assert app.count_imported_files("upload-account") == 1
     assert app.list_utility_connections("upload-account") == []
 
