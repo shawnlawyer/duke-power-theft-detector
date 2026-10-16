@@ -433,6 +433,24 @@
   {% include "_utility_download_guides.html" %}
 
   {% set provider_is_duke = 'duke' in ((selected_connection_provider or '')|lower) %}
+  {% if national_grid_provider_matches(selected_connection_provider) %}
+    <div class="connection-workflow">
+      <h3>Connect your National Grid account</h3>
+      {% if national_grid_available %}
+        <p class="plain-note">Sign in with National Grid in a new tab and choose what to share. Your password and verification codes stay with National Grid. We'll match your electric account before importing any readings.</p>
+        {% if is_customer and can_manage_account %}
+          <form action="{{ url_for('national_grid_start') }}" method="post" target="_blank" rel="noopener">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+            <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Connect National Grid</button>
+          </form>
+        {% endif %}
+        <p class="plain-note">Once connected, choose Sync now to bring in your history. Daily updates use completed electric-meter readings. Estimated readings stay out of your measured history. You can stop future updates by removing the connection below; manage sharing with National Grid to withdraw permission there too.</p>
+      {% else %}
+        <p class="plain-note">Automatic updates are being prepared. You can still download your National Grid history and upload it here.</p>
+      {% endif %}
+    </div>
+  {% endif %}
   {% if provider_is_duke %}
     <div class="connection-workflow">
       <div class="section-header">
@@ -582,7 +600,7 @@
                 {% endif %}
               </td>
               <td>
-                {% if connection.access_method == 'duke_oauth' %}
+                {% if connection.access_method in ['duke_oauth', 'national_grid_oauth'] %}
                   Encrypted connection
                 {% elif connection.secret_last4 %}
                   Ending {{ connection.secret_last4 }}
