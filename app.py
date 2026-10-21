@@ -33,13 +33,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
+import urllib.request
+import http.client
+import ipaddress
+import socket
 from uuid import uuid4
 
 import aiohttp
 from aiodukeenergy import Auth0Client, DukeEnergy, DukeEnergyAuth
 from dateutil import tz
-from cryptography.fernet import Fernet, InvalidToken
-from flask import Flask, flash, g, has_request_context, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
+from flask import Flask, abort, flash, g, has_request_context, jsonify, make_response, redirect, render_template, request, send_from_directory, session, url_for
 from werkzeug.exceptions import HTTPException
 import pandas as pd
 from lxml import etree
@@ -124,12 +128,23 @@ PASSKEY_ISSUER = "Home Energy Watch"
 PASSKEY_USER_KINDS = ("staff", "customer")
 PASSKEY_SESSION_KEY_PREFIX = "pending_passkey_"
 PASSKEY_USER_VERIFICATION = UserVerificationRequirement.PREFERRED
+# Staff passkeys stand in for the authenticator app, so the device must verify
+# the person (PIN or biometric); a bare security-key tap is not enough.
+STAFF_PASSKEY_USER_VERIFICATION = UserVerificationRequirement.REQUIRED
+
+
+def passkey_user_verification(kind: str) -> UserVerificationRequirement:
+    return STAFF_PASSKEY_USER_VERIFICATION if kind == "staff" else PASSKEY_USER_VERIFICATION
 CUSTOMER_AUTH_TOKEN_PURPOSES = ("verify_email", "password_reset", "login")
 STAFF_AUTH_TOKEN_PURPOSES = ("password_reset", "login")
 LOGIN_TOKEN_EXPIRY_MINUTES = 15
 EMAIL_OUTBOX: list[dict[str, str]] = []
 CUSTOMER_ACCESS_LEVELS = ("Viewer", "Manager")
 APP_LOGGER_NAME = "home_energy_watch"
+FLAGGED_INTERVAL_CAVEAT = "Flagged intervals are prompts for review, not proof of theft, tampering, or a billing error."
+HOUSEHOLD_ASSISTANT_MAX_QUESTION_CHARS = 2000
+HOUSEHOLD_ASSISTANT_RATE_LIMIT = 20
+HOUSEHOLD_ASSISTANT_RATE_WINDOW_SECONDS = 60 * 60
 
 
 def get_application_log_level() -> int:
@@ -181,6 +196,32 @@ def emit_application_log(event: str, **fields: object) -> None:
     else:
         message = " ".join(f"{key}={value}" for key, value in record.items())
     get_application_logger().info(message)
+
+
+GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again or contact support."
+
+
+def log_handled_exception(event: str, exc: BaseException) -> None:
+    payload = {
+        "event": event,
+        "exception_type": exc.__class__.__name__,
+        "request_id": str(getattr(g, "request_id", "") or "") if has_request_context() else "",
+    }
+    get_application_logger().error(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
+USER_FACING_EXCEPTION_TYPES = (ValueError, PermissionError, FileNotFoundError)
+
+
+def user_facing_error_message(exc: BaseException, event: str = "request.handled_error") -> str:
+    """Return validation messages as-is; log anything unexpected and return a generic message."""
+    if isinstance(exc, USER_FACING_EXCEPTION_TYPES):
+        return str(exc)
+    log_handled_exception(event, exc)
+    return GENERIC_ERROR_MESSAGE
 
 
 ENERGY_COMPANY_GROUPS = (
@@ -482,7 +523,9 @@ class DatabaseConnection:
 
     def _translate_query(self, query: str) -> str:
         if self.kind == "postgres":
-            return query.replace("?", "%s")
+            # Escape literal percent signs first (for example LIKE 'prefix_%'), then
+            # turn SQLite-style ? placeholders into psycopg's %s.
+            return query.replace("%", "%%").replace("?", "%s")
         return query
 
     def execute(self, query: str, params: tuple | list | None = None):
@@ -628,6 +671,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=DEFAULT_OWNER_FREE_PLAY_VALID_DAYS,
         help="Days until expiration for a created owner promotion code",
     )
+    parser.add_argument(
+        "--reseal-secrets",
+        action="store_true",
+        help="Re-encrypt all sealed secrets with the first POWER_DATA_ENCRYPTION_KEY and exit",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Web host to bind when using --serve")
     parser.add_argument("--port", type=int, default=8000, help="Web port to bind when using --serve")
     return parser
@@ -636,6 +684,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
 def ensure_data_dirs() -> None:
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def is_safe_local_path(value: str | None) -> bool:
+    """True only for same-site paths like "/account?x=1".
+
+    Browsers treat a backslash like a forward slash, so "/\\evil.example" would
+    otherwise slip past a simple "starts with one slash" check and leave the site.
+    """
+    candidate = str(value or "")
+    if not candidate.startswith("/") or candidate.startswith("//"):
+        return False
+    if "\\" in candidate or any(ord(char) < 32 or ord(char) == 127 for char in candidate):
+        return False
+    parts = urlsplit(candidate)
+    return not parts.scheme and not parts.netloc
 
 
 def normalize_account_number(value: str | None) -> str:
@@ -811,7 +874,10 @@ def table_columns(conn: DatabaseConnection, name: str) -> set[str]:
             """,
             (name,),
         ).fetchall()
-        return {str(row["column_name"]) for row in rows}
+        return {
+            row["column_name"].decode("utf-8") if isinstance(row["column_name"], bytes) else str(row["column_name"])
+            for row in rows
+        }
     return {row[1] for row in conn.execute(f"PRAGMA table_info({name})").fetchall()}
 
 
@@ -1561,6 +1627,24 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         ON audit_events (action, occurred_at)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_stripe_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            created BIGINT,
+            subscription_id TEXT,
+            processed_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("ALTER TABLE processed_stripe_events ADD COLUMN IF NOT EXISTS subscription_id TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_processed_stripe_events_subscription
+        ON processed_stripe_events (subscription_id, created)
+        """
+    )
     backfill_audit_event_hashes(conn)
     billing_columns = table_columns(conn, "customer_billing")
     if not billing_columns:
@@ -2264,6 +2348,25 @@ def migrate_database(conn: DatabaseConnection) -> None:
         ON audit_events (action, occurred_at)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_stripe_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            created INTEGER,
+            subscription_id TEXT,
+            processed_at TEXT NOT NULL
+        )
+        """
+    )
+    if "subscription_id" not in table_columns(conn, "processed_stripe_events"):
+        conn.execute("ALTER TABLE processed_stripe_events ADD COLUMN subscription_id TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_processed_stripe_events_subscription
+        ON processed_stripe_events (subscription_id, created)
+        """
+    )
     backfill_audit_event_hashes(conn)
     billing_columns = table_columns(conn, "customer_billing")
     if not billing_columns:
@@ -2815,15 +2918,20 @@ def send_transactional_email(recipient: str, subject: str, text_body: str) -> No
     boto3.client("sesv2", region_name=get_email_region()).send_email(**message)
 
 
-def get_data_encryption_cipher() -> Fernet:
-    key = (os.getenv("POWER_DATA_ENCRYPTION_KEY") or "").strip()
-    if not key:
+def get_data_encryption_keys() -> list[str]:
+    """Comma-separated POWER_DATA_ENCRYPTION_KEY; the first key encrypts, all keys decrypt."""
+    keys = [part.strip() for part in (os.getenv("POWER_DATA_ENCRYPTION_KEY") or "").split(",") if part.strip()]
+    if not keys:
         if is_production_environment():
             raise RuntimeError("POWER_DATA_ENCRYPTION_KEY is required in production.")
         digest = hashlib.sha256(f"home-energy-watch:{get_app_secret()}".encode("utf-8")).digest()
-        key = base64.urlsafe_b64encode(digest).decode("ascii")
+        keys = [base64.urlsafe_b64encode(digest).decode("ascii")]
+    return keys
+
+
+def get_data_encryption_cipher() -> MultiFernet:
     try:
-        return Fernet(key.encode("ascii"))
+        return MultiFernet([Fernet(key.encode("ascii")) for key in get_data_encryption_keys()])
     except (TypeError, ValueError) as exc:
         raise RuntimeError("POWER_DATA_ENCRYPTION_KEY must be a valid Fernet key.") from exc
 
@@ -2937,6 +3045,52 @@ def clear_auth_failures(scope: str, identity_hash: str) -> None:
             (scope, identity_hash),
         )
         conn.commit()
+
+
+def consume_rate_limit(
+    scope: str,
+    identity: str,
+    max_attempts: int,
+    window_seconds: int,
+    now_epoch: int | None = None,
+) -> dict[str, int | bool]:
+    """Fixed-window limiter stored alongside the auth limits; returns allowed and retry_after."""
+    now = int(time.time()) if now_epoch is None else int(now_epoch)
+    identity_hash = hmac.new(
+        get_app_secret().encode("utf-8"), f"{scope}:{identity}".encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT window_start_epoch, attempt_count
+            FROM auth_rate_limits
+            WHERE scope = ? AND identity_hash = ?
+            """,
+            (scope, identity_hash),
+        ).fetchone()
+        if row is None or now - int(row["window_start_epoch"]) >= window_seconds:
+            window_start = now
+            attempt_count = 0
+        else:
+            window_start = int(row["window_start_epoch"])
+            attempt_count = int(row["attempt_count"])
+        if attempt_count >= max_attempts:
+            return {"allowed": False, "retry_after": max(1, window_start + window_seconds - now)}
+        conn.execute(
+            """
+            INSERT INTO auth_rate_limits (
+                scope, identity_hash, window_start_epoch, attempt_count, blocked_until_epoch, updated_at
+            )
+            VALUES (?, ?, ?, ?, NULL, ?)
+            ON CONFLICT(scope, identity_hash) DO UPDATE SET
+                window_start_epoch = excluded.window_start_epoch,
+                attempt_count = excluded.attempt_count,
+                updated_at = excluded.updated_at
+            """,
+            (scope, identity_hash, window_start, attempt_count + 1, timestamp_now()),
+        )
+        conn.commit()
+    return {"allowed": True, "retry_after": 0}
 
 
 def clean_role(value: str | None) -> str:
@@ -3226,21 +3380,6 @@ def update_passkey_credential_use(actor_kind: str, actor_id: int, credential_id:
         conn.commit()
 
 
-def load_passkey_credential(actor_kind: str, actor_id: int, credential_id: str) -> dict[str, object] | None:
-    kind = normalize_passkey_kind(actor_kind)
-    with get_db_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT id, actor_kind, actor_id, credential_id, nickname, public_key, sign_count,
-                   transports, last_used_at, is_active, created_at, updated_at
-            FROM passkey_credentials
-            WHERE actor_kind = ? AND actor_id = ? AND credential_id = ? AND is_active = 1
-            """,
-            (kind, int(actor_id), credential_id),
-        ).fetchone()
-    return serialize_passkey_credential_row(row)
-
-
 def remove_passkey_credential(actor_kind: str, actor_id: int, credential_id: int) -> dict[str, object]:
     kind = normalize_passkey_kind(actor_kind)
     timestamp = timestamp_now()
@@ -3293,27 +3432,13 @@ def get_passkey_user(kind: str, email: str | None) -> dict[str, object] | None:
     return user
 
 
-def resolve_sign_in_user(email: str, password: str) -> tuple[str, dict[str, object]]:
-    try:
-        customer_user = authenticate_customer_user(email, password)
-    except EmailVerificationRequired as exc:
-        raise exc
-    except Exception:
-        customer_user = None
-    else:
-        return "customer", customer_user
-
-    staff_user = authenticate_staff_user(email, password)
-    return "staff", staff_user
-
-
 def resolve_passkey_login(email: str) -> tuple[str, dict[str, object]] | None:
-    customer_user = get_passkey_user("customer", email)
-    if customer_user is not None:
-        return "customer", customer_user
     staff_user = get_passkey_user("staff", email)
     if staff_user is not None:
         return "staff", staff_user
+    customer_user = get_passkey_user("customer", email)
+    if customer_user is not None:
+        return "customer", customer_user
     return None
 
 
@@ -3355,7 +3480,7 @@ def start_passkey_enrollment(
             str(user["full_name"]),
         ),
         credentials=list_passkey_descriptors(normalized_kind, int(user["id"])),
-        user_verification=PASSKEY_USER_VERIFICATION,
+        user_verification=passkey_user_verification(normalized_kind),
     )
     session[passkey_session_key(normalized_kind, "enrollment")] = {
         "user_id": int(user["id"]),
@@ -3413,6 +3538,8 @@ def start_passkey_login(
     server = build_passkey_server(origin)
     options, state = server.authenticate_begin(
         descriptors,
+        # Same value for every account so the challenge does not reveal who is staff;
+        # staff user verification is enforced when the assertion is checked.
         user_verification=PASSKEY_USER_VERIFICATION,
     )
     session[passkey_session_key(normalized_kind, "login")] = {
@@ -3421,6 +3548,21 @@ def start_passkey_login(
         "next": (next_url or "").strip(),
         "origin": (origin or build_public_base_url()).rstrip("/"),
     }
+    return normalize_passkey_json_value(dict(options.public_key))
+
+
+def start_decoy_passkey_login(email: str | None, origin: str | None = None) -> dict[str, object]:
+    server = build_passkey_server(origin)
+    # Stable per email (like a real credential ID) so repeated calls look the same.
+    decoy_id = hmac.new(
+        get_app_secret().encode("utf-8"),
+        f"passkey-decoy:{(email or '').strip().lower()}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    fake_credential = PublicKeyCredentialDescriptor(type=PublicKeyCredentialType.PUBLIC_KEY, id=decoy_id)
+    options, _ = server.authenticate_begin([fake_credential], user_verification=PASSKEY_USER_VERIFICATION)
+    for kind in PASSKEY_USER_KINDS:
+        session.pop(passkey_session_key(kind, "login"), None)
     return normalize_passkey_json_value(dict(options.public_key))
 
 
@@ -3459,8 +3601,23 @@ def complete_passkey_login(
     )
     if matching_row is None:
         raise ValueError("That sign-in did not work.")
+    if (
+        passkey_user_verification(normalized_kind) == UserVerificationRequirement.REQUIRED
+        and not auth_response.response.authenticator_data.is_user_verified()
+    ):
+        session.pop(session_key, None)
+        raise ValueError("Use a passkey that asks for your PIN, fingerprint, or face to sign in.")
     current_sign_count = int(matching_row.get("sign_count") or 0)
     auth_counter = int(auth_response.response.authenticator_data.counter)
+    if auth_counter > 0 and current_sign_count > 0 and auth_counter <= current_sign_count:
+        # A counter that fails to advance suggests a cloned authenticator; 0 means counters are unsupported.
+        session.pop(session_key, None)
+        emit_application_log(
+            "passkey.sign_count_regressed",
+            actor_kind=normalized_kind,
+            credential_row_id=matching_row.get("id"),
+        )
+        raise ValueError("That sign-in did not work.")
     update_passkey_credential_use(
         normalized_kind,
         user_id,
@@ -4656,7 +4813,7 @@ def audit_csv_value(value: object | None) -> object:
         return ""
     if not isinstance(value, str):
         return value
-    if value.startswith(("=", "+", "-", "@")):
+    if value.startswith(("=", "+", "-", "@", "\t", "\r")):
         return f"'{value}"
     return value
 
@@ -4918,8 +5075,8 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
                         int(row["duration_s"]),
                         wh,
                         wh / 1000.0,
-                        Path(str(row["source_path"])).name,
-                        row["imported_at"],
+                        audit_csv_value(Path(str(row["source_path"])).name),
+                        audit_csv_value(row["imported_at"]),
                     )
                 )
             archive.writestr(f"{prefix}/interval-readings.csv", interval_output.getvalue())
@@ -5298,18 +5455,16 @@ def is_app_host(host: str | None) -> bool:
 def current_request_host() -> str:
     if not has_request_context():
         return ""
-    forwarded_host = request.headers.get("X-Forwarded-Host")
-    if forwarded_host:
-        return normalize_host(forwarded_host.split(",", 1)[0])
+    # Forwarded headers are applied by ProxyFix only when POWER_TRUST_PROXY is on,
+    # so request.host is already the proxy-reported host when that is trusted and
+    # the real Host header otherwise. Reading X-Forwarded-Host directly here would
+    # let any client choose the host used in emailed links.
     return normalize_host(request.host)
 
 
 def infer_request_scheme() -> str:
     if not has_request_context():
         return "https"
-    forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip()
-    if forwarded_proto:
-        return forwarded_proto
     scheme = (request.scheme or "").strip()
     return scheme or "https"
 
@@ -5584,6 +5739,15 @@ def resolve_stripe_payment_reference(session_obj: object) -> str:
     return normalize_stripe_id(session_obj)
 
 
+def customer_can_reach_account_id(email: str, account_id: int) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM account_access_emails WHERE account_id = ? AND email = ?",
+            (int(account_id), clean_email(email)),
+        ).fetchone()
+    return row is not None
+
+
 def refresh_customer_billing_from_stripe(customer_user: dict[str, object], session_id: str | None = None) -> dict[str, object]:
     configure_stripe()
     billing = load_customer_billing(int(customer_user["id"]))
@@ -5595,7 +5759,15 @@ def refresh_customer_billing_from_stripe(customer_user: dict[str, object], sessi
         expand=["subscription", "payment_intent.charges", "invoice"],
     )
     metadata = read_checkout_metadata(session_obj)
+    # Only accept a checkout session this customer started, for an account they can reach.
+    session_owner = str(
+        extract_mapping_value(session_obj, "client_reference_id") or metadata.get("customer_user_id") or ""
+    ).strip()
+    if session_owner != str(customer_user["id"]):
+        raise PermissionError("That checkout session belongs to a different sign-in.")
     metadata_account_id = int(metadata["account_id"]) if str(metadata.get("account_id") or "").isdigit() else int(billing.get("account_id") or 0)
+    if metadata_account_id and not customer_can_reach_account_id(str(customer_user["email"]), metadata_account_id):
+        raise PermissionError("That checkout session is for an account this sign-in cannot reach.")
     plan_id = str(metadata.get("plan_id") or billing["plan_id"])
     subscription_obj = extract_mapping_value(session_obj, "subscription")
     subscription_id = normalize_stripe_id(subscription_obj)
@@ -5683,6 +5855,77 @@ def handle_stripe_event(event: object) -> None:
             stripe_subscription_id=normalize_stripe_id(event_object),
             current_period_end=normalize_stripe_timestamp(extract_mapping_value(event_object, "current_period_end")),
         )
+
+
+def stripe_event_created_epoch(event: object) -> int | None:
+    value = extract_mapping_value(event, "created")
+    try:
+        return int(value) if value is not None and str(value).strip() != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def stripe_event_subscription_id(event: object) -> str:
+    event_type = str(extract_mapping_value(event, "type") or "")
+    data = extract_mapping_value(event, "data") or {}
+    event_object = extract_mapping_value(data, "object") if not isinstance(data, dict) else data.get("object")
+    if event_object is None:
+        return ""
+    if event_type.startswith("customer.subscription."):
+        return normalize_stripe_id(event_object)
+    if event_type == "checkout.session.completed":
+        # A late checkout completion must not revive a subscription that was deleted since.
+        return normalize_stripe_id(extract_mapping_value(event_object, "subscription"))
+    return ""
+
+
+def process_stripe_event(event: object) -> str:
+    """Apply a verified Stripe event once and in order; returns processed, duplicate or stale."""
+    event_id = str(extract_mapping_value(event, "id") or "").strip()
+    event_type = str(extract_mapping_value(event, "type") or "")
+    created = stripe_event_created_epoch(event)
+    subscription_id = stripe_event_subscription_id(event)
+    last_created = None
+    if subscription_id and created is not None:
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT MAX(created) AS last_created FROM processed_stripe_events WHERE subscription_id = ?",
+                (subscription_id,),
+            ).fetchone()
+        last_created = row["last_created"] if row is not None else None
+    outcome = "stale" if last_created is not None and created < int(last_created) else "processed"
+    if event_id:
+        # Claim the event first so two concurrent deliveries cannot both apply it.
+        with get_db_connection() as conn:
+            claimed = conn.execute(
+                """
+                INSERT INTO processed_stripe_events (event_id, event_type, created, subscription_id, processed_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (event_id) DO NOTHING
+                """,
+                (
+                    event_id,
+                    event_type,
+                    created,
+                    # Stale events are recorded for idempotency but do not advance the watermark.
+                    subscription_id or None if outcome == "processed" else None,
+                    timestamp_now(),
+                ),
+            ).rowcount
+            conn.commit()
+        if not claimed:
+            return "duplicate"
+    if outcome == "processed":
+        try:
+            handle_stripe_event(event)
+        except Exception:
+            if event_id:
+                # Release the claim so Stripe's retry can apply the event.
+                with get_db_connection() as conn:
+                    conn.execute("DELETE FROM processed_stripe_events WHERE event_id = ?", (event_id,))
+                    conn.commit()
+            raise
+    return outcome
 
 
 def verify_configured_stripe_account() -> None:
@@ -7116,6 +7359,10 @@ def execute_account_data_deletion(request_id: int, staff_user_id: int) -> dict[s
                 "account_access_emails",
                 "utility_connections",
                 "report_artifacts",
+                "household_assistant_interactions",
+                "account_notes",
+                "account_equipment_history",
+                "account_commission_access",
             )
             for table in tables:
                 cursor = conn.execute(f"DELETE FROM {table} WHERE account_id = ?", (account_id,))
@@ -7236,9 +7483,61 @@ def unseal_secret_value(value: str | None) -> str | None:
         sealed = base64.urlsafe_b64decode(token.encode("ascii"))
         key_stream = build_legacy_secret_key_stream(len(sealed))
         payload = bytes(byte ^ key_stream[index] for index, byte in enumerate(sealed))
-        return payload.decode("utf-8")
+        legacy_value = payload.decode("utf-8")
+        get_application_logger().warning(
+            json.dumps(
+                {"event": "secrets.legacy_unseal", "hint": "run --reseal-secrets to re-encrypt legacy values"},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return legacy_value
     except (InvalidToken, UnicodeDecodeError, ValueError, TypeError) as exc:
         raise ValueError("The saved access key could not be read. Save the connection again.") from exc
+
+
+SEALED_SECRET_COLUMNS = (
+    ("utility_connections", "secret_token"),
+    ("staff_users", "mfa_secret_token"),
+    ("staff_users", "mfa_pending_secret_token"),
+)
+
+
+def reseal_secret_value(value: str | None) -> str | None:
+    token = (value or "").strip()
+    if not token:
+        return None
+    if token.startswith("fernet:v1:"):
+        rotated = get_data_encryption_cipher().rotate(token.removeprefix("fernet:v1:").encode("ascii"))
+        return f"fernet:v1:{rotated.decode('ascii')}"
+    return seal_secret_value(unseal_secret_value(token))
+
+
+def reseal_all_secrets() -> dict[str, int]:
+    """Re-encrypt every sealed secret column with the current primary encryption key."""
+    summary = {"resealed": 0, "failed": 0}
+    with get_db_connection() as conn:
+        for table_name, column_name in SEALED_SECRET_COLUMNS:
+            if column_name not in table_columns(conn, table_name):
+                continue
+            rows = conn.execute(
+                f"SELECT id, {column_name} AS sealed_value FROM {table_name} "
+                f"WHERE {column_name} IS NOT NULL AND {column_name} != ''"
+            ).fetchall()
+            for row in rows:
+                try:
+                    resealed = reseal_secret_value(str(row["sealed_value"]))
+                except (InvalidToken, ValueError, TypeError) as exc:
+                    summary["failed"] += 1
+                    log_handled_exception(f"secrets.reseal_failed.{table_name}.{column_name}", exc)
+                    continue
+                conn.execute(
+                    f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
+                    (resealed, row["id"]),
+                )
+                summary["resealed"] += 1
+        conn.commit()
+    return summary
 
 
 def staff_mfa_required() -> bool:
@@ -7974,6 +8273,8 @@ def save_utility_connection(account_number: str | None, form_like) -> dict[str, 
     if access_method == national_grid.METHOD:
         raise ValueError("Use National Grid sign-in to create this connection.")
     access_identifier = clean_optional_text(form_like.get("access_identifier"))
+    if access_identifier and "://" in access_identifier:
+        access_identifier = validate_utility_export_url(access_identifier)
     access_secret = form_like.get("access_secret")
     secret_hash = build_secret_hash(access_secret)
     secret_token = seal_secret_value(access_secret)
@@ -8216,19 +8517,122 @@ def sync_duke_oauth_connection(connection: dict[str, object]) -> dict[str, objec
     )
 
 
+UTILITY_EXPORT_MAX_BYTES = int(os.environ.get("POWER_UTILITY_EXPORT_MAX_BYTES", str(50 * 1024 * 1024)))
+UTILITY_EXPORT_BLOCKED_HOSTNAMES = {"localhost", "localhost.localdomain", "metadata", "metadata.google.internal"}
+
+
+def utility_export_allowed_hosts() -> set[str]:
+    raw = os.environ.get("POWER_UTILITY_EXPORT_HOSTS", "")
+    return {item.strip().lower().rstrip(".") for item in raw.split(",") if item.strip()}
+
+
+def is_public_ip_address(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = address.ipv4_mapped
+        if embedded is None and (
+            address in ipaddress.ip_network("64:ff9b::/96")  # NAT64 well-known prefix
+            or address in ipaddress.ip_network("::/96")  # IPv4-compatible (deprecated)
+        ):
+            embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        if embedded is None and address in ipaddress.ip_network("64:ff9b:1::/48"):
+            return False  # local-use NAT64 prefix
+        if embedded is not None:
+            address = embedded
+    return address.is_global and not address.is_multicast
+
+
+def validate_utility_export_url(url: str) -> str:
+    """Check that a customer-supplied export URL is an https address on a public host.
+
+    This runs when the connection is saved and again right before every fetch. The
+    connected socket's peer address is also checked during the fetch, so a DNS answer
+    that changes between the check and the connection still cannot reach a private
+    network address such as the cloud metadata service.
+    """
+    candidate = str(url or "").strip()
+    parts = urlsplit(candidate)
+    if parts.scheme.lower() != "https":
+        raise ValueError("The utility export URL must start with https://.")
+    if parts.username or parts.password:
+        raise ValueError("Remove the user name and password from the utility export URL.")
+    hostname = (parts.hostname or "").lower().rstrip(".")
+    if not hostname:
+        raise ValueError("Add a valid utility export URL.")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("Add a valid utility export URL.") from exc
+    if port not in (None, 443):
+        raise ValueError("The utility export URL must use the standard https port.")
+    if hostname in UTILITY_EXPORT_BLOCKED_HOSTNAMES or hostname.endswith((".localhost", ".internal", ".local")):
+        raise ValueError("That utility export URL points to a private address.")
+    try:
+        ipaddress.ip_address(hostname.strip("[]"))
+        is_ip_literal = True
+    except ValueError:
+        is_ip_literal = False
+    if is_ip_literal and not is_public_ip_address(hostname.strip("[]")):
+        raise ValueError("That utility export URL points to a private address.")
+    allowed_hosts = utility_export_allowed_hosts()
+    if allowed_hosts and not any(hostname == host or hostname.endswith(f".{host}") for host in allowed_hosts):
+        raise ValueError("That utility export host is not on the approved list.")
+    return candidate
+
+
+def resolve_public_utility_host(hostname: str) -> None:
+    try:
+        records = socket.getaddrinfo(hostname, 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ValueError("The utility export host could not be found.") from exc
+    addresses = {record[4][0] for record in records}
+    if not addresses or not all(is_public_ip_address(address) for address in addresses):
+        raise ValueError("That utility export URL points to a private address.")
+
+
+class _PublicOnlyHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        super().connect()
+        peer_address = self.sock.getpeername()[0]
+        if not is_public_ip_address(peer_address):
+            self.sock.close()
+            raise ValueError("That utility export URL points to a private address.")
+
+
+class _PublicOnlyHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PublicOnlyHTTPSConnection, req, context=self._context)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("The utility export URL redirected to another address. Use the final export URL.")
+
+
+def build_utility_export_opener():
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler(), _PublicOnlyHTTPSHandler())
+
+
 def fetch_utility_connection_export(connection: dict[str, object]) -> dict[str, object]:
     access_identifier = str(connection.get("access_identifier") or "").strip()
     access_secret = str(connection.get("access_secret") or "").strip()
     if not access_identifier.lower().startswith(("http://", "https://")):
         raise ValueError("Add the utility export URL before syncing this connection.")
+    access_identifier = validate_utility_export_url(access_identifier)
+    resolve_public_utility_host((urlsplit(access_identifier).hostname or "").strip("[]"))
     request_headers = {
         "Accept": "application/xml,text/xml,text/csv,*/*",
         "Authorization": f"Bearer {access_secret}",
         "X-API-Key": access_secret,
     }
     request_obj = Request(access_identifier, headers=request_headers)
-    with urlopen(request_obj, timeout=30) as response:
-        content = response.read()
+    with build_utility_export_opener().open(request_obj, timeout=30) as response:
+        content = response.read(UTILITY_EXPORT_MAX_BYTES + 1)
+    if len(content) > UTILITY_EXPORT_MAX_BYTES:
+        raise ValueError("The utility export is larger than this connection allows.")
     filename = Path(unquote(urlsplit(access_identifier).path)).name or "utility-history.xml"
     return {"filename": filename, "content": content}
 
@@ -8291,7 +8695,7 @@ def sync_utility_connection(account_number: str | None, connection_id: int) -> d
         if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
             filename = f"{Path(filename).stem or 'utility-history'}.xml"
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        destination = INPUT_DIR / f"utility-sync-{connection_id}-{timestamp}-{filename}"
+        destination = INPUT_DIR / f"utility-sync-{connection_id}-{timestamp}-{uuid4().hex[:16]}-{filename}"
         content = exported.get("content") or b""
         if isinstance(content, str):
             content = content.encode("utf-8")
@@ -9894,8 +10298,9 @@ def list_supported_utility_adapters() -> list[dict[str, object]]:
 
 
 def parse_interval_xml_tree(path: str | Path) -> etree._ElementTree:
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False)
     with open(path, "rb") as handle:
-        return etree.parse(handle)
+        return etree.parse(handle, parser)
 
 
 def load_interval_source(path: str | Path) -> Any:
@@ -10342,30 +10747,6 @@ def import_interval_file_to_db(
         adapter_id=parsed.adapter.adapter_id,
         adapter_name=parsed.adapter.display_name,
     )
-
-
-def sync_input_files_to_db(
-    account_number: str | None = None,
-    display_name: str | None = None,
-    energy_company: str | None = None,
-    baseline_date: str | None = None,
-) -> dict[str, int]:
-    ensure_database()
-    xml_files = sorted(path for path in INPUT_DIR.rglob("*.xml") if path.is_file())
-    synced = 0
-    imported = 0
-    for path in xml_files:
-        result = import_interval_file_to_db(
-            path,
-            account_number=account_number,
-            display_name=display_name,
-            energy_company=energy_company,
-            baseline_date=baseline_date,
-        )
-        synced += 1
-        if result["imported"]:
-            imported += 1
-    return {"files_seen": synced, "files_imported": imported}
 
 
 def count_imported_files(account_number: str | None = None) -> int:
@@ -10895,14 +11276,6 @@ def build_key_findings(
         )
 
     return findings[:3]
-
-
-def find_latest_input_file() -> Path | None:
-    ensure_data_dirs()
-    files = [path for path in INPUT_DIR.rglob("*.xml") if path.is_file()]
-    if not files:
-        return None
-    return max(files, key=lambda path: path.stat().st_mtime)
 
 
 def analyze_interval_data(
@@ -11774,6 +12147,7 @@ def print_human_report(summary: pd.DataFrame, baseline: float | None) -> None:
         print("No valid overnight intervals were found, so there is no baseline yet.")
     else:
         print(f"Estimated overnight baseline: {baseline:.2f} kW")
+    print(FLAGGED_INTERVAL_CAVEAT)
     print("")
 
     suspicious_days = summary[summary["suspicious"]]
@@ -11798,7 +12172,8 @@ def print_human_report(summary: pd.DataFrame, baseline: float | None) -> None:
 def print_comparison_report(comparison: dict[str, object], report_path: Path) -> None:
     overview = comparison["overview"]
     print("")
-    print("=== DUKE EXPORT COMPARISON ===")
+    print("=== UTILITY EXPORT COMPARISON ===")
+    print(FLAGGED_INTERVAL_CAVEAT)
     print("")
     print(
         f"Aligned {overview['matched_periods']} month(s) using {comparison['alignment_label']} matching."
@@ -11856,7 +12231,7 @@ def list_report_files(limit: int = 20) -> list[str]:
 def resolve_input_file(relative_path: str) -> Path:
     candidate = (INPUT_DIR / relative_path).resolve()
     base = INPUT_DIR.resolve()
-    if not str(candidate).startswith(str(base)):
+    if candidate == base or not candidate.is_relative_to(base):
         raise ValueError("That file is outside the saved history folder.")
     if not candidate.exists():
         raise FileNotFoundError("That file could not be found.")
@@ -11875,9 +12250,10 @@ def save_uploaded_file(uploaded_file) -> Path:
     if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
         raise ValueError("That file format is not supported yet.")
 
-    destination = INPUT_DIR / filename
-    if destination.exists():
-        destination = INPUT_DIR / f"{destination.stem}-{uuid4().hex[:8]}{destination.suffix}"
+    # Every stored upload gets an unguessable suffix so one customer's file name
+    # can never be predicted or collide with another customer's upload.
+    stem = Path(filename).stem[:80] or "interval"
+    destination = INPUT_DIR / f"{stem}-{uuid4().hex}{Path(filename).suffix.lower()}"
     uploaded_file.save(destination)
     return destination
 
@@ -12214,6 +12590,19 @@ def create_web_app() -> Flask:
     def auth_request_identity(scope: str, email: str | None) -> str:
         return auth_rate_limit_identity(scope, email, request.remote_addr)
 
+    def account_limit_blocked(scope: str, identifier: object, max_attempts: int, window_seconds: int) -> bool:
+        """A second limit keyed only on the email, so rotating IP addresses cannot
+        get around the per-address limit for one account."""
+        normalized = str(identifier or "").strip().lower()
+        if not normalized:
+            return False
+        blocked = not consume_rate_limit(f"{scope}.account", normalized, max_attempts, window_seconds)["allowed"]
+        if blocked:
+            # Someone can trip this on purpose to block a person's sign-in, so log it
+            # for alerting. The email itself is not logged.
+            emit_application_log("auth.account_limit_reached", scope=scope)
+        return blocked
+
     def auth_limit_message(retry_after: int) -> str:
         minutes = max(1, (int(retry_after) + 59) // 60)
         return f"Too many sign-in attempts. Try again in {minutes} minute{'s' if minutes != 1 else ''}."
@@ -12357,7 +12746,7 @@ def create_web_app() -> Flask:
         session["pending_staff_user_id"] = int(staff_user["id"])
         session["pending_staff_auth_version"] = int(staff_user.get("auth_version") or 1)
         session["pending_staff_mfa_at"] = timestamp_now()
-        if next_url.startswith("/") and not next_url.startswith("//"):
+        if is_safe_local_path(next_url):
             session["pending_staff_next"] = next_url
 
     def pending_staff_mfa_user() -> dict[str, object] | None:
@@ -12389,9 +12778,32 @@ def create_web_app() -> Flask:
 
     def next_destination(default_endpoint: str = "index") -> str:
         next_url = request.args.get("next") or request.form.get("next")
-        if next_url and next_url.startswith("/") and not next_url.startswith("//"):
+        if next_url and is_safe_local_path(next_url):
             return next_url
         return url_for(default_endpoint)
+
+    # Commission access is read-only for customer records, but every staff member
+    # must still be able to protect their own sign-in.
+    STAFF_OWN_SECURITY_ENDPOINTS = {
+        "staff_mfa_start",
+        "staff_mfa_confirm",
+        "staff_mfa_cancel",
+        "staff_mfa_recovery_codes",
+        "staff_mfa_disable",
+        "staff_passkey_enrollment_start",
+        "staff_passkey_enrollment_finish",
+        "staff_passkey_delete",
+    }
+
+    def is_commission_staff(staff_user: dict[str, object] | None) -> bool:
+        return bool(staff_user) and get_staff_commission_access(int(staff_user["id"])) is not None
+
+    def visible_staff_team(staff_user: dict[str, object] | None) -> list[dict[str, object]]:
+        """Commission reviewers see only their own entry, not the whole internal team."""
+        team = list_staff_users()
+        if is_commission_staff(staff_user):
+            return [member for member in team if int(member["id"]) == int(staff_user["id"])]
+        return team
 
     def require_staff_user(api: bool = False):
         if staff_bootstrap_needed():
@@ -12404,7 +12816,11 @@ def create_web_app() -> Flask:
             if api:
                 return jsonify({"error": "Sign in to continue."}), 401
             return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
-        if get_staff_commission_access(int(staff_user["id"])) is not None and request.method == "POST":
+        if (
+            get_staff_commission_access(int(staff_user["id"])) is not None
+            and request.method == "POST"
+            and request.endpoint not in STAFF_OWN_SECURITY_ENDPOINTS
+        ):
             message = "Commission access is read-only."
             if api:
                 return jsonify({"error": message}), 403
@@ -12516,7 +12932,7 @@ def create_web_app() -> Flask:
 
     def redirect_back_or_account(account_number: str | None = None):
         return_to = (request.form.get("return_to") or "").strip()
-        if return_to.startswith("/") and not return_to.startswith("//"):
+        if is_safe_local_path(return_to):
             return redirect(return_to)
         return actor_redirect(account_number)
 
@@ -12593,7 +13009,7 @@ def create_web_app() -> Flask:
             affiliate = create_affiliate_account(name, email, slug, "10", payout_method, payout_destination)
             flash(f"Your referral link is ready: {build_absolute_url(build_public_base_url(request.url_root), '/r/' + str(affiliate['slug']))}")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect(url_for("affiliate_page"))
 
     @app.get("/r/<slug>")
@@ -12609,14 +13025,20 @@ def create_web_app() -> Flask:
         account_number = request.args.get("account_number")
         account_search = request.args.get("account_search")
         account_page_number = parse_positive_int(request.args.get("account_page"), default=1)
-        scaffold = build_account_scaffold(account_number, account_search, account_page_number)
         staff_user = current_staff_user()
         commission_read_only = bool(staff_user and get_staff_commission_access(int(staff_user["id"])))
+        commission_accounts: list[dict[str, object]] = []
         if commission_read_only:
+            # Decide which account a commission user may see before anything is loaded,
+            # so an unassigned account is never read (or created) on their behalf.
             commission_accounts = list_commission_accounts(int(staff_user["id"]))
             allowed_numbers = {str(item["account_number"]) for item in commission_accounts}
-            if scaffold["account"]["account_number"] not in allowed_numbers and commission_accounts:
-                scaffold = build_account_scaffold(str(commission_accounts[0]["account_number"]), account_search, account_page_number)
+            if not commission_accounts:
+                abort(make_response(render_template("customer_empty.html", page_title="Commission records"), 200))
+            if account_number is None or normalize_account_number(account_number) not in allowed_numbers:
+                account_number = str(commission_accounts[0]["account_number"])
+        scaffold = build_account_scaffold(account_number, account_search, account_page_number)
+        if commission_read_only:
             scaffold["accounts"] = commission_accounts
         return {
             "defaults": defaults,
@@ -12760,7 +13182,7 @@ def create_web_app() -> Flask:
                 )
                 return redirect(str(session_obj["url"]))
             except Exception as exc:
-                flash(str(exc))
+                flash(user_facing_error_message(exc))
         return redirect(url_for("customer_dashboard"))
 
     @app.context_processor
@@ -12877,12 +13299,26 @@ def create_web_app() -> Flask:
             if current_staff_user() is not None:
                 return redirect(url_for("index"))
             return redirect(url_for("login"))
-        return render_template("first_run.html", page_title="Commission Setup")
+        return render_template(
+            "first_run.html",
+            page_title="Commission Setup",
+            setup_token_required=bool((os.getenv("POWER_FIRST_RUN_TOKEN") or "").strip()) or is_production_environment(),
+        )
 
     @app.post("/first-run")
     def create_first_run_user():
         if not staff_bootstrap_needed():
             return redirect(url_for("login"))
+        expected_setup_token = (os.getenv("POWER_FIRST_RUN_TOKEN") or "").strip()
+        if is_production_environment() and not expected_setup_token:
+            flash("Set POWER_FIRST_RUN_TOKEN on the server before creating the first commissioner.")
+            return redirect(url_for("first_run"))
+        if expected_setup_token and not secrets.compare_digest(
+            expected_setup_token.encode("utf-8"),
+            (request.form.get("setup_token") or "").strip().encode("utf-8"),
+        ):
+            flash("That setup code is not correct.")
+            return redirect(url_for("first_run"))
         try:
             staff_user = create_first_staff_user(
                 request.form.get("email", ""),
@@ -12890,7 +13326,7 @@ def create_web_app() -> Flask:
                 request.form.get("password", ""),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("first_run"))
 
         session.clear()
@@ -12942,7 +13378,7 @@ def create_web_app() -> Flask:
                 authenticated_customer_user_id=(current_customer_user() or {}).get("id"),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return render_customer_signup_page(request.form)
 
         record_audit_event(
@@ -13030,7 +13466,7 @@ def create_web_app() -> Flask:
         email = request.form.get("email") or session.get("pending_verification_email") or ""
         identity_hash = auth_request_identity("customer_verification_resend", str(email))
         limit_status = auth_rate_limit_status("customer_verification_resend", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("customer_verification_resend", str(email), 10, 3600):
             flash("Please wait before asking for another confirmation message.")
             return render_verification_notice(str(email)), 429
         record_auth_failure("customer_verification_resend", identity_hash)
@@ -13107,7 +13543,7 @@ def create_web_app() -> Flask:
         email = request.form.get("email", "")
         identity_hash = auth_request_identity("customer_password_reset", email)
         limit_status = auth_rate_limit_status("customer_password_reset", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("customer_password_reset", email, 10, 3600):
             return (
                 render_template(
                     "customer_forgot_password.html",
@@ -13200,7 +13636,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         record_audit_event(
             "customer.passkey_challenge_started",
             actor_type="anonymous",
@@ -13219,7 +13655,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         start_customer_session(customer_user)
         record_audit_event(
             "customer.login_succeeded",
@@ -13230,7 +13666,7 @@ def create_web_app() -> Flask:
             target_id=customer_user["id"],
             metadata={"method": "passkey"},
         )
-        safe_next = next_url if next_url.startswith("/") and not next_url.startswith("//") else url_for("customer_dashboard")
+        safe_next = next_url if is_safe_local_path(next_url) else url_for("customer_dashboard")
         return jsonify({"redirect": safe_next})
 
     @app.get("/pricing")
@@ -13322,21 +13758,28 @@ def create_web_app() -> Flask:
         customer_user = require_customer_user()
         if not isinstance(customer_user, dict):
             return customer_user
+        billing_account_number = resolve_billing_manager_account(
+            customer_user,
+            request.form.get("account_number") or request.args.get("account_number"),
+        )
+        if billing_account_number is None:
+            flash("Manager access is required to manage billing for this account.")
+            return redirect(url_for("pricing_page"))
         try:
             session_obj = create_customer_checkout_session(
                 customer_user,
                 request.form.get("plan_id"),
                 build_public_base_url(request.url_root),
-                request.form.get("account_number") or request.args.get("account_number"),
+                billing_account_number,
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("pricing_page"))
         record_audit_event(
             "billing.checkout_started",
             actor_type="customer",
             actor_id=int(customer_user["id"]),
-            account_number=request.form.get("account_number") or choose_customer_account_number(str(customer_user["email"])),
+            account_number=billing_account_number,
             target_type="stripe_checkout_session",
             target_id=session_obj.get("id"),
             metadata={"plan_id": str(request.form.get("plan_id") or "")},
@@ -13359,8 +13802,8 @@ def create_web_app() -> Flask:
                 target_id=customer_user["id"],
                 metadata={"status": str(billing.get("status") or "")},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_handled_exception("billing.status_refresh_failed", exc)
         flash("Billing is being confirmed.")
         return redirect(url_for("customer_dashboard"))
 
@@ -13371,25 +13814,42 @@ def create_web_app() -> Flask:
             return redirect(url_for("customer_dashboard"))
         return redirect(url_for("pricing_page"))
 
+    def resolve_billing_manager_account(customer_user: dict[str, object], requested_account_number: str | None) -> str | None:
+        """Billing changes payment details for the whole account, so only Managers may open it."""
+        account_number = choose_customer_account_number(str(customer_user["email"]), requested_account_number)
+        if account_number is None:
+            return None
+        access = get_customer_account_access(str(customer_user["email"]), account_number)
+        if access is None or access.get("access_level") != "Manager":
+            return None
+        return account_number
+
     @app.post("/billing/portal")
     def billing_portal():
         customer_user = require_customer_user()
         if not isinstance(customer_user, dict):
             return customer_user
+        billing_account_number = resolve_billing_manager_account(
+            customer_user,
+            request.form.get("account_number") or request.args.get("account_number"),
+        )
+        if billing_account_number is None:
+            flash("Manager access is required to manage billing for this account.")
+            return redirect(url_for("customer_dashboard"))
         try:
             session_obj = create_customer_portal_session(
                 customer_user,
                 build_public_base_url(request.url_root),
-                request.args.get("account_number"),
+                billing_account_number,
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("customer_dashboard"))
         record_audit_event(
             "billing.portal_opened",
             actor_type="customer",
             actor_id=int(customer_user["id"]),
-            account_number=choose_customer_account_number(str(customer_user["email"])),
+            account_number=billing_account_number,
             target_type="customer_billing",
             target_id=customer_user["id"],
         )
@@ -13406,7 +13866,9 @@ def create_web_app() -> Flask:
             payload = request.get_data()
             signature = request.headers.get("Stripe-Signature", "")
             event = stripe.Webhook.construct_event(payload, signature, webhook_secret)
-            handle_stripe_event(event)
+            outcome = process_stripe_event(event)
+            if outcome != "processed":
+                return jsonify({"received": True, "status": outcome})
             event_type = str(event.get("type") or "unknown")
             record_audit_event(
                 "billing.webhook_processed",
@@ -13416,7 +13878,8 @@ def create_web_app() -> Flask:
                 metadata={"event_type": event_type},
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            log_handled_exception("billing.webhook_failed", exc)
+            return jsonify({"error": "Webhook could not be processed."}), 400
         return jsonify({"received": True})
 
     @app.get("/customer")
@@ -13453,7 +13916,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         record_audit_event(
             "customer.passkey_enrollment_started",
             actor_type="customer",
@@ -13478,7 +13941,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         updated_user = get_customer_user_by_id(int(customer_user["id"])) or customer_user
         session["customer_auth_version"] = int(updated_user.get("auth_version") or 1)
         record_audit_event(
@@ -13499,7 +13962,7 @@ def create_web_app() -> Flask:
         try:
             removed = remove_passkey_credential("customer", int(customer_user["id"]), credential_id)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("customer_account_page"))
         updated_user = get_customer_user_by_id(int(customer_user["id"])) or customer_user
         session["customer_auth_version"] = int(updated_user.get("auth_version") or 1)
@@ -13655,7 +14118,20 @@ def create_web_app() -> Flask:
 
     @app.get("/login/token")
     def login_token():
-        token = request.args.get("token", "")
+        # Opening the emailed link only shows a confirmation button. The token is used
+        # on the POST, so mail-security scanners that prefetch links cannot spend it,
+        # and a forwarded link does not silently sign someone into another account.
+        next_url = request.args.get("next") or ""
+        return render_template(
+            "login_token_confirm.html",
+            page_title="Finish Signing In",
+            token=request.args.get("token", ""),
+            next_url=next_url if is_safe_local_path(next_url) else "",
+        )
+
+    @app.post("/login/token")
+    def login_token_post():
+        token = request.form.get("token", "")
         try:
             customer_user = consume_customer_login_token(token)
         except ValueError:
@@ -13711,7 +14187,7 @@ def create_web_app() -> Flask:
         email = request.form.get("email", "")
         identity_hash = auth_request_identity("password_reset", email)
         limit_status = auth_rate_limit_status("password_reset", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("password_reset", email, 10, 3600):
             return (
                 render_template(
                     "customer_forgot_password.html",
@@ -13782,7 +14258,7 @@ def create_web_app() -> Flask:
         email = request.form.get("email", "")
         identity_hash = auth_request_identity("staff_password_reset", email)
         limit_status = auth_rate_limit_status("staff_password_reset", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("staff_password_reset", email, 10, 3600):
             return (
                 render_template(
                     "staff_forgot_password.html",
@@ -13862,13 +14338,15 @@ def create_web_app() -> Flask:
         email = request.form.get("email", "")
         identity_hash = auth_request_identity("sign_in", email)
         limit_status = auth_rate_limit_status("sign_in", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("sign_in", email, 20, 3600):
             return render_template("login_link_notice.html", page_title="Check Your Email"), 429
         record_auth_failure("sign_in", identity_hash)
-        customer_user = ensure_customer_user_for_email(email)
-        staff_user = None if customer_user is not None else get_staff_user_by_email(email)
-        if staff_user is None:
+        # Staff identities win: a customer must never be able to turn a staff
+        # member's sign-in into a customer session by listing their email.
+        staff_user = get_staff_user_by_email(email)
+        if staff_user is None and get_commission_for_email(email) is not None:
             staff_user = ensure_commission_staff_user(email)
+        customer_user = None if staff_user is not None else ensure_customer_user_for_email(email)
         delivered = False
         try:
             if customer_user is not None and customer_user.get("is_active"):
@@ -13893,7 +14371,9 @@ def create_web_app() -> Flask:
         email = request.form.get("email", "")
         resolved = resolve_passkey_login(email)
         if resolved is None:
-            return jsonify({"error": "That passkey sign in did not work."}), 400
+            # Answer exactly like a real challenge so this endpoint cannot be used to
+            # learn which emails have accounts. The decoy can never be completed.
+            return jsonify({"publicKey": start_decoy_passkey_login(email, build_public_base_url(request.url_root))})
         kind, user = resolved
         try:
             options = start_passkey_login(
@@ -13903,7 +14383,8 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            log_handled_exception("passkey.login_start_failed", exc)
+            return jsonify({"publicKey": start_decoy_passkey_login(email, build_public_base_url(request.url_root))})
         record_audit_event(
             f"{kind}.passkey_challenge_started",
             actor_type="anonymous",
@@ -13922,7 +14403,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         if kind == "customer":
             start_customer_session(signed_in_user)
             record_audit_event(
@@ -13934,7 +14415,7 @@ def create_web_app() -> Flask:
                 target_id=signed_in_user["id"],
                 metadata={"mfa": "passkey", "entrypoint": "unified"},
             )
-            safe_next = next_url if next_url.startswith("/") and not next_url.startswith("//") else url_for("customer_dashboard")
+            safe_next = next_url if is_safe_local_path(next_url) else url_for("customer_dashboard")
             return jsonify({"redirect": safe_next})
 
         staff_user = signed_in_user
@@ -13948,7 +14429,7 @@ def create_web_app() -> Flask:
             target_id=staff_user["id"],
             metadata={"mfa": "passkey", "entrypoint": "unified"},
         )
-        safe_next = next_url if next_url.startswith("/") and not next_url.startswith("//") else url_for("index")
+        safe_next = next_url if is_safe_local_path(next_url) else url_for("index")
         return jsonify({"redirect": safe_next})
 
     @app.get("/staff/mfa/challenge")
@@ -13971,7 +14452,7 @@ def create_web_app() -> Flask:
             return redirect(url_for("login"))
         identity_hash = auth_request_identity("staff_mfa", str(staff_user["email"]))
         limit_status = auth_rate_limit_status("staff_mfa", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("staff_mfa", str(staff_user["email"]), 10, 900):
             flash(auth_limit_message(int(limit_status["retry_after"])))
             return (
                 render_template(
@@ -14156,6 +14637,11 @@ def create_web_app() -> Flask:
         staff_user = require_staff_user()
         if not isinstance(staff_user, dict):
             return staff_user
+        if staff_user.get("mfa_enabled"):
+            if account_limit_blocked("staff_passkey_code", str(staff_user["email"]), 5, 900):
+                return jsonify({"error": "Too many code attempts. Try again in 15 minutes."}), 429
+            if verify_staff_mfa_code(int(staff_user["id"]), request.form.get("code")) is None:
+                return jsonify({"error": "Enter a current authenticator code to add a passkey."}), 400
         try:
             options = start_passkey_enrollment(
                 "staff",
@@ -14164,7 +14650,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         record_audit_event(
             "staff.passkey_enrollment_started",
             actor_type="staff",
@@ -14188,7 +14674,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         updated_user = get_staff_user_by_id(int(staff_user["id"])) or staff_user
         session["staff_auth_version"] = int(updated_user.get("auth_version") or 1)
         record_audit_event(
@@ -14208,7 +14694,7 @@ def create_web_app() -> Flask:
         try:
             removed = remove_passkey_credential("staff", int(staff_user["id"]), credential_id)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("staff_security"))
         updated_user = get_staff_user_by_id(int(staff_user["id"])) or staff_user
         session["staff_auth_version"] = int(updated_user.get("auth_version") or 1)
@@ -14269,7 +14755,7 @@ def create_web_app() -> Flask:
                 full_name=request.form.get("full_name"),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("accept_staff_invite_route", token=token))
 
         session.clear()
@@ -14299,7 +14785,7 @@ def create_web_app() -> Flask:
                 invited_by_id=int(staff_user["id"]),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("index"))
 
         delivery = "manual"
@@ -14326,7 +14812,7 @@ def create_web_app() -> Flask:
         else:
             flash(f"{invite['full_name']} is ready for setup.")
         return_to = (request.form.get("return_to") or "").strip()
-        if return_to.startswith("/") and not return_to.startswith("//"):
+        if is_safe_local_path(return_to):
             return redirect(return_to)
         return redirect(url_for("staff_page"))
 
@@ -14459,8 +14945,8 @@ def create_web_app() -> Flask:
             utility_connections=scaffold["utility_connections"],
             data_authorizations=scaffold["data_authorizations"],
             has_active_data_authorization=scaffold["has_active_data_authorization"],
-            staff_team=list_staff_users(),
-            latest_invite_url=consume_latest_invite_url(),
+            staff_team=visible_staff_team(staff_user),
+            latest_invite_url=None if is_commission_staff(staff_user) else consume_latest_invite_url(),
             active_account_number=scaffold["account"]["account_number"],
             page_title="Commission Review",
             commission_read_only=commission_read_only,
@@ -14518,7 +15004,7 @@ def create_web_app() -> Flask:
                 request.form.get("body"),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(account_number)
         actor = {"kind": "customer", "user": customer_user}
         record_actor_event(
@@ -14547,7 +15033,7 @@ def create_web_app() -> Flask:
             flash(str(exc))
             return redirect_back_or_account(account_number)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(account_number)
         actor = {"kind": "customer", "user": customer_user}
         record_actor_event(
@@ -14569,9 +15055,9 @@ def create_web_app() -> Flask:
         return render_template(
             "staff_page.html",
             staff_user=staff_user,
-            staff_team=list_staff_users(),
-            affiliates=list_affiliate_accounts(),
-            latest_invite_url=consume_latest_invite_url(),
+            staff_team=visible_staff_team(staff_user),
+            affiliates=[] if is_commission_staff(staff_user) else list_affiliate_accounts(),
+            latest_invite_url=None if is_commission_staff(staff_user) else consume_latest_invite_url(),
             page_title="Staff",
         )
 
@@ -14588,7 +15074,7 @@ def create_web_app() -> Flask:
             record_audit_event("affiliate.created", actor_type="staff", actor_id=int(staff_user["id"]), target_type="affiliate_account", target_id=affiliate["id"], metadata={"slug": affiliate["slug"]})
             flash("Referral partner created.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect(url_for("staff_page"))
 
     @app.get("/audit")
@@ -14807,6 +15293,16 @@ def create_web_app() -> Flask:
     def download_report(filename: str):
         staff_user = current_staff_user()
         if staff_user is not None:
+            if get_staff_commission_access(int(staff_user["id"])) is not None:
+                try:
+                    artifact_account_number = get_report_artifact_account_number(filename)
+                except ValueError:
+                    artifact_account_number = None
+                if artifact_account_number is None or not commission_can_view_account(
+                    int(staff_user["id"]),
+                    artifact_account_number,
+                ):
+                    return "Report not found.", 404
             return send_from_directory(OUTPUT_DIR, normalize_report_filename(filename), as_attachment=True)
 
         customer_user = current_customer_user()
@@ -14839,13 +15335,21 @@ def create_web_app() -> Flask:
             ):
                 raise ValueError("Customer data permission is required before exports can be compared.")
             if request.files.get("left_file") and request.files.get("right_file"):
-                left_path = save_uploaded_file(request.files.get("left_file"))
-                right_path = save_uploaded_file(request.files.get("right_file"))
-                comparison, report_path = analyze_interval_file_comparison(
-                    left_path, right_path, tz_name=settings["tz"], night_start_str=settings["night_start"],
-                    night_end_str=settings["night_end"], min_night_kw=settings["min_night_kw"],
-                    night_multiplier=settings["night_multiplier"],
-                )
+                compare_upload_paths: list[Path] = []
+                try:
+                    left_path = save_uploaded_file(request.files.get("left_file"))
+                    compare_upload_paths.append(left_path)
+                    right_path = save_uploaded_file(request.files.get("right_file"))
+                    compare_upload_paths.append(right_path)
+                    comparison, report_path = analyze_interval_file_comparison(
+                        left_path, right_path, tz_name=settings["tz"], night_start_str=settings["night_start"],
+                        night_end_str=settings["night_end"], min_night_kw=settings["min_night_kw"],
+                        night_multiplier=settings["night_multiplier"],
+                    )
+                finally:
+                    # Compare uploads are never recorded against the account, so remove them once analyzed.
+                    for compare_upload_path in compare_upload_paths:
+                        compare_upload_path.unlink(missing_ok=True)
             else:
                 comparison = analyze_history_range_comparison(
                     account_number=account_number,
@@ -14866,7 +15370,7 @@ def create_web_app() -> Flask:
                 target_id=report_path.name,
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             endpoint = "customer_history_page" if actor["kind"] == "customer" else "history_page"
             return redirect(url_for(endpoint, account_number=normalize_account_number(account_number)))
 
@@ -14884,6 +15388,8 @@ def create_web_app() -> Flask:
         staff_user = require_staff_user(api=True)
         if not isinstance(staff_user, dict):
             return staff_user
+        if get_staff_commission_access(int(staff_user["id"])) is not None:
+            return jsonify({"error": "The shared file list is not available to commission access."}), 403
         return jsonify({"input_files": list_input_files(), "report_files": list_report_files()})
 
     @app.get("/api/supported-feeds")
@@ -15060,6 +15566,20 @@ def create_web_app() -> Flask:
         question = str(payload.get("question") or "").strip()
         if not question:
             return jsonify({"error": "Ask a question about the household or its usage history."}), 400
+        if len(question) > HOUSEHOLD_ASSISTANT_MAX_QUESTION_CHARS:
+            return jsonify(
+                {"error": f"Please keep your question under {HOUSEHOLD_ASSISTANT_MAX_QUESTION_CHARS} characters."}
+            ), 400
+        assistant_limit = consume_rate_limit(
+            "household_assistant",
+            f"{actor.get('kind')}:{actor['user']['id']}",
+            HOUSEHOLD_ASSISTANT_RATE_LIMIT,
+            HOUSEHOLD_ASSISTANT_RATE_WINDOW_SECONDS,
+        )
+        if not assistant_limit["allowed"]:
+            response = jsonify({"error": "You have asked a lot of questions recently. Please try again later."})
+            response.headers["Retry-After"] = str(assistant_limit["retry_after"])
+            return response, 429
         target_date = str(payload.get("date") or "").strip() or None
         context = build_household_question_context(str(account_number), question, target_date)
         used_bedrock = False
@@ -15122,6 +15642,8 @@ def create_web_app() -> Flask:
 
         if request.is_json:
             mounted_name = payload.get("input_file")
+            if mounted_name and actor.get("kind") != "staff":
+                return jsonify({"error": "Upload the usage history file to add it to this account."}), 403
             if mounted_name:
                 input_path = resolve_input_file(mounted_name)
                 import_result = import_interval_file_to_db(
@@ -15235,7 +15757,7 @@ def create_web_app() -> Flask:
                 metadata={"energy_company": str(account.get("energy_company") or "")},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(current_account_number)
 
         if normalize_account_number(requested_account_number) != normalize_account_number(current_account_number):
@@ -15264,7 +15786,7 @@ def create_web_app() -> Flask:
                 metadata={"access_level": str(access["access_level"])},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/customer/account-access")
@@ -15294,7 +15816,7 @@ def create_web_app() -> Flask:
             )
             flash("Account access was added.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/account-access/<int:access_id>/delete")
@@ -15360,7 +15882,7 @@ def create_web_app() -> Flask:
             )
             flash("Account access was removed.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/account/data-authorization")
@@ -15392,7 +15914,7 @@ def create_web_app() -> Flask:
             )
             flash("Permission to use this account's utility data is active.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/account/data-authorization/revoke")
@@ -15420,7 +15942,7 @@ def create_web_app() -> Flask:
             )
             flash("Permission was withdrawn. Saved utility access details were removed.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection/duke/start")
@@ -15440,7 +15962,7 @@ def create_web_app() -> Flask:
                 return redirect(existing_url)
             flow = build_duke_authorization_flow()
             return_to = (request.form.get("return_to") or "").strip()
-            if not return_to.startswith("/") or return_to.startswith("//"):
+            if not is_safe_local_path(return_to):
                 return_to = ""
             session[DUKE_OAUTH_PENDING_SESSION_KEY] = {
                 "account_number": str(account["account_number"]),
@@ -15459,7 +15981,7 @@ def create_web_app() -> Flask:
             )
             return redirect(flow["authorization_url"])
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection/duke/complete")
@@ -15526,7 +16048,7 @@ def create_web_app() -> Flask:
                 error_type=type(exc).__name__,
             )
             if isinstance(exc, ValueError):
-                flash(str(exc))
+                flash(user_facing_error_message(exc))
             elif stage == "duke_exchange":
                 flash("Duke could not complete this connection. Start Duke sign-in again and use the newest one-time code.")
             else:
@@ -15557,7 +16079,7 @@ def create_web_app() -> Flask:
                 metadata={"access_method": str(connection["access_method"])},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection/<int:connection_id>/delete")
@@ -15595,8 +16117,8 @@ def create_web_app() -> Flask:
         except Exception as exc:
             try:
                 record_utility_connection_sync_failure(account_number, connection_id, exc)
-            except Exception:
-                pass
+            except Exception as record_exc:
+                log_handled_exception("utility.connection_sync_failure_record_failed", record_exc)
             record_actor_event(
                 actor,
                 "utility.connection_sync_failed",
@@ -15605,7 +16127,7 @@ def create_web_app() -> Flask:
                 target_id=connection_id,
                 metadata={"error_type": type(exc).__name__},
             )
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/load-items")
@@ -15632,7 +16154,7 @@ def create_web_app() -> Flask:
                 metadata={"quantity": int(item["quantity"]), "watts_each": float(item["watts_each"])},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/load-items/<int:item_id>/delete")
@@ -15717,7 +16239,7 @@ def create_web_app() -> Flask:
             report_summary = attach_weather_context_to_summary(summary, weather_contexts)
             report_summary.to_csv(report_path, index=True)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("index", account_number=normalize_account_number(account_number)))
 
         analysis = build_report_context(
@@ -15772,8 +16294,8 @@ def create_web_app() -> Flask:
             utility_connections=list_utility_connections(account["account_number"]),
             data_authorizations=list_account_data_authorizations(account["account_number"]),
             has_active_data_authorization=account_has_active_data_authorization(account["account_number"]),
-            staff_team=[] if actor["kind"] == "customer" else list_staff_users(),
-            latest_invite_url=None if actor["kind"] == "customer" else consume_latest_invite_url(),
+            staff_team=[] if actor["kind"] == "customer" else visible_staff_team(actor["user"]),
+            latest_invite_url=None if actor["kind"] in {"customer", "commission"} else consume_latest_invite_url(),
             customer_mode=actor["kind"] == "customer",
             page_title="Your energy history" if actor["kind"] == "customer" else "Commission Review",
         )
@@ -15831,6 +16353,18 @@ def main() -> None:
             sys.exit(1)
         return
 
+    if args.reseal_secrets:
+        try:
+            reseal_summary = reseal_all_secrets()
+        except Exception as exc:
+            print(f"Error resealing secrets: {type(exc).__name__}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Resealed secrets: {reseal_summary['resealed']}")
+        print(f"Unreadable secrets: {reseal_summary['failed']}")
+        if reseal_summary["failed"]:
+            sys.exit(1)
+        return
+
     if args.ensure_owner_free_play_code:
         try:
             promotion_summary = ensure_owner_free_play_promotion_code(
@@ -15845,7 +16379,7 @@ def main() -> None:
         return
 
     if not args.input:
-        parser.error("--input is required unless --serve, --sync-utilities, or --ensure-owner-free-play-code is used")
+        parser.error("--input is required unless --serve, --sync-utilities, --reseal-secrets, or --ensure-owner-free-play-code is used")
 
     try:
         if args.compare_to:

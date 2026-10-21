@@ -1,10 +1,16 @@
+# NOT USED BY PRODUCTION SYSTEMD.
+# Production runs deploy/ec2/home-energy-watch-direct.sh from
+# home-energy-watch.service, which runs the prebuilt home-energy-watch:current
+# image with the full deploy/ec2/.env.production as its environment.
+# This file is kept only as a reference/manual fallback. Keep its environment
+# list in sync with .env.production.example when variables are added.
 services:
   power-detector:
     build:
       context: ../..
-    image: home-energy-watch:latest
+    image: home-energy-watch:current
     ports:
-      - "${POWER_WEB_PORT:-80}:8000"
+      - "${POWER_BIND_ADDRESS:-0.0.0.0}:${POWER_WEB_PORT:-80}:8000"
     environment:
       POWER_DATABASE_URL: ${POWER_DATABASE_URL}
       POWER_ENV: ${POWER_ENV:-production}
@@ -29,6 +35,9 @@ services:
       POWER_EMAIL_FROM: ${POWER_EMAIL_FROM}
       POWER_EMAIL_REPLY_TO: ${POWER_EMAIL_REPLY_TO:-}
       POWER_EMAIL_REGION: ${POWER_EMAIL_REGION:-us-east-1}
+      POWER_BEDROCK_ENABLED: ${POWER_BEDROCK_ENABLED:-false}
+      POWER_BEDROCK_REGION: ${POWER_BEDROCK_REGION:-us-east-1}
+      POWER_BEDROCK_MODEL_ID: ${POWER_BEDROCK_MODEL_ID:-us.amazon.nova-2-lite-v1:0}
       POWER_BILLING_ENABLED: ${POWER_BILLING_ENABLED:-false}
       STRIPE_ACCOUNT_ID: ${STRIPE_ACCOUNT_ID:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
@@ -53,15 +62,5 @@ services:
     volumes:
       - /opt/home-energy-watch/input:/srv/home-energy-watch/input
       - /opt/home-energy-watch/output:/srv/home-energy-watch/output
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5).read()",
-        ]
-      interval: 30s
-      timeout: 5s
-      retries: 5
+    # The image's Dockerfile HEALTHCHECK probes /health; no override needed.
     restart: unless-stopped

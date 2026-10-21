@@ -83,7 +83,10 @@ def email_token_sign_in(client, email):
     try:
         app.EMAIL_OUTBOX.clear()
         client.post("/login", data={"email": email}, follow_redirects=False)
-        response = client.get("/login/token", query_string={"token": token_from_latest_email()}, follow_redirects=False)
+        token = token_from_latest_email()
+        confirm_page = client.get("/login/token", query_string={"token": token}, follow_redirects=False)
+        assert confirm_page.status_code == 200
+        response = client.post("/login/token", data={"token": token}, follow_redirects=False)
         app.EMAIL_OUTBOX.clear()
         return response
     finally:
@@ -2889,7 +2892,7 @@ def install_fake_passkeys(monkeypatch):
     monkeypatch.setattr(
         app.AuthenticationResponse,
         "from_dict",
-        staticmethod(lambda payload: SimpleNamespace(response=SimpleNamespace(authenticator_data=SimpleNamespace(counter=9)))),
+        staticmethod(lambda payload: SimpleNamespace(response=SimpleNamespace(authenticator_data=SimpleNamespace(counter=9, is_user_verified=lambda: True)))),
     )
     return server
 

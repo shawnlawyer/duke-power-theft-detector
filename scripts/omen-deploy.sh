@@ -2,12 +2,12 @@
 
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)"
 ENV_FILE="${OMEN_ENV_FILE:-$ROOT_DIR/.env.omen}"
-EXAMPLE_ENV_FILE="$ROOT_DIR/.env.omen.example"
 
 if [ -f "$ENV_FILE" ]; then
   set -a
+  # shellcheck disable=SC1090
   . "$ENV_FILE"
   set +a
 fi
@@ -16,6 +16,11 @@ command="${1:-all}"
 
 quote() {
   python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$1"
+}
+
+die() {
+  echo "Error: $*" >&2
+  exit 1
 }
 
 require_command() {
@@ -27,12 +32,17 @@ require_command() {
 
 require_command rsync
 require_command ssh
+require_command scp
 require_command curl
 require_command python3
 
+DEFAULT_APP_SECRET="local-power-data-only"
 OMEN_HOST="${OMEN_HOST:-192.168.1.120}"
 OMEN_SSH_USER="${OMEN_SSH_USER:-shawn}"
 OMEN_SSH_KEY="${OMEN_SSH_KEY:-$HOME/.ssh/omen_id_ed25519}"
+# Host keys are pinned on first use (accept-new) into a dedicated file so a
+# changed Omen host key fails loudly instead of being silently accepted.
+OMEN_KNOWN_HOSTS="${OMEN_KNOWN_HOSTS:-$ROOT_DIR/.tmp-deploy/omen_known_hosts}"
 OMEN_REMOTE_ROOT="${OMEN_REMOTE_ROOT:-/home/shawn/projects/home-energy-watch}"
 OMEN_REMOTE_RUNTIME="${OMEN_REMOTE_RUNTIME:-$OMEN_REMOTE_ROOT/runtime}"
 OMEN_BIND_IP="${OMEN_BIND_IP:-$OMEN_HOST}"
@@ -43,7 +53,7 @@ OMEN_HEALTH_RETRIES="${OMEN_HEALTH_RETRIES:-30}"
 OMEN_HEALTH_DELAY_SECONDS="${OMEN_HEALTH_DELAY_SECONDS:-2}"
 OMEN_HEALTH_MAX_TIME="${OMEN_HEALTH_MAX_TIME:-5}"
 POWER_ENV="${POWER_ENV:-staging}"
-POWER_APP_SECRET="${POWER_APP_SECRET:-local-power-data-only}"
+POWER_APP_SECRET="${POWER_APP_SECRET:-}"
 POWER_AUDIT_SIGNING_KEY="${POWER_AUDIT_SIGNING_KEY:-}"
 POWER_DATA_ENCRYPTION_KEY="${POWER_DATA_ENCRYPTION_KEY:-}"
 POWER_PUBLIC_BASE_URL="${POWER_PUBLIC_BASE_URL:-http://${OMEN_BIND_IP}:${OMEN_HOST_PORT}}"
@@ -66,43 +76,56 @@ STRIPE_API_VERSION="${STRIPE_API_VERSION:-2026-02-25.clover}"
 STRIPE_PRICE_HOME="${STRIPE_PRICE_HOME:-}"
 STRIPE_PRICE_REVIEW="${STRIPE_PRICE_REVIEW:-}"
 
+mkdir -p "$(dirname "$OMEN_KNOWN_HOSTS")"
+
 SSH_TARGET="$OMEN_SSH_USER@$OMEN_HOST"
-SSH_BASE="ssh -i $(quote "$OMEN_SSH_KEY") -o StrictHostKeyChecking=no $SSH_TARGET"
+# Single string for rsync -e; rsync splits it honoring the shell quoting.
+RSYNC_SSH="ssh -i $(quote "$OMEN_SSH_KEY") -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$(quote "$OMEN_KNOWN_HOSTS")"
 REMOTE_ROOT_Q="$(quote "$OMEN_REMOTE_ROOT")"
 REMOTE_RUNTIME_Q="$(quote "$OMEN_REMOTE_RUNTIME")"
+REMOTE_ENV_FILE="$OMEN_REMOTE_RUNTIME/.omen-deploy.env"
+REMOTE_ENV_FILE_Q="$(quote "$REMOTE_ENV_FILE")"
 IMAGE_TAG_Q="$(quote "$OMEN_IMAGE_TAG")"
 CONTAINER_Q="$(quote "$OMEN_CONTAINER_NAME")"
 PORT_MAP_Q="$(quote "${OMEN_BIND_IP}:${OMEN_HOST_PORT}:8000")"
 INPUT_VOLUME_Q="$(quote "${OMEN_REMOTE_RUNTIME}/input:/data/input")"
 OUTPUT_VOLUME_Q="$(quote "${OMEN_REMOTE_RUNTIME}/output:/data/output")"
-POWER_ENV_Q="$(quote "$POWER_ENV")"
-POWER_APP_SECRET_Q="$(quote "$POWER_APP_SECRET")"
-POWER_AUDIT_SIGNING_KEY_Q="$(quote "$POWER_AUDIT_SIGNING_KEY")"
-POWER_DATA_ENCRYPTION_KEY_Q="$(quote "$POWER_DATA_ENCRYPTION_KEY")"
-POWER_PUBLIC_BASE_URL_Q="$(quote "$POWER_PUBLIC_BASE_URL")"
-POWER_MARKETING_BASE_URL_Q="$(quote "$POWER_MARKETING_BASE_URL")"
-POWER_TRUST_PROXY_Q="$(quote "$POWER_TRUST_PROXY")"
-POWER_STAFF_MFA_REQUIRED_Q="$(quote "$POWER_STAFF_MFA_REQUIRED")"
-POWER_DATA_DELETION_ENABLED_Q="$(quote "$POWER_DATA_DELETION_ENABLED")"
-POWER_DATA_DELETION_POLICY_VERSION_Q="$(quote "$POWER_DATA_DELETION_POLICY_VERSION")"
-POWER_EMAIL_BACKEND_Q="$(quote "$POWER_EMAIL_BACKEND")"
-POWER_EMAIL_FROM_Q="$(quote "$POWER_EMAIL_FROM")"
-POWER_EMAIL_REPLY_TO_Q="$(quote "$POWER_EMAIL_REPLY_TO")"
-POWER_EMAIL_REGION_Q="$(quote "$POWER_EMAIL_REGION")"
-POWER_BILLING_ENABLED_Q="$(quote "$POWER_BILLING_ENABLED")"
-POWER_WEB_CONCURRENCY_Q="$(quote "$POWER_WEB_CONCURRENCY")"
-POWER_GUNICORN_TIMEOUT_Q="$(quote "$POWER_GUNICORN_TIMEOUT")"
-STRIPE_ACCOUNT_ID_Q="$(quote "$STRIPE_ACCOUNT_ID")"
-STRIPE_SECRET_KEY_Q="$(quote "$STRIPE_SECRET_KEY")"
-STRIPE_WEBHOOK_SECRET_Q="$(quote "$STRIPE_WEBHOOK_SECRET")"
-STRIPE_API_VERSION_Q="$(quote "$STRIPE_API_VERSION")"
-STRIPE_PRICE_HOME_Q="$(quote "$STRIPE_PRICE_HOME")"
-STRIPE_PRICE_REVIEW_Q="$(quote "$STRIPE_PRICE_REVIEW")"
 HEALTH_URL="http://${OMEN_BIND_IP}:${OMEN_HOST_PORT}/health"
 APP_URL="http://${OMEN_BIND_IP}:${OMEN_HOST_PORT}/"
+LOCAL_ENV_FILE=""
+
+cleanup_local_env_file() {
+  if [ -n "$LOCAL_ENV_FILE" ]; then
+    rm -f "$LOCAL_ENV_FILE"
+  fi
+}
+trap cleanup_local_env_file EXIT
+trap 'cleanup_local_env_file; exit 130' INT TERM
 
 remote_run() {
-  ssh -i "$OMEN_SSH_KEY" -o StrictHostKeyChecking=no "$SSH_TARGET" "$1"
+  ssh -i "$OMEN_SSH_KEY" \
+    -o StrictHostKeyChecking=accept-new \
+    -o "UserKnownHostsFile=$OMEN_KNOWN_HOSTS" \
+    "$SSH_TARGET" "$1"
+}
+
+remote_copy() {
+  scp -q -i "$OMEN_SSH_KEY" \
+    -o StrictHostKeyChecking=accept-new \
+    -o "UserKnownHostsFile=$OMEN_KNOWN_HOSTS" \
+    "$1" "$SSH_TARGET:$2"
+}
+
+require_app_secret() {
+  if [ -z "$POWER_APP_SECRET" ]; then
+    die "POWER_APP_SECRET is not set. Put a unique value of at least 32 characters in $ENV_FILE."
+  fi
+  if [ "$POWER_APP_SECRET" = "$DEFAULT_APP_SECRET" ]; then
+    die "POWER_APP_SECRET is the public default '$DEFAULT_APP_SECRET'. Set a unique value of at least 32 characters in $ENV_FILE."
+  fi
+  if [ "${#POWER_APP_SECRET}" -lt 32 ]; then
+    die "POWER_APP_SECRET must be at least 32 characters."
+  fi
 }
 
 ensure_remote_dirs() {
@@ -117,9 +140,10 @@ sync_repo() {
     --exclude '__pycache__' \
     --exclude '*.pyc' \
     --exclude '.env.omen' \
+    --exclude '.tmp-*' \
     --exclude 'data/' \
     --exclude 'runtime/' \
-    -e "ssh -i $OMEN_SSH_KEY -o StrictHostKeyChecking=no" \
+    -e "$RSYNC_SSH" \
     "$ROOT_DIR"/ \
     "$SSH_TARGET:$OMEN_REMOTE_ROOT/"
 }
@@ -128,7 +152,7 @@ seed_runtime_if_empty() {
   ensure_remote_dirs
   if [ -d "$ROOT_DIR/data/input" ]; then
     rsync -az --ignore-existing \
-      -e "ssh -i $OMEN_SSH_KEY -o StrictHostKeyChecking=no" \
+      -e "$RSYNC_SSH" \
       "$ROOT_DIR/data/input"/ \
       "$SSH_TARGET:$OMEN_REMOTE_RUNTIME/input/"
   fi
@@ -137,15 +161,75 @@ seed_runtime_if_empty() {
       --include 'power-history.db' \
       --include '*/' \
       --exclude '*' \
-      -e "ssh -i $OMEN_SSH_KEY -o StrictHostKeyChecking=no" \
+      -e "$RSYNC_SSH" \
       "$ROOT_DIR/data/output"/ \
       "$SSH_TARGET:$OMEN_REMOTE_RUNTIME/output/"
   fi
 }
 
+env_line() {
+  case "$2" in
+    *'
+'*)
+      die "$1 contains a newline; docker --env-file cannot carry it."
+      ;;
+  esac
+  printf '%s=%s\n' "$1" "$2"
+}
+
+# Container environment goes into a private file instead of the ssh/docker
+# command line, so secrets never appear in process listings or shell history.
+write_local_env_file() {
+  mkdir -p "$ROOT_DIR/.tmp-deploy"
+  LOCAL_ENV_FILE="$(umask 077 && mktemp "$ROOT_DIR/.tmp-deploy/omen-env.XXXXXX")"
+  (
+    umask 077
+    {
+      env_line POWER_INPUT_DIR /data/input
+      env_line POWER_OUTPUT_DIR /data/output
+      env_line POWER_DB_PATH /data/output/power-history.db
+      env_line POWER_ENV "$POWER_ENV"
+      env_line POWER_APP_SECRET "$POWER_APP_SECRET"
+      env_line POWER_AUDIT_SIGNING_KEY "$POWER_AUDIT_SIGNING_KEY"
+      env_line POWER_DATA_ENCRYPTION_KEY "$POWER_DATA_ENCRYPTION_KEY"
+      env_line POWER_PUBLIC_BASE_URL "$POWER_PUBLIC_BASE_URL"
+      env_line POWER_MARKETING_BASE_URL "$POWER_MARKETING_BASE_URL"
+      env_line POWER_TRUST_PROXY "$POWER_TRUST_PROXY"
+      env_line POWER_STAFF_MFA_REQUIRED "$POWER_STAFF_MFA_REQUIRED"
+      env_line POWER_DATA_DELETION_ENABLED "$POWER_DATA_DELETION_ENABLED"
+      env_line POWER_DATA_DELETION_POLICY_VERSION "$POWER_DATA_DELETION_POLICY_VERSION"
+      env_line POWER_EMAIL_BACKEND "$POWER_EMAIL_BACKEND"
+      env_line POWER_EMAIL_FROM "$POWER_EMAIL_FROM"
+      env_line POWER_EMAIL_REPLY_TO "$POWER_EMAIL_REPLY_TO"
+      env_line POWER_EMAIL_REGION "$POWER_EMAIL_REGION"
+      env_line POWER_BILLING_ENABLED "$POWER_BILLING_ENABLED"
+      env_line POWER_WEB_CONCURRENCY "$POWER_WEB_CONCURRENCY"
+      env_line POWER_GUNICORN_TIMEOUT "$POWER_GUNICORN_TIMEOUT"
+      env_line STRIPE_ACCOUNT_ID "$STRIPE_ACCOUNT_ID"
+      env_line STRIPE_SECRET_KEY "$STRIPE_SECRET_KEY"
+      env_line STRIPE_WEBHOOK_SECRET "$STRIPE_WEBHOOK_SECRET"
+      env_line STRIPE_API_VERSION "$STRIPE_API_VERSION"
+      env_line STRIPE_PRICE_HOME "$STRIPE_PRICE_HOME"
+      env_line STRIPE_PRICE_REVIEW "$STRIPE_PRICE_REVIEW"
+    } >"$LOCAL_ENV_FILE"
+  )
+  chmod 600 "$LOCAL_ENV_FILE"
+}
+
 deploy_remote() {
+  require_app_secret
   ensure_remote_dirs
-  remote_run "cd $REMOTE_ROOT_Q && docker build -t $IMAGE_TAG_Q . && (docker rm -f $CONTAINER_Q || true) && docker run -d --name $CONTAINER_Q --restart unless-stopped -e POWER_INPUT_DIR=/data/input -e POWER_OUTPUT_DIR=/data/output -e POWER_DB_PATH=/data/output/power-history.db -e POWER_ENV=$POWER_ENV_Q -e POWER_APP_SECRET=$POWER_APP_SECRET_Q -e POWER_AUDIT_SIGNING_KEY=$POWER_AUDIT_SIGNING_KEY_Q -e POWER_DATA_ENCRYPTION_KEY=$POWER_DATA_ENCRYPTION_KEY_Q -e POWER_PUBLIC_BASE_URL=$POWER_PUBLIC_BASE_URL_Q -e POWER_MARKETING_BASE_URL=$POWER_MARKETING_BASE_URL_Q -e POWER_TRUST_PROXY=$POWER_TRUST_PROXY_Q -e POWER_STAFF_MFA_REQUIRED=$POWER_STAFF_MFA_REQUIRED_Q -e POWER_DATA_DELETION_ENABLED=$POWER_DATA_DELETION_ENABLED_Q -e POWER_DATA_DELETION_POLICY_VERSION=$POWER_DATA_DELETION_POLICY_VERSION_Q -e POWER_EMAIL_BACKEND=$POWER_EMAIL_BACKEND_Q -e POWER_EMAIL_FROM=$POWER_EMAIL_FROM_Q -e POWER_EMAIL_REPLY_TO=$POWER_EMAIL_REPLY_TO_Q -e POWER_EMAIL_REGION=$POWER_EMAIL_REGION_Q -e POWER_BILLING_ENABLED=$POWER_BILLING_ENABLED_Q -e POWER_WEB_CONCURRENCY=$POWER_WEB_CONCURRENCY_Q -e POWER_GUNICORN_TIMEOUT=$POWER_GUNICORN_TIMEOUT_Q -e STRIPE_ACCOUNT_ID=$STRIPE_ACCOUNT_ID_Q -e STRIPE_SECRET_KEY=$STRIPE_SECRET_KEY_Q -e STRIPE_WEBHOOK_SECRET=$STRIPE_WEBHOOK_SECRET_Q -e STRIPE_API_VERSION=$STRIPE_API_VERSION_Q -e STRIPE_PRICE_HOME=$STRIPE_PRICE_HOME_Q -e STRIPE_PRICE_REVIEW=$STRIPE_PRICE_REVIEW_Q -p $PORT_MAP_Q -v $INPUT_VOLUME_Q -v $OUTPUT_VOLUME_Q $IMAGE_TAG_Q"
+  write_local_env_file
+  remote_run "umask 077 && : > $REMOTE_ENV_FILE_Q && chmod 600 $REMOTE_ENV_FILE_Q"
+  remote_copy "$LOCAL_ENV_FILE" "$REMOTE_ENV_FILE"
+  cleanup_local_env_file
+  LOCAL_ENV_FILE=""
+  # The image runs as an unprivileged user. On Omen the container runs as the
+  # SSH user's uid/gid so rsync seeding and the app share ownership of
+  # runtime/. A root helper container first takes ownership of anything an
+  # earlier root-run container left behind. The env file is removed whether
+  # or not the deploy succeeds.
+  remote_run "chmod 600 $REMOTE_ENV_FILE_Q; ( set -e; cd $REMOTE_ROOT_Q; docker build -t $IMAGE_TAG_Q .; docker run --rm --user 0:0 -v $INPUT_VOLUME_Q -v $OUTPUT_VOLUME_Q $IMAGE_TAG_Q chown -R \"\$(id -u):\$(id -g)\" /data/input /data/output; docker rm -f $CONTAINER_Q >/dev/null 2>&1 || true; docker run -d --name $CONTAINER_Q --restart unless-stopped --user \"\$(id -u):\$(id -g)\" --env-file $REMOTE_ENV_FILE_Q -p $PORT_MAP_Q -v $INPUT_VOLUME_Q -v $OUTPUT_VOLUME_Q $IMAGE_TAG_Q ); rc=\$?; rm -f $REMOTE_ENV_FILE_Q; exit \$rc"
 }
 
 wait_for_health() {
@@ -219,12 +303,14 @@ case "$command" in
     printf '%s\n' "$APP_URL"
     ;;
   all)
+    require_app_secret
     sync_repo
     seed_runtime_if_empty
     deploy_remote
     check_remote
     ;;
   takeover)
+    require_app_secret
     sync_repo
     seed_runtime_if_empty
     free_staging_port

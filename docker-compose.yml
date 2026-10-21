@@ -1,6 +1,10 @@
 services:
   power-detector:
     build: .
+    # The image runs as a non-root user. On Linux, run as your own uid so the
+    # bind-mounted ./data folders stay writable:
+    #   HEW_UID=$(id -u) HEW_GID=$(id -g) docker compose up --build
+    user: "${HEW_UID:-10001}:${HEW_GID:-10001}"
     ports:
       - "${POWER_WEB_PORT:-8001}:8000"
     environment:
