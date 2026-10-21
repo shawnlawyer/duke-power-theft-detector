@@ -4,6 +4,7 @@ import logging
 import json
 import os
 import re
+import time
 import zipfile
 from html import unescape
 from io import BytesIO, StringIO
@@ -4289,13 +4290,15 @@ def test_signed_in_session_ends_24_hours_after_login(tmp_path, monkeypatch, acto
         customer_sign_in(client)
     else:
         sign_in(client)
+    # Anchor to the clock at the moment of each request, with a minute of slack, so
+    # a second ticking over mid-test cannot push the "still valid" case past 24 hours.
+    almost_expired = int(time.time()) - (24 * 60 * 60 - 60)
     with client.session_transaction() as browser_session:
-        signed_in_at = browser_session["authenticated_at"]
-        browser_session["authenticated_at"] = signed_in_at - (24 * 60 * 60 - 1)
+        browser_session["authenticated_at"] = almost_expired
     assert client.get(path).status_code == 200
     with client.session_transaction() as browser_session:
-        assert browser_session["authenticated_at"] == signed_in_at - (24 * 60 * 60 - 1)
-        browser_session["authenticated_at"] = signed_in_at - 24 * 60 * 60
+        assert browser_session["authenticated_at"] == almost_expired
+        browser_session["authenticated_at"] = int(time.time()) - 24 * 60 * 60
     response = client.get(path, follow_redirects=False)
     assert response.status_code == 302
     assert "/login" in response.headers["Location"]

@@ -2961,6 +2961,13 @@ def validate_runtime_security() -> None:
     sslmode = parse_qs(parsed_database_url.query).get("sslmode", [""])[0].lower()
     if sslmode not in {"require", "verify-ca", "verify-full"}:
         raise RuntimeError("POWER_DATABASE_URL must require TLS in production.")
+    if sslmode != "verify-full":
+        # "require" encrypts but does not check the server certificate or host name.
+        emit_application_log(
+            "security.database_tls_unverified",
+            sslmode=sslmode,
+            recommendation="Use sslmode=verify-full with PGSSLROOTCERT pointing at the RDS CA bundle.",
+        )
     get_data_encryption_cipher()
     if email_delivery_backend() != "ses":
         raise RuntimeError("POWER_EMAIL_BACKEND must be ses in production.")
@@ -14122,10 +14129,22 @@ def create_web_app() -> Flask:
         # on the POST, so mail-security scanners that prefetch links cannot spend it,
         # and a forwarded link does not silently sign someone into another account.
         next_url = request.args.get("next") or ""
+        token = request.args.get("token", "")
+        # Look the token up without using it, so the page can name the account. A
+        # person sent someone else's link sees whose account it would open.
+        record = load_valid_customer_auth_token(token, "login")
+        account_email = str(record["customer_user"]["email"]) if record else ""
+        if not record:
+            staff_record = load_valid_staff_auth_token(token, "login")
+            account_email = str(staff_record["staff_user"]["email"]) if staff_record else ""
+        if not account_email:
+            flash("That sign-in link is no longer available.")
+            return redirect(url_for("login"))
         return render_template(
             "login_token_confirm.html",
             page_title="Finish Signing In",
-            token=request.args.get("token", ""),
+            token=token,
+            account_email=account_email,
             next_url=next_url if is_safe_local_path(next_url) else "",
         )
 
