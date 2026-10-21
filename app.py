@@ -67,6 +67,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
 from utility_guides import UTILITY_DOWNLOAD_GUIDES, get_utility_download_guide
+import national_grid
 
 try:
     import psycopg
@@ -1697,6 +1698,7 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
 
 
 def migrate_database(conn: DatabaseConnection) -> None:
+    national_grid.ensure_schema(conn)
     if conn.kind == "postgres":
         migrate_database_postgres(conn)
         ensure_equipment_history_table(conn)
@@ -8268,6 +8270,8 @@ def save_utility_connection(account_number: str | None, form_like) -> dict[str, 
     access_method = clean_optional_text(form_like.get("access_method")) or "customer_api_key"
     if access_method == DUKE_OAUTH_ACCESS_METHOD:
         raise ValueError("Use the Duke sign-in steps to create an automatic Duke connection.")
+    if access_method == national_grid.METHOD:
+        raise ValueError("Use National Grid sign-in to create this connection.")
     access_identifier = clean_optional_text(form_like.get("access_identifier"))
     if access_identifier and "://" in access_identifier:
         access_identifier = validate_utility_export_url(access_identifier)
@@ -8683,6 +8687,8 @@ def sync_utility_connection(account_number: str | None, connection_id: int) -> d
     connection = load_utility_connection_for_sync(account_number, connection_id)
     if connection["access_method"] == DUKE_OAUTH_ACCESS_METHOD:
         imported = sync_duke_oauth_connection(connection)
+    elif connection["access_method"] == national_grid.METHOD:
+        imported = national_grid.sync(sys.modules[__name__], connection)
     else:
         exported = fetch_utility_connection_export(connection)
         filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
@@ -10594,6 +10600,7 @@ def import_interval_frame_to_db(
     modified_time: float | None = None,
     adapter_id: str = "interval_frame",
     adapter_name: str = "Interval readings",
+    connection_guard: tuple[int, str] | None = None,
 ) -> dict[str, object]:
     if frame.empty:
         raise ValueError("No interval rows were found to import.")
@@ -10605,6 +10612,26 @@ def import_interval_frame_to_db(
     conflicts_skipped_count = 0
 
     with get_db_connection() as conn:
+        if connection_guard is not None:
+            # Lock the connection through import so withdrawal or replacement cannot
+            # race a completed fetch into an account after access has been removed.
+            connection_id, expected_secret = connection_guard
+            lock_suffix = " FOR UPDATE" if conn.kind == "postgres" else ""
+            if conn.kind != "postgres":
+                conn.execute("BEGIN IMMEDIATE")
+            connection_row = conn.execute(
+                "SELECT account_id, secret_token FROM utility_connections WHERE id = ?" + lock_suffix,
+                (connection_id,),
+            ).fetchone()
+            if connection_row is None or unseal_secret_value(connection_row["secret_token"]) != expected_secret:
+                raise ValueError("The utility connection changed before import. Please sync again.")
+            permitted = conn.execute("""SELECT accounts.id FROM accounts
+                WHERE accounts.id = ? AND accounts.account_number = ? AND EXISTS (
+                    SELECT 1 FROM account_data_authorizations WHERE account_id = accounts.id AND status = 'active')""",
+                (connection_row["account_id"], normalize_account_number(account_number)),
+            ).fetchone()
+            if permitted is None:
+                raise ValueError("Customer authorization was withdrawn before import.")
         account = get_or_create_account(
             conn,
             account_number,
@@ -12623,7 +12650,7 @@ def create_web_app() -> Flask:
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         form_action = "form-action 'self' https://app.homeenergywatch.com"
         if request.endpoint == "customer_utility_page":
-            form_action += " https://login.duke-energy.com"
+            form_action += " https://login.duke-energy.com https://greenbuttonconnect.nationalgrid.com"
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data: https:; style-src 'self'; "
@@ -13172,6 +13199,8 @@ def create_web_app() -> Flask:
             "get_utility_download_guide": get_utility_download_guide,
             "energy_company_choices": list_energy_companies(),
             "duke_oauth_helper_download_url": DUKE_OAUTH_HELPER_DOWNLOAD_URL,
+            "national_grid_available": national_grid.available(),
+            "national_grid_provider_matches": national_grid.provider_matches,
             "csrf_token": get_csrf_token,
             "today_iso": ddate.today().isoformat(),
             "app_base_url": build_public_base_url(),
@@ -16271,6 +16300,7 @@ def create_web_app() -> Flask:
             page_title="Your energy history" if actor["kind"] == "customer" else "Commission Review",
         )
 
+    national_grid.register_routes(app, sys.modules[__name__], current_customer_user)
     return app
 
 
