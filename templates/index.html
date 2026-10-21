@@ -6,11 +6,18 @@
       {% include "_analysis_surface.html" %}
     {% else %}
       <section class="section-block empty-state">
-        <div>
-          <h2>Bring the utility export into the record.</h2>
-          <p class="plain-note">The first step is a source file, a coverage period, a measured timeline, and a few review questions.</p>
-        </div>
-        <a class="button-link" href="{{ url_for('customer_history_page' if customer_mode|default(false) else 'history_page', account_number=account.account_number) }}">Upload the export</a>
+        {% if commission_read_only|default(false) %}
+          <div>
+            <h2>No usage history on this account yet.</h2>
+            <p class="plain-note">Findings appear here once the household or Home Energy Watch staff add a utility export.</p>
+          </div>
+        {% else %}
+          <div>
+            <h2>Bring the utility export into the record.</h2>
+            <p class="plain-note">The first step is a source file, a coverage period, a measured timeline, and a few review questions.</p>
+          </div>
+          <a class="button-link" href="{{ url_for('customer_history_page' if customer_mode|default(false) else 'history_page', account_number=account.account_number) }}">Upload the export</a>
+        {% endif %}
       </section>
     {% endif %}
   </main>

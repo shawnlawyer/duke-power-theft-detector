@@ -72,4 +72,4 @@ jobs:
           docker run --rm --network host
           -e POWER_TEST_POSTGRES_ADMIN_URL=postgresql://hew:hew-ci-only@127.0.0.1:5432/postgres
           home-energy-watch:postgres-ci
-          python -m pytest -p no:cacheprovider -q tests/test_app.py tests/test_data_hardening.py tests/test_access_control.py tests/test_national_grid.py
+          python -m pytest -p no:cacheprovider -q tests/test_app.py tests/test_data_hardening.py tests/test_access_control.py tests/test_commission_preview.py tests/test_national_grid.py

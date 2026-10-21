@@ -7,7 +7,7 @@
     </div>
   </div>
 
-  {% if staff_user.role == "Commissioner" %}
+  {% if staff_user.role == "Commissioner" and not commission_read_only|default(false) %}
     <form class="account-form" action="{{ url_for('invite_staff') }}" method="post">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="return_to" value="{{ request.full_path if request.query_string else request.path }}">
@@ -50,7 +50,7 @@
           <th>Status</th>
           <th>Authenticator</th>
           <th>Last sign-in</th>
-          {% if staff_user.role == "Commissioner" %}<th>Manage</th>{% endif %}
+          {% if staff_user.role == "Commissioner" and not commission_read_only|default(false) %}<th>Manage</th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -70,7 +70,7 @@
             </td>
             <td><span class="pill{% if not member.mfa_enabled %} danger{% endif %}">{{ "On" if member.mfa_enabled else "Off" }}</span></td>
             <td>{{ member.last_login_at or "Not yet" }}</td>
-            {% if staff_user.role == "Commissioner" %}
+            {% if staff_user.role == "Commissioner" and not commission_read_only|default(false) %}
               <td>
                 {% if member.id != staff_user.id %}
                   <div class="staff-manage-stack">
