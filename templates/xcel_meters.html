@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel">
+  <h1>Choose the electric meters for this account</h1>
+  <p>Xcel does not include your account number with these meters. Select only the meters that belong to account {{ account_number }}. If you cannot identify them, leave them unselected and contact Xcel before continuing.</p>
+  <form method="post" action="{{ url_for('xcel_meters') }}">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    {% for meter, label in points.items() %}
+      <label><input type="checkbox" name="meters" value="{{ meter }}"> {{ label }} — {{ meter.rsplit('/', 1)[-1] }}</label>
+    {% endfor %}
+    <label><input type="checkbox" name="confirmed" value="yes" required> I have checked that these meters belong to account {{ account_number }}.</label>
+    <button type="submit">Save these meters</button>
+  </form>
+  <p><a href="{{ url_for('customer_utility_page', account_number=account_number) }}">Return without connecting</a></p>
+</section>
+{% endblock %}
