@@ -10,7 +10,7 @@ TRIVY_CACHE_DIR="${TRIVY_CACHE_DIR:-/tmp/home-energy-watch-trivy-cache}"
 
 mkdir -p "$TRIVY_CACHE_DIR"
 
-docker build -t "$IMAGE_TAG" .
+docker build --pull --no-cache -t "$IMAGE_TAG" .
 docker run --rm "$IMAGE_TAG" python -m pytest
 docker run --rm \
   -v "$ROOT_DIR:/workspace:ro" \
