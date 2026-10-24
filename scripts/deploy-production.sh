@@ -191,7 +191,7 @@ require_release_commit() {
 build_project() {
   require_command docker
   log "Building Docker image with the repository Dockerfile"
-  docker build -t "$LOCAL_IMAGE_TAG" "$ROOT_DIR"
+  docker build --pull --no-cache -t "$LOCAL_IMAGE_TAG" "$ROOT_DIR"
 }
 
 build_id() {
@@ -340,7 +340,7 @@ if [[ ! -f "$env_file" ]]; then
 fi
 
 cd "$remote_root"
-docker build -t home-energy-watch:latest .
+docker build --pull --no-cache -t home-energy-watch:latest .
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.service /etc/systemd/system/home-energy-watch-utility-sync.service
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.timer /etc/systemd/system/home-energy-watch-utility-sync.timer
 sudo systemctl daemon-reload
@@ -417,7 +417,7 @@ if [[ ! -f "$env_file" ]]; then
 fi
 
 cd "$remote_root"
-docker build -t home-energy-watch:latest .
+docker build --pull --no-cache -t home-energy-watch:latest .
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.service /etc/systemd/system/home-energy-watch-utility-sync.service
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.timer /etc/systemd/system/home-energy-watch-utility-sync.timer
 sudo systemctl daemon-reload

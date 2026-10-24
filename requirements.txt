@@ -12,3 +12,6 @@ qrcode[pil]>=7.4,<9.0
 python-dateutil>=2.9,<3.0
 fido2>=2.2,<3.0
 stripe>=10.0,<12.0
+aiohttp>=3.14.5,<4.0
+certifi>=2026.10.23
+Pillow>=13.0.0,<14.0
