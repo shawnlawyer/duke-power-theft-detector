@@ -433,6 +433,24 @@
   {% include "_utility_download_guides.html" %}
 
   {% set provider_is_duke = 'duke' in ((selected_connection_provider or '')|lower) %}
+  {% if xcel_provider_matches(selected_connection_provider) %}
+    <div class="connection-workflow">
+      <h3>Connect your Xcel account</h3>
+      {% if xcel_available %}
+        <p class="plain-note">Sign in with Xcel in a new tab and choose what to share. Then confirm which electric meters belong to this account. Your password and verification codes stay with Xcel.</p>
+        {% if is_customer and can_manage_account %}
+          <form action="{{ url_for('xcel_start') }}" method="post" target="_blank" rel="noopener">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+            <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Connect Xcel</button>
+          </form>
+        {% endif %}
+        <p class="plain-note">Choose Sync now after connecting. Daily updates use completed electric-meter readings; estimates remain gaps. Remove the connection to stop updates here, and manage sharing with Xcel to withdraw permission there too.</p>
+      {% else %}
+        <p class="plain-note">Automatic updates are being prepared. You can still download your Xcel history and upload it here.</p>
+      {% endif %}
+    </div>
+  {% endif %}
   {% if national_grid_provider_matches(selected_connection_provider) %}
     <div class="connection-workflow">
       <h3>Connect your National Grid account</h3>
@@ -600,7 +618,7 @@
                 {% endif %}
               </td>
               <td>
-                {% if connection.access_method in ['duke_oauth', 'national_grid_oauth'] %}
+                {% if connection.access_method in ['duke_oauth', 'national_grid_oauth', 'xcel_oauth'] %}
                   Encrypted connection
                 {% elif connection.secret_last4 %}
                   Ending {{ connection.secret_last4 }}
