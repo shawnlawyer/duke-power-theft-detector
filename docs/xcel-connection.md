@@ -10,15 +10,19 @@ implied by deploying this connector.
 - Notification: `https://app.homeenergywatch.com/utility-connection/xcel/notifications`
 
 Both routes exist with collection disabled. The callback safely returns to the
-utility page without exchanging credentials; the notification route returns 503
-while disabled. Do not describe disabled endpoints as passing Xcel onboarding tests.
+utility page without exchanging credentials. Valid notifications receive HTTP 202
+with `collection: disabled` while collection is off, even without provider credentials.
+This acknowledges receipt only: no payload is retained, work queued, or data fetched.
+Malformed, oversized and unsupported notifications still receive 4xx responses.
+This does not establish provider approval or completed Xcel interoperability testing.
 
 ## Controls
 
 `POWER_XCEL_ENABLED` defaults off. Enabling requires `true`, an issued client ID
 and secret, and an HTTPS redirect on `POWER_PUBLIC_BASE_URL`. Do not enable as part
 of this release. The guard covers sign-in, callback, meter selection, transport,
-manual/scheduled sync, notification handling and the final import check.
+manual/scheduled sync and the final import check. Notification acknowledgment is
+independent of this guard and cannot enable collection.
 
 OAuth state is single-use, expires in ten minutes and is tied to the initiating
 customer, account and browser. Pending tokens and saved tokens are encrypted.

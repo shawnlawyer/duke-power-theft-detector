@@ -484,8 +484,6 @@ def register_routes(app, api, current_customer_user):
     def xcel_notification():
         # Public protocol endpoint, deliberately no login/CSRF. It never mutates
         # connections or performs I/O; the scheduled job verifies current grants.
-        if not available():
-            return {"status": "disabled"}, 503
         if request.mimetype not in ("application/atom+xml", "application/xml"):
             return {"error": "Unsupported content type"}, 415
         if request.content_length is None or request.content_length > 65536:
@@ -505,4 +503,6 @@ def register_routes(app, api, current_customer_user):
             return {"error": "Invalid notification"}, 400
         # Uniform result for known/unknown subscriptions. Daily polling uses only
         # stored, approved bindings, never the supplied notification URL or range.
-        return {"status": "accepted", "collection": "scheduled"}, 202
+        # Registration can verify receipt without enabling customer collection.
+        # Acknowledgment does not queue work or retain the notification payload.
+        return {"status": "accepted", "collection": "scheduled" if available() else "disabled"}, 202
