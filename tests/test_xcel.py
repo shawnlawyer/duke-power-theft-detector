@@ -122,7 +122,7 @@ def test_disabled_blocks_all_entry_points(setup, monkeypatch):
     monkeypatch.setenv("POWER_XCEL_ENABLED", "false")
     client.post("/utility-connection/xcel/start", data={"account_number": "123456"})
     client.get(xc.CALLBACK, query_string={"code": "code", "state": "s" * 43})
-    assert client.post(xc.NOTIFICATION).status_code == 503
+    assert client.post(xc.NOTIFICATION).status_code == 415
     assert b"Automatic updates are being prepared" in client.get("/customer/utility?account_number=123456").data
     with pytest.raises(xc.ConnectionError):
         app.sync_utility_connection("123456", connection["id"])
@@ -158,18 +158,32 @@ def test_selection_rejects_tampering_and_unconfirmed(setup):
         assert not app.list_utility_connections("123456")
 
 
-def test_csrf_and_notification_has_no_network_or_connection_effect(setup):
+@pytest.mark.parametrize("enabled", ["true", "false"])
+def test_csrf_and_notification_has_no_network_or_connection_effect(setup, monkeypatch, enabled):
     client, calls, _ = setup
+    monkeypatch.setenv("POWER_XCEL_ENABLED", enabled)
+    if enabled == "false":
+        monkeypatch.delenv("POWER_XCEL_CLIENT_ID")
+        monkeypatch.delenv("POWER_XCEL_CLIENT_SECRET")
     app.web_app.config["CSRF_ENFORCE_TESTS"] = True
     try:
         assert client.post("/utility-connection/xcel/start", data={"account_number": "123456"}).status_code == 400
         body = f'<BatchList xmlns="http://naesb.org/espi"><resources>{xc.RESOURCE}Batch/Subscription/sub1</resources></BatchList>'
-        assert client.post(xc.NOTIFICATION, data=body, content_type="application/atom+xml").status_code == 202
+        anonymous = app.web_app.test_client()
+        response = anonymous.post(xc.NOTIFICATION, data=body, content_type="application/atom+xml")
+        assert response.status_code == 202
+        assert response.json == {"status": "accepted", "collection": "scheduled" if enabled == "true" else "disabled"}
+        assert anonymous.post(xc.NOTIFICATION, data=body, content_type="application/atom+xml").json == response.json
+        assert client.post(xc.NOTIFICATION, data="<broken", content_type="application/xml").status_code == 400
+        assert client.post(xc.NOTIFICATION, data='<!DOCTYPE foo [<!ENTITY e SYSTEM "file:///etc/passwd">]><foo>&e;</foo>', content_type="application/xml").status_code == 400
         assert client.post(xc.NOTIFICATION, data=body.replace(xc.RESOURCE, "https://evil.example/"), content_type="application/atom+xml").status_code == 400
         assert client.post(xc.NOTIFICATION, data="x" * 65537, content_type="application/xml").status_code == 413
         assert client.post(xc.NOTIFICATION, json={}).status_code == 415
         assert not calls
         assert not app.list_utility_connections("123456")
+        with app.get_db_connection() as conn:
+            for table in ("xcel_oauth_states", "xcel_meter_bindings", "xcel_sync_locks"):
+                assert conn.execute("SELECT COUNT(*) AS n FROM " + table).fetchone()["n"] == 0
     finally:
         app.web_app.config["CSRF_ENFORCE_TESTS"] = False
 
