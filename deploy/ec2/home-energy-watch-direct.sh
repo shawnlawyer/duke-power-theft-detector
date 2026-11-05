@@ -67,7 +67,7 @@ mv -f "$tmp_env_file" "$RUNTIME_ENV_FILE"
 
 if ! docker image inspect "$HEW_IMAGE" >/dev/null 2>&1; then
   echo "Image $HEW_IMAGE not found locally; building it once from $ROOT_DIR." >&2
-  docker build -t "$HEW_IMAGE" "$ROOT_DIR"
+  docker build --pull --no-cache -t "$HEW_IMAGE" "$ROOT_DIR"
 fi
 
 docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
