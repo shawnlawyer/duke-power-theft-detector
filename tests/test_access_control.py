@@ -397,6 +397,7 @@ def test_opening_the_sign_in_link_does_not_use_it_up(tmp_path, monkeypatch):
         page = client.get("/login/token", query_string={"token": token})
         assert page.status_code == 200
         assert b"Continue to Home Energy Watch" in page.data
+        assert b"owner@example.com" in page.data
     with client.session_transaction() as flask_session:
         assert flask_session.get("customer_user_id") is None
 
@@ -624,3 +625,34 @@ def test_failed_stripe_event_can_be_retried(tmp_path, monkeypatch):
     assert app.process_stripe_event(event) == "processed"
     assert app.process_stripe_event(event) == "duplicate"
     assert calls == ["evt_retry", "evt_retry"]
+
+
+def test_sign_in_link_that_no_longer_works_goes_back_to_sign_in(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+
+    response = client.get("/login/token", query_string={"token": "not-a-real-token"}, follow_redirects=False)
+
+    assert response.status_code == 302
+    assert "/login" in response.headers["Location"]
+
+
+def test_production_logs_a_warning_for_unverified_database_tls(monkeypatch):
+    events = []
+    monkeypatch.setattr(app, "emit_application_log", lambda event, **fields: events.append((event, fields)))
+    monkeypatch.setenv("POWER_ENV", "production")
+    monkeypatch.setenv("POWER_APP_SECRET", "x" * 40)
+    monkeypatch.setenv("POWER_AUDIT_SIGNING_KEY", "y" * 40)
+    monkeypatch.setenv("POWER_PUBLIC_BASE_URL", "https://app.homeenergywatch.com")
+    monkeypatch.setenv("POWER_DATABASE_URL", "postgresql://u:p@db.example.com/hew?sslmode=require")
+    with pytest.raises(RuntimeError):
+        app.validate_runtime_security()  # later production checks (encryption key, email) are not configured here
+
+    assert [fields["sslmode"] for event, fields in events if event == "security.database_tls_unverified"] == ["require"]
+
+    events.clear()
+    monkeypatch.setenv("POWER_DATABASE_URL", "postgresql://u:p@db.example.com/hew?sslmode=verify-full")
+    with pytest.raises(RuntimeError):
+        app.validate_runtime_security()
+    assert not [event for event, _ in events if event == "security.database_tls_unverified"]
