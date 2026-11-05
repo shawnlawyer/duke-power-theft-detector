@@ -67,10 +67,10 @@ class ProductionDeployContractTest(unittest.TestCase):
         script_text = (ROOT / "scripts" / "deploy-production.sh").read_text()
 
         self.assertIn('git -C "$ROOT_DIR" rev-parse --short=12 HEAD', script_text)
-        self.assertIn('docker build -t "$image_repo:$release_sha" .', script_text)
+        self.assertIn('docker build --pull --no-cache -t "$image_repo:$release_sha" .', script_text)
         self.assertIn('docker tag "$current_ref" "$image_repo:previous"', script_text)
         self.assertIn('docker tag "$image_repo:$release_sha" "$image_repo:current"', script_text)
-        self.assertNotIn("docker build -t home-energy-watch:latest .", script_text)
+        self.assertNotIn("docker build --pull --no-cache -t home-energy-watch:latest .", script_text)
 
     def test_deploy_rolls_back_image_on_failed_health(self):
         script_text = (ROOT / "scripts" / "deploy-production.sh").read_text()
@@ -182,7 +182,7 @@ class ProductionDeployContractTest(unittest.TestCase):
             self.assertEqual(oct((work / "run" / "web.env").stat().st_mode & 0o777), "0o600")
 
             calls = run(base_env, image_exists=False)
-            self.assertIn("docker build -t home-energy-watch:current", calls)
+            self.assertIn("docker build --pull --no-cache -t home-energy-watch:current", calls)
 
             calls = run(base_env + "POWER_BIND_ADDRESS=127.0.0.1\nPOWER_WEB_PORT=8080\n", image_exists=True)
             self.assertIn(" -p 127.0.0.1:8080:8000 ", calls)

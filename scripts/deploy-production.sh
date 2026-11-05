@@ -214,7 +214,7 @@ require_release_commit() {
 build_project() {
   require_command docker
   log "Building Docker image with the repository Dockerfile"
-  docker build -t "$LOCAL_IMAGE_TAG" "$ROOT_DIR"
+  docker build --pull --no-cache -t "$LOCAL_IMAGE_TAG" "$ROOT_DIR"
 }
 
 build_id() {
@@ -403,7 +403,7 @@ done
 
 cd "$remote_root"
 # Build once, tagged by commit. The running service is not touched here.
-docker build -t "$image_repo:$release_sha" .
+docker build --pull --no-cache -t "$image_repo:$release_sha" .
 rm -f "$artifact"
 printf '%s\n' "Backup created: $backup"
 printf '%s\n' "Built image: $image_repo:$release_sha"
@@ -553,7 +553,7 @@ fi
 cd "$remote_root"
 # Rebuild the restored source and make it the image systemd runs.
 rollback_tag="$image_repo:rollback-$timestamp"
-docker build -t "$rollback_tag" .
+docker build --pull --no-cache -t "$rollback_tag" .
 docker tag "$rollback_tag" "$image_repo:current"
 docker tag "$rollback_tag" "$image_repo:latest"
 sudo install -m 0644 deploy/ec2/home-energy-watch-utility-sync.service /etc/systemd/system/home-energy-watch-utility-sync.service
