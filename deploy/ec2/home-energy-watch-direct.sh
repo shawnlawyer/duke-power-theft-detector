@@ -66,6 +66,9 @@ exec docker run \
   -e STRIPE_WEBHOOK_SECRET \
   -e STRIPE_API_VERSION \
   -e STRIPE_PRICE_HOME \
+  -e STRIPE_PRICE_ESSENTIAL \
+  -e STRIPE_PRICE_PLUS \
+  -e STRIPE_PRICE_PROFESSIONAL \
   -e STRIPE_PRICE_REVIEW \
   -e POWER_INPUT_DIR=/srv/home-energy-watch/input \
   -e POWER_OUTPUT_DIR=/srv/home-energy-watch/output \

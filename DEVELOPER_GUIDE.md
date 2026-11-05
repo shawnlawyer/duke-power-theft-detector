@@ -35,7 +35,7 @@ Tests use temporary paths. Never point tests at the production database.
 | Shared shell | `templates/base.html`, `static/styles.css`, `static/app.js` | signed-in layout, navigation, shared behavior |
 | Customer pages | `templates/customer_*.html`, `templates/history_page.html`, `templates/_account_panel.html` | homeowner account, history, notes, household setup, billing |
 | Review pages | `templates/index.html`, `templates/_analysis_surface.html`, `templates/_staff_panel.html` | commission/reviewer dashboard and drilldowns |
-| Public pages | `templates/marketing_*.html`, `templates/marketing_base.html`, `static/marketing.css` | public website and product copy |
+| Public pages | `templates/marketing_*.html`, `templates/marketing_base.html`, `static/hew-design.css`, `templates/_hew_ui.html` | public website and product copy |
 | Database setup | `migrate_database_postgres()` and `migrate_database()` in `app.py` | Postgres and SQLite schema creation/migrations |
 | Utility adapters | parser classes near `parse_interval_file()` | Green Button ESPI XML, Duke-style XML, and interval CSV |
 | Tests | `tests/test_app.py`, `tests/test_omen_deploy_contract.py`, `tests/test_release_security_contract.py` | behavior, import, security, and deployment contracts |

@@ -2080,7 +2080,7 @@ def test_customer_signup_keeps_entered_values_on_validation_error(tmp_path, monk
             "meter_value": "Meter-99",
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
-            "plan_id": "home",
+            "plan_id": "plus",
             "accept_policies": "yes",
             "confirm_account_authority": "yes",
         },
@@ -2096,7 +2096,7 @@ def test_customer_signup_keeps_entered_values_on_validation_error(tmp_path, monk
     assert b'value="Meter-99"' in response.data
     assert b'value="123 Main St Charlotte NC"' in response.data
     assert b'value="28205"' in response.data
-    assert b'value="home"' in response.data
+    assert b'value="plus"' in response.data
     assert b"checked" in response.data
     assert b'value="short"' not in response.data
 
@@ -2601,15 +2601,39 @@ def test_viewer_can_read_account_but_cannot_change_it(tmp_path, monkeypatch):
 def test_billing_plans_do_not_publish_unapproved_prices(monkeypatch):
     monkeypatch.delenv("POWER_BILLING_ENABLED", raising=False)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_stale")
-    monkeypatch.setenv("STRIPE_PRICE_HOME", "price_stale_home")
-    plans = app.list_billing_plans()
-    home = next(plan for plan in plans if plan["id"] == "home")
+    monkeypatch.setenv("STRIPE_PRICE_PLUS", "price_stale_plus")
+    offered = app.list_offered_billing_plans()
+    plans = {plan["id"]: plan for plan in app.list_billing_plans()}
 
-    assert len(plans) == 1
-    assert home["annual_price_label"] == "$239.88 / year"
-    assert home["billing_interval"] == "year"
-    assert home["account_limit"] == 1
-    assert home["payment_ready"] is False
+    assert [plan["id"] for plan in offered] == ["essential", "plus", "professional"]
+    assert [plan["price_label"] for plan in offered] == ["$7 / month", "$12 / month", "$24 / month"]
+    assert all(plan["billing_interval"] == "month" for plan in offered)
+    assert plans["professional"]["account_limit"] == 10
+    assert all(plan["payment_ready"] is False for plan in offered)
+    # Existing annual subscribers keep their plan, but it is not sold to new customers.
+    assert plans["home"]["offered"] is False
+    assert plans["home"]["price_label"] == "$239.88 / year"
+
+
+def test_plan_features_match_the_pricing_tiers():
+    assert app.plan_has_feature("essential", "overnight_baseline")
+    assert not app.plan_has_feature("essential", "anomaly_detection")
+    assert app.plan_has_feature("plus", "anomaly_detection")
+    assert not app.plan_has_feature("plus", "multi_account")
+    assert app.plan_has_feature("professional", "multi_account")
+    assert app.plan_has_feature("home", "appliance_insights")
+    assert not app.plan_has_feature("unknown", "usage_analytics")
+
+
+def test_checkout_refuses_the_retired_annual_plan(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    install_fake_stripe(monkeypatch)
+    customer = app.create_customer_user("owner@example.com", "Owner")
+    authorize_account("duke-checkout", email="owner@example.com")
+
+    with pytest.raises(ValueError, match="no longer offered"):
+        app.create_customer_checkout_session(customer, "home", "https://app.homeenergywatch.com", "duke-checkout")
+    assert FakeStripeCheckoutSession.calls == []
 
 
 def test_customer_signup_saves_selected_billing_plan(tmp_path, monkeypatch):
@@ -2704,7 +2728,7 @@ class FakeStripeCheckout:
 
 
 class FakeStripePrice:
-    retrieve_result = {"active": True, "unit_amount": 23988, "currency": "usd", "recurring": {"interval": "year", "interval_count": 1}, "livemode": False}
+    retrieve_result = {"active": True, "unit_amount": 1200, "currency": "usd", "recurring": {"interval": "month", "interval_count": 1}, "livemode": False}
 
     @classmethod
     def retrieve(cls, _price_id):
@@ -2788,7 +2812,7 @@ class FakeStripe:
 
 
 def install_fake_stripe(monkeypatch):
-    FakeStripePrice.retrieve_result = {"active": True, "unit_amount": 23988, "currency": "usd", "recurring": {"interval": "year", "interval_count": 1}, "livemode": False}
+    FakeStripePrice.retrieve_result = {"active": True, "unit_amount": 1200, "currency": "usd", "recurring": {"interval": "month", "interval_count": 1}, "livemode": False}
     FakeStripeCheckoutSession.calls = []
     FakeStripeCheckoutSession.retrieve_result = None
     FakeStripeBillingPortalSession.calls = []
@@ -2809,6 +2833,9 @@ def install_fake_stripe(monkeypatch):
     monkeypatch.setenv("STRIPE_ACCOUNT_ID", "acct_1TEP6v39IosmExPF")
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_home_energy_watch")
     monkeypatch.setenv("STRIPE_PRICE_HOME", "price_home_123")
+    monkeypatch.setenv("STRIPE_PRICE_ESSENTIAL", "price_essential_123")
+    monkeypatch.setenv("STRIPE_PRICE_PLUS", "price_plus_123")
+    monkeypatch.setenv("STRIPE_PRICE_PROFESSIONAL", "price_professional_123")
     monkeypatch.setenv("STRIPE_PRICE_REVIEW", "price_review_456")
     monkeypatch.setenv("STRIPE_API_VERSION", "2026-02-25.clover")
 
@@ -2911,7 +2938,7 @@ def test_customer_signup_paid_plan_redirects_to_stripe_checkout(tmp_path, monkey
             "account_number": "duke-123",
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
-            "plan_id": "home",
+            "plan_id": "plus",
             "accept_policies": "yes",
             "confirm_account_authority": "yes",
         },
@@ -2924,13 +2951,13 @@ def test_customer_signup_paid_plan_redirects_to_stripe_checkout(tmp_path, monkey
     assert response.status_code == 302
     assert response.headers["Location"] == "https://checkout.stripe.com/c/cs_test_123"
     assert checkout_call["mode"] == "subscription"
-    assert checkout_call["line_items"] == [{"price": "price_home_123", "quantity": 1}]
+    assert checkout_call["line_items"] == [{"price": "price_plus_123", "quantity": 1}]
     assert checkout_call["success_url"] == "https://app.homeenergywatch.com/billing/success?session_id={CHECKOUT_SESSION_ID}"
     assert checkout_call["cancel_url"] == "https://app.homeenergywatch.com/billing/cancel"
     assert checkout_call["allow_promotion_codes"] is True
     assert checkout_call["metadata"]["project"] == "home-energy-watch"
     assert checkout_call["metadata"]["customer_user_id"] == str(customer["id"])
-    assert checkout_call["metadata"]["plan_id"] == "home"
+    assert checkout_call["metadata"]["plan_id"] == "plus"
     assert billing["status"] == "checkout_started"
     assert billing["checkout_session_id"] == "cs_test_123"
     assert billing["stripe_customer_id"] == "cus_123"
@@ -2947,8 +2974,8 @@ def test_customer_checkout_rejects_monthly_price(tmp_path, monkeypatch):
         "active": True, "unit_amount": 1900, "currency": "usd",
         "recurring": {"interval": "month", "interval_count": 1}, "livemode": False,
     }
-    with pytest.raises(ValueError, match="annual account price"):
-        app.create_customer_checkout_session(customer, "home", "https://app.homeenergywatch.com", "duke-checkout")
+    with pytest.raises(ValueError, match="Plus price is not configured"):
+        app.create_customer_checkout_session(customer, "plus", "https://app.homeenergywatch.com", "duke-checkout")
     assert FakeStripeCheckoutSession.calls == []
 
 
@@ -2959,17 +2986,17 @@ def test_customer_checkout_redirects_to_stripe_checkout_session(tmp_path, monkey
     monkeypatch.setenv("POWER_PUBLIC_BASE_URL", "https://app.homeenergywatch.com")
     customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
     authorize_account("duke-checkout", email="owner@example.com")
-    app.record_customer_plan_selection(int(customer["id"]), "home")
+    app.record_customer_plan_selection(int(customer["id"]), "plus")
 
     client = app.web_app.test_client()
     customer_sign_in(client)
-    response = client.post("/billing/checkout", data={"plan_id": "home"}, follow_redirects=False)
+    response = client.post("/billing/checkout", data={"plan_id": "plus"}, follow_redirects=False)
     billing = app.load_customer_billing(int(customer["id"]))
     checkout_call = FakeStripeCheckoutSession.calls[0]
 
     assert response.status_code == 302
     assert response.headers["Location"] == "https://checkout.stripe.com/c/cs_test_123"
-    assert checkout_call["line_items"] == [{"price": "price_home_123", "quantity": 1}]
+    assert checkout_call["line_items"] == [{"price": "price_plus_123", "quantity": 1}]
     assert checkout_call["allow_promotion_codes"] is True
     assert checkout_call["subscription_data"]["metadata"]["project_name"] == "Home Energy Watch"
     assert billing["checkout_session_id"] == "cs_test_123"
@@ -2986,7 +3013,7 @@ def test_customer_checkout_stays_closed_without_pricing_approval(tmp_path, monke
     customer = app.create_customer_user("owner@example.com", "Home Owner", "customer-password-123")
 
     with pytest.raises(ValueError, match="Online payment is not open yet"):
-        app.create_customer_checkout_session(customer, "home", "https://app.homeenergywatch.com")
+        app.create_customer_checkout_session(customer, "plus", "https://app.homeenergywatch.com")
     assert FakeStripeCheckoutSession.calls == []
 
 
@@ -3233,20 +3260,48 @@ def test_marketing_host_renders_public_homepage(tmp_path, monkeypatch):
     response = client.get("/", base_url="https://homeenergywatch.com")
 
     assert response.status_code == 200
-    assert b"Read your own meter data the way a reviewer would." in response.data
-    assert b"Duke Energy Progress" in response.data
-    assert b"Uploads stack up instead of overwriting each other." in response.data
-    assert b"$239.88 / year" in response.data
-    assert b"Unlimited saved reports while the subscription is active" in response.data
+    assert b"Every kilowatt tells a story. Understand yours." in response.data
+    assert b"From your utility data to everyday clarity." in response.data
+    assert b"$7" in response.data and b"$12" in response.data and b"$24" in response.data
+    assert b"Most Popular" in response.data
+    # Sample figures are labelled, and no cost estimate is claimed.
+    assert b"Sample data" in response.data
+    assert b"Est. cost" not in response.data
     # The public page must keep stating the limits the product is honest about.
     assert b"Duke automatic updates require a one-time setup." in response.data
     assert b"It never receives your Duke password." in response.data
     assert b"It is not live monitoring." in response.data
-    assert b">Homeowners</a>" in response.data
-    assert b">Review desk</a>" in response.data
-    assert b">Start a review</a>" in response.data
+    assert b"not proof of theft" in response.data
+    assert b">Features</a>" in response.data
+    assert b">For Professionals</a>" in response.data
+    assert b">Get Started</a>" in response.data
     assert b"https://app.homeenergywatch.com/signup" in response.data
     assert b"Commission Sign In" not in response.data
+    assert b"style=" not in response.data
+
+
+def test_new_public_pages_render(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+
+    expected = {
+        "/features": b"Powerful insights. A clearer understanding.",
+        "/for-professionals": b"Energy intelligence for every account you manage.",
+        "/about": b"Better energy understanding begins with better information.",
+        "/contact": b"mailto:support@homeenergywatch.com",
+        "/how-it-works": b"From energy data to everyday clarity.",
+        "/for-homeowners": b"Feel more connected to your home.",
+    }
+    for path, text in expected.items():
+        response = client.get(path, base_url="https://homeenergywatch.com")
+        assert response.status_code == 200, path
+        assert text in response.data, path
+        assert b"style=" not in response.data, path
+
+    sitemap = client.get("/sitemap.xml", base_url="https://homeenergywatch.com")
+    for path in ("/features", "/for-professionals", "/about", "/contact"):
+        assert f"https://homeenergywatch.com{path}".encode() in sitemap.data
 
 
 def test_marketing_host_redirects_app_routes_to_app_subdomain(tmp_path, monkeypatch):
@@ -3322,9 +3377,11 @@ def test_marketing_pricing_page_uses_public_copy(tmp_path, monkeypatch):
     response = client.get("/pricing", base_url="https://homeenergywatch.com")
 
     assert response.status_code == 200
-    assert b"One account, one clear record." in response.data
-    assert b"Home Watch" in response.data
-    assert b"$239.88 / year" in response.data
+    assert b"Find the right view of your energy." in response.data
+    for name in (b"Essential", b"Plus", b"Professional"):
+        assert name in response.data
+    assert b"signup?plan_id=plus" in response.data
+    assert b"$239.88" not in response.data
     assert b"commission access remains free and read-only" in response.data
     assert b"Pricing being finalized" not in response.data
 

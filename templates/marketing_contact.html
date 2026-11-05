@@ -1,0 +1,36 @@
+{% extends "marketing_base.html" %}
+{% from "_hew_ui.html" import icon %}
+
+{% block content %}
+  <section class="hew-page-hero">
+    <div class="hew-wrap">
+      <span class="hew-eyebrow">Contact</span>
+      <h1>We're here to help you make sense of your energy.</h1>
+      <p class="hew-lead">Questions about your account, your reports or Home Energy Watch? Send us a message and we'll help you find the right next step.</p>
+      <a class="hew-btn hew-btn-primary" href="mailto:{{ support_email }}">{{ icon("mail") }} Email {{ support_email }}</a>
+    </div>
+  </section>
+
+  <section class="hew-section">
+    <div class="hew-wrap hew-contact-grid">
+      <article class="hew-card">
+        <span class="hew-icon-tile">{{ icon("home") }}</span>
+        <h3>Account and sign-in</h3>
+        <p class="hew-muted">Trouble signing in, adding someone to your account or changing your details.</p>
+        <a href="mailto:{{ support_email }}?subject=Account%20question">Ask about your account</a>
+      </article>
+      <article class="hew-card">
+        <span class="hew-icon-tile is-blue">{{ icon("upload") }}</span>
+        <h3>Utility data</h3>
+        <p class="hew-muted">Downloading your utility file, connecting automatically or a file that won't import.</p>
+        <a href="mailto:{{ support_email }}?subject=Utility%20data%20question">Ask about utility data</a>
+      </article>
+      <article class="hew-card">
+        <span class="hew-icon-tile is-mint">{{ icon("document") }}</span>
+        <h3>Billing and plans</h3>
+        <p class="hew-muted">Choosing a plan, receipts or managing your subscription.</p>
+        <a href="mailto:{{ support_email }}?subject=Billing%20question">Ask about billing</a>
+      </article>
+    </div>
+  </section>
+{% endblock %}
