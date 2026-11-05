@@ -43,9 +43,9 @@
                 <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}"><span>Inventory</span><small>Loads</small></a>
                 <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}"><span>History</span><small>Uploads</small></a>
                 <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}"><span>Staff</span><small>Team</small></a>
-                <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}"><span>Security</span><small>Access</small></a>
               {% endif %}
-              {% if staff_user.role == "Commissioner" %}
+              <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}"><span>Security</span><small>Access</small></a>
+              {% if staff_user.role == "Commissioner" and not commission_read_only|default(false) %}
                 <a class="{% if request.endpoint in ['data_requests_page', 'review_data_request', 'execute_data_request', 'place_legal_hold', 'release_legal_hold'] %}active{% endif %}" href="{{ url_for('data_requests_page') }}"><span>Data requests</span><small>Records</small></a>
                 <a class="{% if request.endpoint == 'audit_page' %}active{% endif %}" href="{{ url_for('audit_page') }}"><span>Audit</span><small>History</small></a>
               {% endif %}
@@ -65,7 +65,7 @@
             <div>
               <span class="label">Signed in</span>
               <strong>{{ active_user.full_name }}</strong>
-              <p>{{ staff_user.role if staff_user else "Customer account" }}</p>
+              <p>{% if commission_preview %}Previewing {{ commission_preview.name }}{% else %}{{ staff_user.role if staff_user else "Customer account" }}{% endif %}</p>
             </div>
             <form action="{{ url_for('logout') }}" method="post">
               <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
@@ -75,6 +75,15 @@
         </aside>
 
         <div class="app-main-shell">
+          {% if commission_preview %}
+            <div class="commission-preview-banner" role="status">
+              <p><strong>Commission preview:</strong> you are seeing exactly what {{ commission_preview.name }} sees. Everything is read-only.</p>
+              <form action="{{ url_for('stop_commission_preview') }}" method="post">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                <button type="submit" class="button-secondary button-small">Exit preview</button>
+              </form>
+            </div>
+          {% endif %}
           <header class="app-topbar">
             <div>
               <p class="eyebrow">{{ "Review desk" if staff_user else "Homeowner record" }}</p>
