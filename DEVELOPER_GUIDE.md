@@ -43,7 +43,7 @@ Tests use temporary paths. Never point tests at the production database.
 
 ## Runtime and data flow
 
-`web_app = create_app()` builds Flask. `ensure_database()` selects the backend from `POWER_DATABASE_URL`:
+`web_app = create_web_app()` builds Flask. `ensure_database()` selects the backend from `POWER_DATABASE_URL`:
 
 - without a Postgres URL: SQLite at `POWER_DB_PATH` or the default output path;
 - with `postgresql://...`: RDS/Postgres through `psycopg`.
@@ -75,7 +75,7 @@ Keep measurement separate from interpretation. A flagged interval is a review pr
 
 Customer and commission identities use separate database records, but the public `/login` flow resolves both through shared, one-time email-link sign-in. Legacy password-reset endpoints remain available only for migration and older platform-operator records; new customer and commission records do not store passwords.
 
-Use the existing helpers inside `create_app()`:
+Use the existing helpers inside `create_web_app()`:
 
 - `current_customer_user()` and `current_staff_user()` validate sessions;
 - `require_customer_user()` and `require_staff_user()` protect page/API access;
@@ -166,7 +166,7 @@ Subscribers can create unlimited reports while active. Commission access is free
 | Billing | `POST /billing/checkout`, `/billing/success`, `/billing/cancel`, `POST /billing/portal`, `POST /stripe/webhook` |
 | Operations | `/health`, `/robots.txt`, `/sitemap.xml` |
 
-Routes are declared inside `create_app()`. Use the route-level authorization helper before loading account data or changing state.
+Routes are declared inside `create_web_app()`. Use the route-level authorization helper before loading account data or changing state.
 
 ## Safe change recipes
 
