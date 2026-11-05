@@ -8,7 +8,9 @@ Requires=docker.service
 Type=simple
 WorkingDirectory=/home/ubuntu/home-energy-watch
 ExecStart=/bin/bash /home/ubuntu/home-energy-watch/deploy/ec2/home-energy-watch-direct.sh
-ExecStop=/usr/bin/docker stop home-energy-watch
+# Give gunicorn's 30-second graceful shutdown room to finish in-flight requests.
+ExecStop=/usr/bin/docker stop -t 35 home-energy-watch
+TimeoutStopSec=45
 ExecStopPost=/usr/bin/docker rm -f home-energy-watch
 Restart=always
 RestartSec=5
