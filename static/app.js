@@ -306,6 +306,7 @@
     const nicknameInput = form.querySelector('input[name="nickname"]');
     const csrfToken = csrfTokenForForm(form);
     const nickname = nicknameInput ? nicknameInput.value.trim() : "";
+    const codeInput = form.querySelector('input[name="code"]');
 
     if (status) {
       status.textContent = "Creating your passkey...";
@@ -318,7 +319,7 @@
         "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
         "X-CSRF-Token": csrfToken,
       },
-      body: new URLSearchParams({ nickname }),
+      body: new URLSearchParams(codeInput ? { nickname, code: codeInput.value.trim() } : { nickname }),
     });
     const startPayload = await startResponse.json();
     if (!startResponse.ok) {
