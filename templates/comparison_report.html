@@ -7,6 +7,7 @@
         <div>
           <h2>Comparison packet</h2>
           <p class="plain-note">{{ comparison_packet.left_label }} compared with {{ comparison_packet.right_label }} using {{ comparison_packet.alignment_label }} matching.</p>
+          <p class="plain-note analysis-caveat">Flagged intervals are prompts for review, not proof of theft, tampering, or a billing error.</p>
         </div>
         <div class="inline-link-row">
           {% for report in comparison_packet.report_files %}
