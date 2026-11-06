@@ -6,6 +6,7 @@
     <title>{{ page_title or "Home Energy Watch" }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
     <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+    {% block extra_head %}{% endblock %}
   </head>
   {% set active_user = staff_user if staff_user else customer_user %}
   <body class="{{ 'app-body' if active_user else 'auth-body' }}">
@@ -43,6 +44,9 @@
                 <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}"><span>Inventory</span><small>Loads</small></a>
                 <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}"><span>History</span><small>Uploads</small></a>
                 <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}"><span>Staff</span><small>Team</small></a>
+                {% if staff_user.role == "Commissioner" %}
+                  <a class="{% if (request.endpoint or '').startswith('utility_onboarding_') %}active{% endif %}" href="{{ url_for('utility_onboarding_list') }}"><span>Utilities</span><small>Onboarding</small></a>
+                {% endif %}
                 <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}"><span>Security</span><small>Access</small></a>
               {% endif %}
               {% if staff_user.role == "Commissioner" %}
