@@ -1,35 +1,32 @@
 {% extends "marketing_base.html" %}
+{% from "_hew_ui.html" import icon %}
 
 {% block content %}
-  <main class="marketing-main compact-main">
-    <section class="page-intro">
-      <h1>For commissions that need a cleaner overnight-load review.</h1>
-      <p>Keep the source files, line up comparable periods, and hold onto a tighter record when the question needs follow-up.</p>
-    </section>
+  <section class="hew-page-hero">
+    <div class="hew-wrap">
+      <span class="hew-eyebrow">For utility commissions</span>
+      <h1>A clearer record for overnight-load reviews.</h1>
+      <p class="hew-lead">Keep the source files, line up comparable periods, and hold a complete record when a question needs follow-up. Commission access is free and read-only.</p>
+    </div>
+  </section>
 
-    <section class="feature-grid single-column-grid">
-      <article class="feature-card">
-        <h2>Review one account or a small set of accounts</h2>
-        <p>The workspace is built for staff who need the file history, the household context, and the comparison notes in one place.</p>
-      </article>
-      <article class="feature-card">
-        <h2>Compare exports without losing the date alignment</h2>
-        <p>The compare flow matches equivalent periods, reports unmatched months, and points to the biggest kWh or baseline shifts.</p>
-      </article>
-      <article class="feature-card">
-        <h2>Keep the result in plain language</h2>
-        <p>The output is short enough to use in a follow-up and concrete enough to support the next regulator question.</p>
-      </article>
-    </section>
+  <section class="hew-section">
+    <div class="hew-wrap">
+      <div class="hew-steps">
+        <article class="hew-card hew-feature"><span class="hew-icon-tile is-blue">{{ icon("houses") }}</span><h3>Accounts in your jurisdiction</h3><p>Review the households in your jurisdiction, with their file history and household context in one place.</p></article>
+        <article class="hew-card hew-feature"><span class="hew-icon-tile">{{ icon("compare") }}</span><h3>Aligned comparisons</h3><p>Compare exports period by period, with unmatched months reported and the biggest kWh or baseline shifts highlighted.</p></article>
+        <article class="hew-card hew-feature"><span class="hew-icon-tile is-mint">{{ icon("document") }}</span><h3>Plain-language results</h3><p>Short enough to use in a follow-up and specific enough to support the next question.</p></article>
+      </div>
+    </div>
+  </section>
 
-    <section class="marketing-section final-call">
+  <section class="hew-cta">
+    <div class="hew-wrap hew-cta-inner">
       <div>
         <h2>Pick up your review where you left off.</h2>
         <p>Sign in to review account history, compare usage periods, and keep your notes with the record.</p>
       </div>
-      <div class="hero-actions">
-        <a class="button button-primary" href="{{ commission_login_url }}">Sign in</a>
-      </div>
-    </section>
-  </main>
+      <a class="hew-btn hew-btn-primary" href="{{ commission_login_url }}">Sign in</a>
+    </div>
+  </section>
 {% endblock %}

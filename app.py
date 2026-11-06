@@ -476,16 +476,111 @@ WEATHER_STORM_PRECIP_IN = float(os.getenv("POWER_WEATHER_STORM_PRECIP_IN", "0.5"
 WEATHER_STORM_WIND_MPH = float(os.getenv("POWER_WEATHER_STORM_WIND_MPH", "25"))
 BILLING_PLAN_DEFINITIONS = (
     {
+        "id": "essential",
+        "name": "Essential",
+        "price_label": "$7 / month",
+        "unit_amount": 700,
+        "billing_interval": "month",
+        "account_limit": 1,
+        "offered": True,
+        "featured": False,
+        "checkout_supported": True,
+        "stripe_price_env": "STRIPE_PRICE_ESSENTIAL",
+        "summary": "Usage history, overnight baseline and basic reports for one home.",
+        "feature_labels": ("Usage analytics", "Overnight baseline", "Basic reports"),
+    },
+    {
+        "id": "plus",
+        "name": "Plus",
+        "price_label": "$12 / month",
+        "unit_amount": 1200,
+        "billing_interval": "month",
+        "account_limit": 1,
+        "offered": True,
+        "featured": True,
+        "checkout_supported": True,
+        "stripe_price_env": "STRIPE_PRICE_PLUS",
+        "summary": "Everything in Essential, plus flagged-night detection and appliance insights.",
+        "feature_labels": (
+            "All Essential features",
+            "Anomaly detection",
+            "Appliance insights",
+            "Advanced reports",
+        ),
+    },
+    {
+        "id": "professional",
+        "name": "Professional",
+        "price_label": "$24 / month",
+        "unit_amount": 2400,
+        "billing_interval": "month",
+        "account_limit": 10,
+        "offered": True,
+        "featured": False,
+        "checkout_supported": True,
+        "stripe_price_env": "STRIPE_PRICE_PROFESSIONAL",
+        "summary": "Everything in Plus for up to 10 electric accounts, with review and export tools.",
+        "feature_labels": (
+            "Multi-property tools",
+            "Case reviews",
+            "Evidence exports",
+            "Shared team access",
+        ),
+    },
+    {
+        # Kept so existing annual subscribers keep their plan; no longer offered.
         "id": "home",
         "name": "Home Watch",
-        "annual_price_label": "$239.88 / year",
+        "price_label": "$239.88 / year",
+        "unit_amount": 23988,
         "billing_interval": "year",
         "account_limit": 1,
+        "offered": False,
+        "featured": False,
         "checkout_supported": True,
         "stripe_price_env": "STRIPE_PRICE_HOME",
         "summary": "For one electric account with unlimited saved reports.",
+        "feature_labels": ("Usage analytics", "Overnight baseline", "Anomaly detection", "Appliance insights"),
     },
 )
+DEFAULT_BILLING_PLAN_ID = "plus"
+LEGACY_BILLING_PLAN_ALIASES = {"review": "home", "agency": "home"}
+
+# What each plan unlocks inside the app. Enforcement lives with the screens
+# that use each feature; keep this table and the pricing page in agreement.
+PLAN_FEATURES: dict[str, frozenset[str]] = {
+    "essential": frozenset({"usage_analytics", "overnight_baseline", "basic_reports"}),
+    "plus": frozenset(
+        {
+            "usage_analytics",
+            "overnight_baseline",
+            "basic_reports",
+            "anomaly_detection",
+            "appliance_insights",
+            "advanced_reports",
+        }
+    ),
+    "professional": frozenset(
+        {
+            "usage_analytics",
+            "overnight_baseline",
+            "basic_reports",
+            "anomaly_detection",
+            "appliance_insights",
+            "advanced_reports",
+            "multi_account",
+            "case_reviews",
+            "evidence_exports",
+        }
+    ),
+}
+PLAN_FEATURES["home"] = PLAN_FEATURES["plus"]
+
+
+def plan_has_feature(plan_id: str | None, feature: str) -> bool:
+    return feature in PLAN_FEATURES.get(str(plan_id or "").strip().lower(), frozenset())
+
+
 COMMISSION_REGISTRY_SEED = (
     {
         "key": "nc-state",
@@ -495,6 +590,8 @@ COMMISSION_REGISTRY_SEED = (
         "domains": ("psncuc.gov", "ncuc.gov"),
     },
 )
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+SUPPORT_EMAIL = os.getenv("POWER_SUPPORT_EMAIL", "support@homeenergywatch.com")
 DEFAULT_MARKETING_HOSTS = ("homeenergywatch.com", "www.homeenergywatch.com")
 DEFAULT_APP_HOSTS = ("app.homeenergywatch.com",)
 CURRENT_TERMS_VERSION = "2026-07-21"
@@ -5185,6 +5282,9 @@ def list_billing_plans() -> list[dict[str, object]]:
     plans: list[dict[str, object]] = []
     for plan in BILLING_PLAN_DEFINITIONS:
         plan_copy = dict(plan)
+        plan_copy["feature_labels"] = list(plan_copy.get("feature_labels") or ())
+        # Older templates and records read this name; it now carries any interval.
+        plan_copy["annual_price_label"] = plan_copy["price_label"]
         plan_copy["payment_ready"] = bool(
             plan_copy.get("checkout_supported")
             and billing_checkout_enabled()
@@ -5193,6 +5293,10 @@ def list_billing_plans() -> list[dict[str, object]]:
         )
         plans.append(plan_copy)
     return plans
+
+
+def list_offered_billing_plans() -> list[dict[str, object]]:
+    return [plan for plan in list_billing_plans() if plan.get("offered")]
 
 
 def list_energy_company_groups() -> list[dict[str, object]]:
@@ -5256,12 +5360,11 @@ def canonical_energy_company_name(raw_name: str, utility_id: object = None) -> s
 
 
 def get_billing_plan(plan_id: str | None) -> dict[str, object]:
-    normalized_plan_id = (plan_id or "home").strip().lower()
+    normalized_plan_id = (plan_id or DEFAULT_BILLING_PLAN_ID).strip().lower()
+    normalized_plan_id = LEGACY_BILLING_PLAN_ALIASES.get(normalized_plan_id, normalized_plan_id)
     for plan in list_billing_plans():
         if plan["id"] == normalized_plan_id:
             return plan
-    if normalized_plan_id in {"review", "agency"}:
-        return next(plan for plan in list_billing_plans() if plan["id"] == "home")
     raise ValueError("Choose a valid plan.")
 
 
@@ -5297,7 +5400,7 @@ def resolve_customer_account_id(customer_user_id: int, account_number: str | Non
 
 def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: int, account_id: int | None = None) -> dict[str, object]:
     if row is None:
-        plan = get_billing_plan("home")
+        plan = get_billing_plan(DEFAULT_BILLING_PLAN_ID)
         return {
             "customer_user_id": int(customer_user_id),
             "account_id": int(account_id or 0),
@@ -5670,6 +5773,8 @@ def create_customer_checkout_session(
         raise ValueError("Online payment is not open yet.")
     configure_stripe()
     plan = get_billing_plan(plan_id)
+    if not plan.get("offered"):
+        raise ValueError("That plan is no longer offered. Choose Essential, Plus or Professional.")
     account_id = resolve_customer_account_id(int(customer_user["id"]), account_number)
     if account_id is None:
         raise ValueError("Choose an electric account before starting billing.")
@@ -5681,13 +5786,13 @@ def create_customer_checkout_session(
     recurring = extract_mapping_value(price, "recurring")
     if (
         not extract_mapping_value(price, "active")
-        or extract_mapping_value(price, "unit_amount") != 23988
+        or extract_mapping_value(price, "unit_amount") != int(plan["unit_amount"])
         or extract_mapping_value(price, "currency") != "usd"
-        or extract_mapping_value(recurring, "interval") != "year"
+        or extract_mapping_value(recurring, "interval") != str(plan["billing_interval"])
         or extract_mapping_value(recurring, "interval_count") != 1
         or bool(extract_mapping_value(price, "livemode")) != get_stripe_secret_key().startswith("sk_live_")
     ):
-        raise ValueError("The annual account price is not configured correctly. Payment cannot start.")
+        raise ValueError(f"The {plan['name']} price is not configured correctly. Payment cannot start.")
     metadata = build_stripe_metadata(customer_user, plan)
     metadata["account_id"] = str(account_id)
     session_obj = stripe.checkout.Session.create(
@@ -12637,6 +12742,10 @@ def create_web_app() -> Flask:
         "how_it_works_page",
         "for_homeowners_page",
         "for_commissions_page",
+        "features_page",
+        "for_professionals_page",
+        "about_page",
+        "contact_page",
         "terms_page",
         "privacy_page",
         "utility_data_authorization_page",
@@ -13045,6 +13154,15 @@ def create_web_app() -> Flask:
             "how_it_works_url": build_absolute_url(marketing_base_url, "/how-it-works"),
             "for_homeowners_url": build_absolute_url(marketing_base_url, "/for-homeowners"),
             "for_commissions_url": build_absolute_url(marketing_base_url, "/for-commissions"),
+            "features_url": build_absolute_url(marketing_base_url, "/features"),
+            "for_professionals_url": build_absolute_url(marketing_base_url, "/for-professionals"),
+            "about_url": build_absolute_url(marketing_base_url, "/about"),
+            "contact_url": build_absolute_url(marketing_base_url, "/contact"),
+            "support_email": SUPPORT_EMAIL,
+            "public_plans": list_offered_billing_plans(),
+            # Licensed photographs are optional; pages fall back to drawn artwork.
+            "hero_photo_available": (STATIC_DIR / "img" / "hero-home.jpg").is_file(),
+            "professional_photo_available": (STATIC_DIR / "img" / "professional.jpg").is_file(),
             "terms_url": build_absolute_url(marketing_base_url, "/terms"),
             "privacy_url": build_absolute_url(marketing_base_url, "/privacy"),
             "utility_authorization_url": build_absolute_url(marketing_base_url, "/utility-data-authorization"),
@@ -13192,7 +13310,7 @@ def create_web_app() -> Flask:
                 return default
             return str(raw)
 
-        selected_plan_id = value("plan_id", "home").strip().lower() or "home"
+        selected_plan_id = value("plan_id", DEFAULT_BILLING_PLAN_ID).strip().lower() or DEFAULT_BILLING_PLAN_ID
         return {
             "full_name": value("full_name"),
             "email": value("email"),
@@ -13276,7 +13394,7 @@ def create_web_app() -> Flask:
             "customer_user": current_customer_user(),
             "staff_roles": STAFF_ROLES,
             "customer_access_levels": CUSTOMER_ACCESS_LEVELS,
-            "billing_plans": list_billing_plans(),
+            "billing_plans": list_offered_billing_plans(),
             "supported_feeds": list_supported_utility_adapters(),
             "utility_access_guides": list_utility_access_guides(),
             "utility_download_guides": UTILITY_DOWNLOAD_GUIDES,
@@ -13437,7 +13555,7 @@ def create_web_app() -> Flask:
 
     @app.post("/signup")
     def customer_signup_post():
-        selected_plan_id = request.form.get("plan_id") or "home"
+        selected_plan_id = request.form.get("plan_id") or DEFAULT_BILLING_PLAN_ID
         try:
             accept_policies = form_checkbox_checked(request.form.get("accept_policies"))
             confirm_account_authority = form_checkbox_checked(
@@ -13788,6 +13906,50 @@ def create_web_app() -> Flask:
                 page_title="For Homeowners",
                 page_description="Use Home Energy Watch to compare your overnight baseline, flagged nights, and utility export history without giving up your own records.",
                 active_page="for-homeowners",
+            ),
+        )
+
+    @app.get("/features")
+    def features_page():
+        return render_template(
+            "marketing_features.html",
+            **build_marketing_page_context(
+                page_title="Features",
+                page_description="Usage analytics, overnight baselines, flagged-night detection, appliance and weather context, reports and multi-account tools.",
+                active_page="features",
+            ),
+        )
+
+    @app.get("/for-professionals")
+    def for_professionals_page():
+        return render_template(
+            "marketing_professionals.html",
+            **build_marketing_page_context(
+                page_title="For Professionals",
+                page_description="Review many electric accounts in one workspace, with case notes, shared access and evidence-ready exports.",
+                active_page="for-professionals",
+            ),
+        )
+
+    @app.get("/about")
+    def about_page():
+        return render_template(
+            "marketing_about.html",
+            **build_marketing_page_context(
+                page_title="About Us",
+                page_description="Home Energy Watch turns the electricity readings your utility provides into a clear, organized record.",
+                active_page="about",
+            ),
+        )
+
+    @app.get("/contact")
+    def contact_page():
+        return render_template(
+            "marketing_contact.html",
+            **build_marketing_page_context(
+                page_title="Contact",
+                page_description="Questions about your account, your reports or Home Energy Watch? Get in touch with our team.",
+                active_page="contact",
             ),
         )
 
@@ -15420,6 +15582,10 @@ def create_web_app() -> Flask:
             build_absolute_url(marketing_base_url, "/how-it-works"),
             build_absolute_url(marketing_base_url, "/for-homeowners"),
             build_absolute_url(marketing_base_url, "/for-commissions"),
+            build_absolute_url(marketing_base_url, "/features"),
+            build_absolute_url(marketing_base_url, "/for-professionals"),
+            build_absolute_url(marketing_base_url, "/about"),
+            build_absolute_url(marketing_base_url, "/contact"),
             build_absolute_url(marketing_base_url, "/terms"),
             build_absolute_url(marketing_base_url, "/privacy"),
             build_absolute_url(marketing_base_url, "/utility-data-authorization"),
