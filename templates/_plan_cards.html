@@ -1,6 +1,6 @@
 {% from "_hew_ui.html" import icon %}
 {% macro plan_cards(plans, signup_base, billing=None) -%}
-<div class="hew-plans">
+<div class="hew-plans{% if plans|length == 1 %} is-single{% endif %}">
   {% for plan in plans %}
     <article class="hew-card hew-plan{% if plan.featured %} is-featured{% endif %}">
       {% if plan.featured %}<span class="hew-chip hew-chip-mint">Most Popular</span>{% endif %}

@@ -155,10 +155,7 @@ The app reads configuration from environment variables. Do not commit real value
 | `STRIPE_SECRET_KEY` | Backend-only Stripe secret key. |
 | `STRIPE_WEBHOOK_SECRET` | Backend-only webhook signing secret. |
 | `STRIPE_API_VERSION` | Stripe API version. |
-| `STRIPE_PRICE_ESSENTIAL` | Stripe Price ID for Essential: $7.00 USD, recurring monthly. |
-| `STRIPE_PRICE_PLUS` | Stripe Price ID for Plus: $12.00 USD, recurring monthly. |
-| `STRIPE_PRICE_PROFESSIONAL` | Stripe Price ID for Professional: $24.00 USD, recurring monthly. |
-| `STRIPE_PRICE_HOME` | Legacy annual Home Watch price ($239.88/year). Kept for existing subscribers; not sold to new customers. |
+| `STRIPE_PRICE_HOME` | Annual Stripe Price ID for one electric account ($239.88/year). |
 | `POWER_SUPPORT_EMAIL` | Support address shown on the Contact page. Defaults to `support@homeenergywatch.com`. |
 | `POWER_TIMEZONE` | Default analysis timezone. |
 | `POWER_NIGHT_START` | Default overnight window start. |

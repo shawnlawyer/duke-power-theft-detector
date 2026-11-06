@@ -683,6 +683,10 @@ body.hew {
   gap: 22px;
   align-items: stretch;
 }
+.hew-plans.is-single {
+  grid-template-columns: minmax(0, 440px);
+  justify-content: center;
+}
 .hew-plan {
   position: relative;
   display: grid;

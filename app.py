@@ -477,109 +477,28 @@ WEATHER_STORM_PRECIP_IN = float(os.getenv("POWER_WEATHER_STORM_PRECIP_IN", "0.5"
 WEATHER_STORM_WIND_MPH = float(os.getenv("POWER_WEATHER_STORM_WIND_MPH", "25"))
 BILLING_PLAN_DEFINITIONS = (
     {
-        "id": "essential",
-        "name": "Essential",
-        "price_label": "$7 / month",
-        "unit_amount": 700,
-        "billing_interval": "month",
-        "account_limit": 1,
-        "offered": True,
-        "featured": False,
-        "checkout_supported": True,
-        "stripe_price_env": "STRIPE_PRICE_ESSENTIAL",
-        "summary": "Usage history, overnight baseline and basic reports for one home.",
-        "feature_labels": ("Usage analytics", "Overnight baseline", "Basic reports"),
-    },
-    {
-        "id": "plus",
-        "name": "Plus",
-        "price_label": "$12 / month",
-        "unit_amount": 1200,
-        "billing_interval": "month",
-        "account_limit": 1,
-        "offered": True,
-        "featured": True,
-        "checkout_supported": True,
-        "stripe_price_env": "STRIPE_PRICE_PLUS",
-        "summary": "Everything in Essential, plus flagged-night detection and appliance insights.",
-        "feature_labels": (
-            "All Essential features",
-            "Anomaly detection",
-            "Appliance insights",
-            "Advanced reports",
-        ),
-    },
-    {
-        "id": "professional",
-        "name": "Professional",
-        "price_label": "$24 / month",
-        "unit_amount": 2400,
-        "billing_interval": "month",
-        "account_limit": 10,
-        "offered": True,
-        "featured": False,
-        "checkout_supported": True,
-        "stripe_price_env": "STRIPE_PRICE_PROFESSIONAL",
-        "summary": "Everything in Plus for up to 10 electric accounts, with review and export tools.",
-        "feature_labels": (
-            "Multi-property tools",
-            "Case reviews",
-            "Evidence exports",
-            "Shared team access",
-        ),
-    },
-    {
-        # Kept so existing annual subscribers keep their plan; no longer offered.
         "id": "home",
         "name": "Home Watch",
         "price_label": "$239.88 / year",
         "unit_amount": 23988,
         "billing_interval": "year",
         "account_limit": 1,
-        "offered": False,
+        "offered": True,
         "featured": False,
         "checkout_supported": True,
         "stripe_price_env": "STRIPE_PRICE_HOME",
         "summary": "For one electric account with unlimited saved reports.",
-        "feature_labels": ("Usage analytics", "Overnight baseline", "Anomaly detection", "Appliance insights"),
+        "feature_labels": (
+            "Usage analytics",
+            "Overnight baseline",
+            "Anomaly detection",
+            "Appliance and weather insights",
+            "Unlimited saved reports",
+        ),
     },
 )
-DEFAULT_BILLING_PLAN_ID = "plus"
+DEFAULT_BILLING_PLAN_ID = "home"
 LEGACY_BILLING_PLAN_ALIASES = {"review": "home", "agency": "home"}
-
-# What each plan unlocks inside the app. Enforcement lives with the screens
-# that use each feature; keep this table and the pricing page in agreement.
-PLAN_FEATURES: dict[str, frozenset[str]] = {
-    "essential": frozenset({"usage_analytics", "overnight_baseline", "basic_reports"}),
-    "plus": frozenset(
-        {
-            "usage_analytics",
-            "overnight_baseline",
-            "basic_reports",
-            "anomaly_detection",
-            "appliance_insights",
-            "advanced_reports",
-        }
-    ),
-    "professional": frozenset(
-        {
-            "usage_analytics",
-            "overnight_baseline",
-            "basic_reports",
-            "anomaly_detection",
-            "appliance_insights",
-            "advanced_reports",
-            "multi_account",
-            "case_reviews",
-            "evidence_exports",
-        }
-    ),
-}
-PLAN_FEATURES["home"] = PLAN_FEATURES["plus"]
-
-
-def plan_has_feature(plan_id: str | None, feature: str) -> bool:
-    return feature in PLAN_FEATURES.get(str(plan_id or "").strip().lower(), frozenset())
 
 
 COMMISSION_REGISTRY_SEED = (
@@ -5776,7 +5695,7 @@ def create_customer_checkout_session(
     configure_stripe()
     plan = get_billing_plan(plan_id)
     if not plan.get("offered"):
-        raise ValueError("That plan is no longer offered. Choose Essential, Plus or Professional.")
+        raise ValueError("That plan is no longer offered.")
     account_id = resolve_customer_account_id(int(customer_user["id"]), account_number)
     if account_id is None:
         raise ValueError("Choose an electric account before starting billing.")
