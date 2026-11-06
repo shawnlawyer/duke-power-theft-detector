@@ -155,7 +155,8 @@ The app reads configuration from environment variables. Do not commit real value
 | `STRIPE_SECRET_KEY` | Backend-only Stripe secret key. |
 | `STRIPE_WEBHOOK_SECRET` | Backend-only webhook signing secret. |
 | `STRIPE_API_VERSION` | Stripe API version. |
-| `STRIPE_PRICE_HOME` | Annual Stripe Price ID for one electric account. |
+| `STRIPE_PRICE_HOME` | Annual Stripe Price ID for one electric account ($239.88/year). |
+| `POWER_SUPPORT_EMAIL` | Support address shown on the Contact page. Defaults to `support@homeenergywatch.com`. |
 | `POWER_TIMEZONE` | Default analysis timezone. |
 | `POWER_NIGHT_START` | Default overnight window start. |
 | `POWER_NIGHT_END` | Default overnight window end. |

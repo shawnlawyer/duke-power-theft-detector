@@ -1,0 +1,64 @@
+{% extends "marketing_base.html" %}
+{% from "_hew_ui.html" import icon, bar_chart %}
+
+{% block content %}
+  <section class="hew-section">
+    <div class="hew-wrap hew-split">
+      <div class="hew-detail-copy">
+        <span class="hew-eyebrow">For professionals</span>
+        <h1>Energy intelligence for every account you manage.</h1>
+        <p class="hew-lead">Bring customer properties, interval readings, findings and evidence records into one coordinated review workspace.</p>
+        <ul class="hew-checklist">
+          <li>Multi-account oversight</li>
+          <li>Case review workspace</li>
+          <li>Evidence and report exports</li>
+          <li>Shared access for your team</li>
+        </ul>
+        <div class="hew-hero-actions">
+          <a class="hew-btn hew-btn-primary" href="{{ start_home_url }}">Explore Professional Tools</a>
+          <a class="hew-btn hew-btn-outline" href="{{ contact_url }}">Talk to Us</a>
+        </div>
+      </div>
+      {% if professional_photo_available %}
+        <div class="hew-photo has-photo" role="img" aria-label="An energy reviewer at work"></div>
+      {% else %}
+        <div class="hew-dash" aria-label="Sample review workspace">
+          <div class="hew-dash-main">
+            <div class="hew-dash-top"><h3>Review workspace</h3><span class="hew-sample-tag">Sample data</span></div>
+            <div class="hew-dash-tiles hew-tiles-2">
+              <div class="hew-card">{{ icon("houses") }}<div class="hew-stat"><strong>8</strong><span>Accounts</span></div></div>
+              <div class="hew-card">{{ icon("search") }}<div class="hew-stat"><strong>3</strong><span>Open reviews</span></div></div>
+            </div>
+            <div class="hew-card">
+              <h4>Overnight baseline by account</h4>
+              {{ bar_chart([34, 41, 38, 82, 36, 44, 39, 47], flagged=(3,), width=420, height=120, label="Sample overnight baseline for eight accounts, one elevated") }}
+            </div>
+            <span class="hew-chip">Account reviews · Evidence files · Team access</span>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="hew-section hew-section-alt">
+    <div class="hew-wrap">
+      <div class="hew-section-head">
+        <h2>Built for the way review work happens.</h2>
+        <p class="hew-lead">Energy advisers, property managers and consumer advocates use Home Energy Watch to keep each account's record organized and ready to share.</p>
+      </div>
+      <div class="hew-feature-grid">
+        <article class="hew-card hew-feature"><span class="hew-icon-tile is-blue">{{ icon("houses") }}</span><h3>Multi-account oversight</h3><p>Every electric account in one workspace, each with its own history.</p></article>
+        <article class="hew-card hew-feature"><span class="hew-icon-tile">{{ icon("search") }}</span><h3>Case reviews</h3><p>Notes, flagged nights and comparisons kept together on each account.</p></article>
+        <article class="hew-card hew-feature"><span class="hew-icon-tile is-mint">{{ icon("download") }}</span><h3>Evidence exports</h3><p>Reports and a complete archive of every file and analysis on record.</p></article>
+        <article class="hew-card hew-feature"><span class="hew-icon-tile is-amber">{{ icon("users") }}</span><h3>Team access</h3><p>Viewer and manager access, with a full activity history of every change.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="hew-cta">
+    <div class="hew-wrap hew-cta-inner">
+      <div><h2>Bring your accounts into one workspace.</h2><p>Each electric account is $239.88 per year.</p></div>
+      <a class="hew-btn hew-btn-primary" href="{{ pricing_url }}">See Plans</a>
+    </div>
+  </section>
+{% endblock %}

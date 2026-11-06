@@ -1,41 +1,77 @@
 {% extends "marketing_base.html" %}
+{% from "_hew_ui.html" import icon, bar_chart %}
 
 {% block content %}
-  <main class="marketing-main compact-main">
-    <section class="page-intro">
-      <h1>From utility export to review record.</h1>
-      <p>The tool stays close to the source file so the result is easier to explain later.</p>
-    </section>
+  <section class="hew-page-hero">
+    <div class="hew-wrap">
+      <span class="hew-eyebrow">How it works</span>
+      <h1>From energy data to everyday clarity.</h1>
+      <p class="hew-lead">Home Energy Watch organizes your electricity information into meaningful patterns, easy-to-read reports and useful insights.</p>
+    </div>
+  </section>
 
-    <section class="stacked-section">
-      <article class="long-step">
-        <span>1</span>
-        <div>
-          <h2>Keep adding the files the utility already gives you</h2>
-          <p>Each new export becomes part of one continuous history. Older readings stay in place, so the record grows instead of starting over.</p>
+  <section class="hew-section">
+    <div class="hew-wrap">
+      <div class="hew-detail">
+        <div class="hew-detail-copy">
+          <span class="hew-eyebrow">Step 1</span>
+          <h2>Add your home and utility account</h2>
+          <p class="hew-lead">Create your account, name your home and enter the electric account you want to follow. Tell us about your heating, cooling and major appliances whenever you like.</p>
         </div>
-      </article>
-      <article class="long-step">
-        <span>2</span>
-        <div>
-          <h2>Check the overnight baseline and the nights that break from it</h2>
-          <p>You can see total kWh, the overnight baseline, flagged nights, and any sharp changes that show up after midnight.</p>
+        <div class="hew-card">
+          <ul class="hew-checklist">
+            <li>Sign in with an emailed link or a passkey, with no password to remember</li>
+            <li>Invite family members or advisers as viewers or managers</li>
+            <li>Give permission for your utility data in plain language, and withdraw it at any time</li>
+          </ul>
         </div>
-      </article>
-      <article class="long-step">
-        <span>3</span>
-        <div>
-          <h2>Compare any two periods inside the history</h2>
-          <p>Choose last year and this year, before and after a replacement, or any other dates. The comparison highlights large changes, baseline shifts, and the periods that match.</p>
+      </div>
+
+      <div class="hew-detail is-flipped">
+        <div class="hew-detail-copy">
+          <span class="hew-eyebrow">Step 2</span>
+          <h2>Connect or import your electricity readings</h2>
+          <p class="hew-lead">Upload the usage file your utility provides: Green Button XML, interval XML or CSV. Where your utility supports it, approve an automatic connection once and new readings arrive on their own.</p>
+          <p class="hew-muted">Each new file adds to one continuous history. Earlier readings stay in place.</p>
         </div>
-      </article>
-      <article class="long-step">
-        <span>4</span>
-        <div>
-          <h2>Keep the result for the next conversation</h2>
-          <p>The saved review gives you a simple record of what changed and when, so you can come back to it without rebuilding the comparison.</p>
+        <div class="hew-card">
+          <ul class="hew-checklist">
+            <li>Download guides for many utilities, written step by step</li>
+            <li>Readings kept at the resolution your utility records</li>
+            <li>Format detected for you, with clear messages if a file can't be read</li>
+          </ul>
         </div>
-      </article>
-    </section>
-  </main>
+      </div>
+
+      <div class="hew-detail">
+        <div class="hew-detail-copy">
+          <span class="hew-eyebrow">Step 3</span>
+          <h2>Explore trends, insights and reports</h2>
+          <p class="hew-lead">See your overnight baseline, the nights that break from it, any day in detail and how one period compares with another. Download reports whenever you need them.</p>
+        </div>
+        <div class="hew-card">
+          <div class="hew-dash-top"><h3>Daily use</h3><span class="hew-sample-tag">Sample data</span></div>
+          {{ bar_chart([40, 44, 38, 47, 51, 45, 42, 39, 48, 52, 49, 46, 43, 72, 41, 45, 50, 47, 44, 78, 49, 46], flagged=(13, 19), width=420, height=130, label="Sample daily use with two flagged days") }}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="hew-section hew-section-alt">
+    <div class="hew-wrap">
+      <div class="hew-section-head"><h2>Questions about getting started</h2></div>
+      <div class="hew-faq">
+        <details><summary>How long does setup take?</summary><p>Most people are looking at their first analysis within a few minutes of downloading their utility file.</p></details>
+        <details><summary>Do I need special equipment?</summary><p>No. Home Energy Watch uses the readings your electric meter already sends to your utility.</p></details>
+        <details><summary>Can I add more history later?</summary><p>Yes. Upload newer or older files at any time and they join the same timeline.</p></details>
+      </div>
+    </div>
+  </section>
+
+  <section class="hew-cta">
+    <div class="hew-wrap hew-cta-inner">
+      <div><h2>Start exploring your energy.</h2><p>Set up your home in a few minutes.</p></div>
+      <a class="hew-btn hew-btn-primary" href="{{ start_home_url }}">Start Exploring</a>
+    </div>
+  </section>
 {% endblock %}

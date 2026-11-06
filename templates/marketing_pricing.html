@@ -1,43 +1,29 @@
 {% extends "marketing_base.html" %}
+{% from "_plan_cards.html" import plan_cards %}
 
 {% block content %}
-  <main class="marketing-main compact-main">
-    <section class="page-intro">
-      <h1>One account, one clear record.</h1>
-      <p>
-        Each electric account has its own annual plan. You can connect more than one account to the same email address, while commission access remains free and read-only.
-      </p>
-    </section>
+  <section class="hew-page-hero">
+    <div class="hew-wrap">
+      <span class="hew-eyebrow">Pricing</span>
+      <h1>Find the right view of your energy.</h1>
+      <p class="hew-lead">One simple plan for each electric account, billed annually and managed from your billing page.</p>
+    </div>
+  </section>
 
-    <section class="plan-grid large-plan-grid">
-      {% for plan in billing_plans %}
-        <article class="marketing-plan detail-plan">
-          <p class="plan-price">{{ plan.annual_price_label }}</p>
-          <h2>{{ plan.name }}</h2>
-          <p>{{ plan.summary }}</p>
-          <ul class="plan-points">
-            {% if plan.account_limit %}
-              <li>Up to {{ plan.account_limit }} electric account{{ '' if plan.account_limit == 1 else 's' }}</li>
-            {% else %}
-              <li>Built around the review team and the number of accounts involved</li>
-            {% endif %}
-            <li>Interval uploads, overnight baselines, and flagged-night review</li>
-            <li>Comparison artifacts you can keep with the case record</li>
-            <li>Unlimited reports while your subscription is active</li>
-          </ul>
-          {% if customer_user and not staff_user and plan.payment_ready %}
-            <a class="button button-primary" href="{{ app_base_url }}/signup?plan_id={{ plan.id|urlencode }}">
-                {% if billing and billing.plan_id == plan.id and billing.status in ["active", "trialing"] %}
-                  Current plan
-                {% else %}
-                  Continue to secure payment
-                {% endif %}
-            </a>
-          {% else %}
-            <a class="button button-primary" href="{{ app_base_url }}/signup?plan_id={{ plan.id|urlencode }}">Start {{ plan.name }}</a>
-          {% endif %}
-        </article>
-      {% endfor %}
-    </section>
-  </main>
+  <section class="hew-section">
+    <div class="hew-wrap">
+      {{ plan_cards(public_plans, app_base_url, billing) }}
+    </div>
+  </section>
+
+  <section class="hew-section hew-section-alt">
+    <div class="hew-wrap">
+      <div class="hew-section-head"><h2>Billing questions</h2></div>
+      <div class="hew-faq">
+        <details><summary>How does billing work?</summary><p>Each electric account is billed annually through Stripe's secure checkout. Receipts and payment details are available from your billing page.</p></details>
+        <details><summary>Can I cancel my plan?</summary><p>Yes. Manage your subscription from your billing page at any time. Subscriptions are non-refundable.</p></details>
+        <details><summary>Is there a cost for utility commissions?</summary><p>No. Utility commission access remains free and read-only.</p></details>
+      </div>
+    </div>
+  </section>
 {% endblock %}

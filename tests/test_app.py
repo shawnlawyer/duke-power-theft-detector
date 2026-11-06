@@ -3111,7 +3111,7 @@ def test_customer_checkout_rejects_monthly_price(tmp_path, monkeypatch):
         "active": True, "unit_amount": 1900, "currency": "usd",
         "recurring": {"interval": "month", "interval_count": 1}, "livemode": False,
     }
-    with pytest.raises(ValueError, match="annual account price"):
+    with pytest.raises(ValueError, match="Home Watch price is not configured"):
         app.create_customer_checkout_session(customer, "home", "https://app.homeenergywatch.com", "duke-checkout")
     assert FakeStripeCheckoutSession.calls == []
 
@@ -3397,20 +3397,48 @@ def test_marketing_host_renders_public_homepage(tmp_path, monkeypatch):
     response = client.get("/", base_url="https://homeenergywatch.com")
 
     assert response.status_code == 200
-    assert b"Read your own meter data the way a reviewer would." in response.data
-    assert b"Duke Energy Progress" in response.data
-    assert b"Uploads stack up instead of overwriting each other." in response.data
-    assert b"$239.88 / year" in response.data
-    assert b"Unlimited saved reports while the subscription is active" in response.data
+    assert b"Every kilowatt tells a story. Understand yours." in response.data
+    assert b"From your utility data to everyday clarity." in response.data
+    assert b"$239.88" in response.data and b"Home Watch" in response.data
+    assert b"/month" not in response.data
+    # Sample figures are labelled, and no cost estimate is claimed.
+    assert b"Sample data" in response.data
+    assert b"Est. cost" not in response.data
     # The public page must keep stating the limits the product is honest about.
     assert b"Duke automatic updates require a one-time setup." in response.data
     assert b"It never receives your Duke password." in response.data
     assert b"It is not live monitoring." in response.data
-    assert b">Homeowners</a>" in response.data
-    assert b">Review desk</a>" in response.data
-    assert b">Start a review</a>" in response.data
+    assert b"not proof of theft" in response.data
+    assert b">Features</a>" in response.data
+    assert b">For Professionals</a>" in response.data
+    assert b">Get Started</a>" in response.data
     assert b"https://app.homeenergywatch.com/signup" in response.data
     assert b"Commission Sign In" not in response.data
+    assert b"style=" not in response.data
+
+
+def test_new_public_pages_render(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+
+    expected = {
+        "/features": b"Powerful insights. A clearer understanding.",
+        "/for-professionals": b"Energy intelligence for every account you manage.",
+        "/about": b"Better energy understanding begins with better information.",
+        "/contact": b"mailto:support@homeenergywatch.com",
+        "/how-it-works": b"From energy data to everyday clarity.",
+        "/for-homeowners": b"Feel more connected to your home.",
+    }
+    for path, text in expected.items():
+        response = client.get(path, base_url="https://homeenergywatch.com")
+        assert response.status_code == 200, path
+        assert text in response.data, path
+        assert b"style=" not in response.data, path
+
+    sitemap = client.get("/sitemap.xml", base_url="https://homeenergywatch.com")
+    for path in ("/features", "/for-professionals", "/about", "/contact"):
+        assert f"https://homeenergywatch.com{path}".encode() in sitemap.data
 
 
 def test_marketing_host_redirects_app_routes_to_app_subdomain(tmp_path, monkeypatch):
@@ -3486,9 +3514,12 @@ def test_marketing_pricing_page_uses_public_copy(tmp_path, monkeypatch):
     response = client.get("/pricing", base_url="https://homeenergywatch.com")
 
     assert response.status_code == 200
-    assert b"One account, one clear record." in response.data
-    assert b"Home Watch" in response.data
-    assert b"$239.88 / year" in response.data
+    assert b"Find the right view of your energy." in response.data
+    assert b"$239.88" in response.data
+    assert b"billed annually" in response.data
+    assert b"signup?plan_id=home" in response.data
+    for name in (b"Essential", b"<h3>Plus</h3>", b"<h3>Professional</h3>", b"/month"):
+        assert name not in response.data
     assert b"commission access remains free and read-only" in response.data
     assert b"Pricing being finalized" not in response.data
 

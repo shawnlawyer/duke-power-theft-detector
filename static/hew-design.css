@@ -1,0 +1,911 @@
+/*
+ * Home Energy Watch design system.
+ *
+ * Shared by the public website and the signed-in application. Colors, type,
+ * radius and component styles follow the November 2026 redesign mockups:
+ * deep forest green, teal data, mint actions, amber attention, white cards.
+ */
+
+/* -- 1. Fonts ------------------------------------------------------------- */
+
+@font-face {
+  font-family: "Poppins";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/poppins-latin-600-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Poppins";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/poppins-latin-700-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("fonts/inter-latin-wght-normal.woff2") format("woff2");
+}
+
+/* -- 2. Tokens ------------------------------------------------------------ */
+
+:root {
+  --hew-forest-900: #0b3a35;
+  --hew-forest-800: #0e4842;
+  --hew-forest-700: #135a52;
+  --hew-forest-600: #1a6d63;
+  --hew-teal-500: #22b5a3;
+  --hew-teal-400: #3cc9b6;
+  --hew-teal-200: #a6e6dc;
+  --hew-teal-100: #d9f4ef;
+  --hew-teal-50: #eefaf7;
+  --hew-mint-500: #3fd98a;
+  --hew-mint-400: #5ce39c;
+  --hew-mint-100: #dbf8e8;
+  --hew-amber-500: #f2a024;
+  --hew-amber-100: #fdf0d9;
+  --hew-red-500: #e5534b;
+  --hew-red-100: #fde4e2;
+  --hew-blue-500: #3d7be0;
+  --hew-blue-100: #e1ebfb;
+
+  --hew-ink: #11221f;
+  --hew-ink-2: #3c4f4b;
+  --hew-ink-3: #6b7c78;
+  --hew-line: #dfe8e5;
+  --hew-line-strong: #c4d3cf;
+  --hew-surface: #ffffff;
+  --hew-surface-2: #f4f8f7;
+  --hew-surface-3: #e9f1ef;
+
+  --hew-font-display: "Poppins", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --hew-font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --hew-radius-sm: 8px;
+  --hew-radius: 12px;
+  --hew-radius-lg: 18px;
+  --hew-radius-pill: 999px;
+
+  --hew-shadow-sm: 0 1px 2px rgba(11, 58, 53, 0.06), 0 2px 6px rgba(11, 58, 53, 0.05);
+  --hew-shadow: 0 6px 20px rgba(11, 58, 53, 0.09);
+  --hew-shadow-lg: 0 18px 48px rgba(6, 34, 31, 0.22);
+
+  --hew-gutter: clamp(16px, 4vw, 40px);
+  --hew-max: 1200px;
+}
+
+/* -- 3. Base -------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body.hew {
+  margin: 0;
+  background: var(--hew-surface);
+  color: var(--hew-ink);
+  font-family: var(--hew-font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+.hew h1,
+.hew h2,
+.hew h3,
+.hew h4 {
+  margin: 0;
+  font-family: var(--hew-font-display);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  color: var(--hew-ink);
+}
+.hew h1 { font-size: clamp(2.3rem, 5.2vw, 3.6rem); }
+.hew h2 { font-size: clamp(1.7rem, 3.4vw, 2.4rem); }
+.hew h3 { font-size: 1.15rem; font-weight: 600; }
+.hew p { margin: 0; }
+.hew :where(a:not([class])) { color: var(--hew-forest-600); }
+.hew img { max-width: 100%; display: block; }
+
+.hew-wrap {
+  width: 100%;
+  max-width: var(--hew-max);
+  margin: 0 auto;
+  padding: 0 var(--hew-gutter);
+}
+
+.hew-eyebrow {
+  display: inline-block;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--hew-teal-500);
+}
+
+.hew-lead {
+  font-size: 1.12rem;
+  color: var(--hew-ink-2);
+  max-width: 40em;
+}
+
+.hew-muted { color: var(--hew-ink-3); }
+.hew-skip {
+  position: absolute;
+  left: -999px;
+  top: 8px;
+  z-index: 100;
+  background: var(--hew-surface);
+  padding: 8px 14px;
+  border-radius: var(--hew-radius-sm);
+}
+.hew-skip:focus { left: 8px; }
+
+.hew :focus-visible {
+  outline: 3px solid var(--hew-teal-400);
+  outline-offset: 2px;
+}
+
+/* -- 4. Buttons, chips, icons --------------------------------------------- */
+
+.hew-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 0 22px;
+  border: 1.5px solid transparent;
+  border-radius: var(--hew-radius-sm);
+  font-family: var(--hew-font-body);
+  font-size: 0.98rem;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+.hew-btn:hover { transform: translateY(-1px); }
+.hew-btn-primary {
+  background: var(--hew-mint-500);
+  color: var(--hew-forest-900);
+}
+.hew-btn-primary:hover { background: var(--hew-mint-400); }
+.hew-btn-dark {
+  background: var(--hew-forest-700);
+  color: #fff;
+}
+.hew-btn-dark:hover { background: var(--hew-forest-600); }
+.hew-btn-outline {
+  background: transparent;
+  border-color: var(--hew-line-strong);
+  color: var(--hew-ink);
+}
+.hew-btn-outline:hover { border-color: var(--hew-forest-600); }
+.hew-btn-ghost-light {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.75);
+  color: #fff;
+}
+.hew-btn-ghost-light:hover { background: rgba(255, 255, 255, 0.16); }
+.hew-btn[aria-disabled="true"],
+.hew-btn:disabled {
+  background: var(--hew-surface-3);
+  border-color: var(--hew-surface-3);
+  color: var(--hew-ink-3);
+  cursor: default;
+  transform: none;
+}
+.hew-btn-sm { min-height: 36px; padding: 0 14px; font-size: 0.88rem; }
+.hew-btn-block { width: 100%; }
+
+.hew-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--hew-radius-pill);
+  background: var(--hew-teal-100);
+  color: var(--hew-forest-700);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.hew-chip-amber { background: var(--hew-amber-100); color: #8a5300; }
+.hew-chip-mint { background: var(--hew-mint-500); color: var(--hew-forest-900); }
+
+.hew-icon {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  fill: none;
+}
+.hew-icon-tile {
+  display: inline-grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--hew-radius);
+  background: var(--hew-teal-50);
+  color: var(--hew-teal-500);
+}
+.hew-icon-tile .hew-icon { width: 28px; height: 28px; }
+.hew-icon-tile.is-amber { background: var(--hew-amber-100); color: var(--hew-amber-500); }
+.hew-icon-tile.is-red { background: var(--hew-red-100); color: var(--hew-red-500); }
+.hew-icon-tile.is-blue { background: var(--hew-blue-100); color: var(--hew-blue-500); }
+.hew-icon-tile.is-mint { background: var(--hew-mint-100); color: #18a35d; }
+
+/* -- 5. Cards, stat tiles, charts ---------------------------------------- */
+
+.hew-card {
+  background: var(--hew-surface);
+  border: 1px solid var(--hew-line);
+  border-radius: var(--hew-radius-lg);
+  box-shadow: var(--hew-shadow-sm);
+  padding: 24px;
+}
+.hew-card-tight { padding: 16px; }
+
+.hew-stat {
+  display: grid;
+  gap: 2px;
+}
+.hew-stat strong {
+  font-family: var(--hew-font-display);
+  font-size: 1.6rem;
+  line-height: 1.1;
+  color: var(--hew-ink);
+}
+.hew-stat strong small {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-left: 2px;
+}
+.hew-stat span {
+  font-size: 0.82rem;
+  color: var(--hew-ink-3);
+}
+.hew-stat .hew-delta {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #18a35d;
+}
+
+/* Bar charts are inline SVG (the CSP forbids inline style attributes). */
+.hew-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+.hew-chart .bar { fill: var(--hew-teal-400); }
+.hew-chart .bar.is-flag { fill: var(--hew-amber-500); }
+.hew-chart .bar.is-soft { fill: var(--hew-teal-200); }
+.hew-chart .grid { stroke: var(--hew-line); stroke-width: 1; }
+.hew-chart .axis-label { fill: var(--hew-ink-3); font-size: 10px; font-family: var(--hew-font-body); }
+.hew-chart .area { fill: var(--hew-teal-200); opacity: 0.7; }
+.hew-chart .line { fill: none; stroke: var(--hew-teal-500); stroke-width: 2; }
+.hew-chart .baseline { stroke: var(--hew-forest-600); stroke-width: 1.5; stroke-dasharray: 5 4; }
+
+.hew-sample-tag {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--hew-ink-3);
+}
+
+/* -- 6. Site header and footer ------------------------------------------- */
+
+.hew-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: var(--hew-forest-900);
+  color: #fff;
+}
+.hew-header-inner {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  min-height: 68px;
+}
+.hew-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: #fff;
+  text-decoration: none;
+  font-family: var(--hew-font-display);
+  font-size: 1.15rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.hew-brand .hew-logo { width: 34px; height: 34px; }
+.hew-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.hew-nav a,
+.hew-nav summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  border-radius: var(--hew-radius-sm);
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 0.92rem;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  list-style: none;
+}
+.hew-nav summary::-webkit-details-marker { display: none; }
+.hew-nav a:hover,
+.hew-nav summary:hover,
+.hew-nav a.is-active { color: #fff; background: rgba(255, 255, 255, 0.08); }
+.hew-nav details { position: relative; }
+.hew-nav details[open] summary { background: rgba(255, 255, 255, 0.08); }
+.hew-nav .hew-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 200px;
+  display: grid;
+  padding: 8px;
+  background: var(--hew-surface);
+  border-radius: var(--hew-radius);
+  box-shadow: var(--hew-shadow-lg);
+}
+.hew-nav .hew-menu a { color: var(--hew-ink); }
+.hew-nav .hew-menu a:hover { background: var(--hew-surface-2); color: var(--hew-ink); }
+.hew-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.hew-header-actions .hew-btn { min-height: 38px; padding: 0 16px; font-size: 0.9rem; white-space: nowrap; }
+.hew-menu-toggle {
+  display: none;
+  margin-left: auto;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+
+.hew-footer {
+  margin-top: 0;
+  padding: 56px 0 32px;
+  background: var(--hew-forest-900);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 0.92rem;
+}
+.hew-footer-grid {
+  display: grid;
+  grid-template-columns: 1.4fr repeat(3, 1fr);
+  gap: 32px;
+}
+.hew-footer h4 {
+  margin-bottom: 12px;
+  color: #fff;
+  font-size: 0.95rem;
+}
+.hew-footer a {
+  display: block;
+  padding: 3px 0;
+  color: rgba(255, 255, 255, 0.78);
+  text-decoration: none;
+}
+.hew-footer a:hover { color: #fff; }
+.hew-footer .hew-brand { margin-bottom: 12px; }
+.hew-footer-note {
+  margin-top: 40px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* -- 7. Page sections ---------------------------------------------------- */
+
+.hew-section { padding: 88px 0; }
+.hew-section-alt { background: var(--hew-surface-2); }
+.hew-section-head {
+  display: grid;
+  gap: 12px;
+  max-width: 720px;
+  margin: 0 auto 48px;
+  text-align: center;
+}
+.hew-section-head .hew-lead { margin: 0 auto; }
+.hew-section-head.is-left { margin-left: 0; text-align: left; }
+.hew-section-head.is-left .hew-lead { margin: 0; }
+
+/* Hero with photo or illustrated dusk scene */
+.hew-hero {
+  position: relative;
+  overflow: hidden;
+  color: #fff;
+  background:
+    linear-gradient(90deg, rgba(6, 30, 28, 0.88) 0%, rgba(6, 30, 28, 0.62) 46%, rgba(6, 30, 28, 0.18) 100%),
+    var(--hew-hero-image, linear-gradient(160deg, #1b3f5c 0%, #3a5b7a 38%, #c98a5a 78%, #e9b27a 100%));
+  background-size: cover;
+  background-position: center;
+}
+.hew-hero-scene {
+  position: absolute;
+  inset: auto 0 0 auto;
+  width: min(62%, 820px);
+  height: 100%;
+  pointer-events: none;
+}
+.hew-hero.has-photo { --hew-hero-image: url("img/hero-home.jpg"); }
+.hew-hero.has-photo .hew-hero-scene { display: none; }
+.hew-hero-inner {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  align-items: center;
+  gap: 40px;
+  min-height: 600px;
+  padding-top: 72px;
+  padding-bottom: 140px;
+}
+.hew-hero h1 { color: #fff; }
+.hew-hero .hew-lead { color: rgba(255, 255, 255, 0.88); margin-top: 18px; }
+.hew-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 32px;
+}
+.hew-hero-preview {
+  justify-self: end;
+  width: min(100%, 400px);
+  padding: 18px 20px;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: var(--hew-radius-lg);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--hew-ink);
+  box-shadow: var(--hew-shadow-lg);
+  backdrop-filter: blur(6px);
+}
+.hew-hero-preview header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+.hew-hero-preview .hew-chart { margin: 10px 0 14px; }
+.hew-hero-preview .hew-stats-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+/* Benefit strip that overlaps the hero */
+.hew-benefits {
+  position: relative;
+  z-index: 2;
+  margin-top: -64px;
+}
+.hew-benefits-card {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 22px;
+  border-radius: var(--hew-radius-lg);
+  background: var(--hew-surface);
+  box-shadow: var(--hew-shadow);
+}
+.hew-benefit {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 10px;
+}
+.hew-benefit strong {
+  font-family: var(--hew-font-display);
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+/* Steps */
+.hew-steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+}
+.hew-step {
+  overflow: hidden;
+  padding: 0;
+}
+.hew-step-art {
+  height: 150px;
+  background: var(--hew-teal-50);
+  display: grid;
+  place-items: center;
+  color: var(--hew-teal-500);
+}
+.hew-step-art .hew-icon { width: 64px; height: 64px; stroke-width: 1.4; }
+.hew-step-body { padding: 20px 22px 24px; }
+.hew-step-num {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-right: 10px;
+  border-radius: 50%;
+  background: var(--hew-forest-700);
+  color: #fff;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+.hew-step h3 { display: flex; align-items: center; margin-bottom: 8px; }
+.hew-step p { color: var(--hew-ink-2); font-size: 0.95rem; }
+
+/* Feature grid */
+.hew-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 18px;
+}
+.hew-feature {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  justify-items: center;
+  padding: 26px 18px;
+  text-align: center;
+}
+.hew-feature h3 { font-size: 1rem; }
+.hew-feature p { font-size: 0.9rem; color: var(--hew-ink-2); }
+
+/* Feature detail rows */
+.hew-detail {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  gap: 56px;
+}
+.hew-detail + .hew-detail { margin-top: 88px; }
+.hew-detail.is-flipped .hew-detail-copy { order: 2; }
+.hew-detail-copy { display: grid; gap: 16px; }
+.hew-checklist {
+  display: grid;
+  gap: 10px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.hew-checklist li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  color: var(--hew-ink-2);
+}
+.hew-checklist li::before {
+  content: "";
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 3px;
+  border-radius: 50%;
+  background: var(--hew-mint-500) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M5.5 10.5l3 3 6-7' fill='none' stroke='%230b3a35' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 14px no-repeat;
+}
+
+/* Product preview: dashboard frame */
+.hew-dash {
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  overflow: hidden;
+  border-radius: var(--hew-radius-lg);
+  background: var(--hew-surface-2);
+  box-shadow: var(--hew-shadow-lg);
+  font-size: 0.86rem;
+}
+.hew-dash-nav {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  padding: 18px 12px;
+  background: var(--hew-forest-800);
+  color: rgba(255, 255, 255, 0.85);
+}
+.hew-dash-nav .hew-brand { font-size: 0.95rem; margin: 0 6px 14px; }
+.hew-dash-nav .hew-brand .hew-logo { width: 26px; height: 26px; }
+.hew-dash-nav span {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: var(--hew-radius-sm);
+}
+.hew-dash-nav span.is-active { background: var(--hew-forest-600); color: #fff; }
+.hew-dash-nav .hew-icon { width: 18px; height: 18px; }
+.hew-dash-main { display: grid; gap: 14px; padding: 18px; }
+.hew-dash-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.hew-dash-top h3 { font-size: 1.2rem; }
+.hew-dash-tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+.hew-dash-tiles .hew-card { padding: 14px; border-radius: var(--hew-radius); }
+.hew-dash-tiles .hew-icon { width: 20px; height: 20px; color: var(--hew-teal-500); }
+.hew-dash-tiles.hew-tiles-2 { grid-template-columns: repeat(2, 1fr); }
+.hew-dash-grid {
+  display: grid;
+  grid-template-columns: 1.7fr 1fr;
+  gap: 12px;
+}
+.hew-dash-grid .hew-card { padding: 16px; border-radius: var(--hew-radius); }
+.hew-insight-card {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+.hew-insight-card h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.95rem;
+}
+
+/* Pricing */
+.hew-plans {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 22px;
+  align-items: stretch;
+}
+.hew-plans.is-single {
+  grid-template-columns: minmax(0, 440px);
+  justify-content: center;
+}
+.hew-plan {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 16px;
+  padding: 30px 26px;
+}
+.hew-plan.is-featured {
+  border: 2px solid var(--hew-mint-500);
+  background: linear-gradient(180deg, var(--hew-mint-100) 0%, var(--hew-surface) 38%);
+  box-shadow: var(--hew-shadow);
+}
+.hew-plan .hew-chip-mint {
+  position: absolute;
+  top: -13px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.hew-plan-price {
+  font-family: var(--hew-font-display);
+  font-size: 2.6rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--hew-ink);
+}
+.hew-plan-price small {
+  font-family: var(--hew-font-body);
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--hew-ink-3);
+}
+.hew-plan-summary { color: var(--hew-ink-2); font-size: 0.95rem; }
+.hew-plan-note { font-size: 0.82rem; color: var(--hew-ink-3); }
+
+/* Professionals split */
+.hew-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  gap: 48px;
+}
+.hew-photo.has-photo { --hew-photo: url("img/professional.jpg"); }
+.hew-photo {
+  min-height: 360px;
+  border-radius: var(--hew-radius-lg);
+  background: var(--hew-photo, linear-gradient(135deg, var(--hew-teal-100), var(--hew-surface-3)));
+  background-size: cover;
+  background-position: center;
+}
+
+/* Honest limits */
+.hew-limits {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+}
+.hew-limit {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 22px;
+  border-left: 4px solid var(--hew-amber-500);
+}
+.hew-limit strong {
+  font-family: var(--hew-font-display);
+  font-size: 1rem;
+  font-weight: 600;
+}
+.hew-limit p { font-size: 0.92rem; color: var(--hew-ink-2); }
+
+/* FAQ */
+.hew-faq {
+  display: grid;
+  gap: 12px;
+  max-width: 820px;
+  margin: 0 auto;
+}
+.hew-faq details {
+  padding: 18px 22px;
+  border: 1px solid var(--hew-line);
+  border-radius: var(--hew-radius);
+  background: var(--hew-surface);
+}
+.hew-faq summary {
+  font-family: var(--hew-font-display);
+  font-weight: 600;
+  cursor: pointer;
+}
+.hew-faq details p { margin-top: 10px; color: var(--hew-ink-2); }
+
+/* Call to action band */
+.hew-cta {
+  padding: 72px 0;
+  background: linear-gradient(120deg, var(--hew-forest-800) 0%, var(--hew-forest-600) 100%);
+  color: #fff;
+}
+.hew-cta-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.hew-cta h2 { color: #fff; }
+.hew-cta p { color: rgba(255, 255, 255, 0.82); margin-top: 8px; }
+
+/* Interior page hero */
+.hew-page-hero {
+  padding: 72px 0 56px;
+  background: linear-gradient(180deg, var(--hew-teal-50) 0%, var(--hew-surface) 100%);
+  text-align: center;
+}
+.hew-page-hero .hew-wrap { display: grid; gap: 14px; justify-items: center; }
+.hew-page-hero .hew-lead { margin: 0 auto; }
+
+/* Long-form and legal */
+.hew-prose {
+  max-width: 760px;
+  margin: 0 auto;
+  display: grid;
+  gap: 28px;
+}
+.hew-prose section { display: grid; gap: 10px; }
+.hew-prose h2 { font-size: 1.35rem; }
+.hew-prose p,
+.hew-prose li { color: var(--hew-ink-2); }
+
+/* Forms */
+.hew-form { display: grid; gap: 16px; }
+.hew-form label { display: grid; gap: 6px; font-weight: 600; font-size: 0.92rem; }
+.hew-form input,
+.hew-form select,
+.hew-form textarea {
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 14px;
+  border: 1.5px solid var(--hew-line-strong);
+  border-radius: var(--hew-radius-sm);
+  background: var(--hew-surface);
+  color: var(--hew-ink);
+  font: inherit;
+  font-weight: 400;
+}
+.hew-form input:focus,
+.hew-form select:focus,
+.hew-form textarea:focus { border-color: var(--hew-teal-500); outline: none; }
+
+.hew-contact-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+}
+.hew-contact-grid .hew-card { display: grid; gap: 10px; align-content: start; }
+
+.hew-flash {
+  max-width: var(--hew-max);
+  margin: 16px auto 0;
+  padding: 12px 16px;
+  border-radius: var(--hew-radius);
+  background: var(--hew-teal-50);
+  border: 1px solid var(--hew-teal-200);
+}
+
+/* -- 8. Responsive -------------------------------------------------------- */
+
+@media (max-width: 1040px) {
+  .hew-feature-grid { grid-template-columns: repeat(2, 1fr); }
+  .hew-dash { grid-template-columns: 1fr; }
+  .hew-dash-nav { display: none; }
+  .hew-limits { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 1120px) {
+  .hew-menu-toggle { display: inline-flex; }
+  .hew-header-inner { flex-wrap: wrap; }
+  .hew-nav,
+  .hew-header-actions {
+    display: none;
+    width: 100%;
+  }
+  .hew-header.is-open .hew-nav,
+  .hew-header.is-open .hew-header-actions {
+    display: grid;
+    gap: 4px;
+    margin: 0;
+    padding-bottom: 14px;
+  }
+  .hew-nav .hew-menu { position: static; box-shadow: none; background: transparent; padding: 0 0 0 12px; }
+  .hew-nav .hew-menu a { color: rgba(255, 255, 255, 0.88); }
+}
+
+@media (max-width: 900px) {
+  .hew-hero-inner { grid-template-columns: 1fr; min-height: 0; padding-bottom: 120px; }
+  .hew-hero-preview { justify-self: start; }
+  .hew-hero-scene { display: none; }
+  .hew-benefits-card { grid-template-columns: repeat(2, 1fr); }
+  .hew-steps,
+  .hew-plans,
+  .hew-contact-grid { grid-template-columns: 1fr; }
+  .hew-detail,
+  .hew-split { grid-template-columns: 1fr; gap: 28px; }
+  .hew-detail.is-flipped .hew-detail-copy { order: 0; }
+  .hew-footer-grid { grid-template-columns: 1fr 1fr; }
+  .hew-dash-tiles { grid-template-columns: repeat(2, 1fr); }
+  .hew-dash-grid { grid-template-columns: 1fr; }
+  .hew-section { padding: 64px 0; }
+}
+
+@media (max-width: 560px) {
+  .hew-benefit { padding: 6px 4px; gap: 10px; }
+  .hew-benefit .hew-icon-tile { width: 42px; height: 42px; }
+  .hew-feature-grid,
+  .hew-limits,
+  .hew-footer-grid { grid-template-columns: 1fr; }
+  .hew-hero-preview .hew-stats-row { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .hew-hero-actions .hew-btn { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hew-btn { transition: none; }
+  .hew-btn:hover { transform: none; }
+}
