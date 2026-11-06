@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='utility-onboarding.css') }}">{% endblock %}
+{% block content %}
+<main class="utility-register">
+  <p><a href="{{ url_for('utility_onboarding_list') }}">← All utilities</a></p>
+  <section class="panel">
+    <h2>{{ 'Keep the next step clear.' if record.id else 'Bring another utility into the list.' }}</h2>
+    <p>Record what we know, what remains and who will follow up. Changing a status does not send an application, accept terms or enable collection.</p>
+    <p class="muted">Use evidence summaries and references. Do not enter passwords, keys, tokens, customer records, tax IDs or private addresses.</p>
+    {% if errors %}<div class="register-errors" role="alert"><h3>These details need attention.</h3><ul>{% for error in errors %}<li>{{ error }}</li>{% endfor %}</ul>{% if record.id %}<a href="{{ url_for('utility_onboarding_detail', utility_id=record.id) }}">Reload the saved record</a>{% endif %}</div>{% endif %}
+    <form method="post" class="register-edit">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="revision" value="{{ record.revision|default(0) }}">
+      <fieldset><legend>The utility</legend><div class="register-fields">
+        {% for key, label in [('name', 'Utility name'), ('country', 'Country'), ('territory', 'Service territory'), ('owner', 'Person responsible')] %}
+          <label>{{ label }}<input name="{{ key }}" value="{{ record[key] }}" maxlength="{{ text_limits[key] }}" {% if key in ['name', 'country'] %}required{% endif %}></label>
+        {% endfor %}
+      </div></fieldset>
+      <fieldset><legend>Where we stand</legend><div class="register-fields">
+        {% for key, title in [('queue', 'Work status'), ('registration', 'Registration'), ('connection', 'Connection readiness'), ('cost', 'Cost confirmation')] %}
+          <label>{{ title }}<select name="{{ key }}" required>{% for value, label in choices[key].items() %}<option value="{{ value }}" {% if record[key] == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+        {% endfor %}
+      </div><p class="muted">A working connection needs an approved registration, a confirmed free route and evidence of a successful authorized import. Approval alone is not enough.</p></fieldset>
+      <fieldset><legend>What still needs to happen</legend>
+        {% for key, label, rows in [('next_action', 'Next action', 3), ('requirements', 'Outstanding requirements — one per line', 5), ('blocker', 'What is blocking progress?', 3)] %}
+          <label>{{ label }}<textarea name="{{ key }}" rows="{{ rows }}" maxlength="{{ text_limits[key] }}" {% if key == 'next_action' %}required{% endif %}>{{ record[key] }}</textarea></label>
+        {% endfor %}
+        <label>Follow-up date<input type="date" name="follow_up" value="{{ record.follow_up }}"></label>
+      </fieldset>
+      <fieldset><legend>The evidence behind the status</legend>
+        <label>Evidence summary and references<textarea name="evidence_note" rows="5" maxlength="4000">{{ record.evidence_note }}</textarea></label>
+        <label>Evidence or program link (HTTPS)<input type="url" name="evidence_url" maxlength="1000" value="{{ record.evidence_url }}"></label>
+        {% if record.evidence_url and not errors %}<p><a href="{{ record.evidence_url }}" target="_blank" rel="noopener noreferrer">Open saved reference ↗</a></p>{% endif %}
+        <div class="register-fields">
+          <label>Last reviewed<input type="date" name="reviewed_on" value="{{ record.reviewed_on }}"></label>
+          <label>Successful connection verified on<input type="date" name="verified_on" value="{{ record.verified_on }}"></label>
+        </div>
+      </fieldset>
+      <div class="register-actions"><button type="submit">{{ 'Save status' if record.id else 'Add utility' }}</button><a href="{{ url_for('utility_onboarding_list') }}">Back to list</a></div>
+    </form>
+  </section>
+  {% if history %}<section class="panel"><h2>Change history</h2><p class="muted">The latest 50 saved versions are shown here. All versions remain in the record.</p>
+    {% for entry in history %}<details class="register-history"><summary>Version {{ entry.revision }} · {{ entry.changed_at }} · {{ entry.actor }}</summary>
+      <dl>{% for key, value in entry['values'].items() %}<dt>{{ key|replace('_', ' ')|capitalize }}</dt><dd>{{ choices[key].get(value, value) if key in choices else (value or 'Not recorded') }}</dd>{% endfor %}</dl>
+    </details>{% endfor %}
+  </section>{% endif %}
+</main>
+{% endblock %}

@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='utility-onboarding.css') }}">{% endblock %}
+{% block content %}
+<main class="utility-register">
+  <section class="panel register-intro">
+    <div><p class="eyebrow">Worldwide access</p><h2>Every utility, one clear next step.</h2>
+      <p>Our goal is to work with every Green Button utility worldwide. This is our working list, not a complete global directory.</p>
+      <p class="muted">Approval, connection readiness and costs are tracked separately. Updates here do not submit applications or switch on collection. Only free routes may proceed.</p>
+    </div>
+    <a class="button" href="{{ url_for('utility_onboarding_new') }}">Add a utility</a>
+  </section>
+  <section class="register-totals" aria-label="All tracked utilities">
+    {% for key, label in [('tracked', 'Utilities tracked'), ('approved', 'Registrations approved'), ('working', 'Working connections'), ('blocked', 'Blocked'), ('due', 'Follow-ups due')] %}
+      <div class="panel"><strong>{{ totals[key] }}</strong><span>{{ label }}</span></div>
+    {% endfor %}
+  </section>
+  <section class="panel">
+    <h2>Find the work that can move forward.</h2>
+    <form method="get" class="register-filters" aria-label="Filter utilities">
+      <label class="register-search">Search<input name="q" value="{{ filters.q }}" placeholder="Utility, owner or next action" maxlength="200"></label>
+      <label>Country<select name="country"><option value="">All countries</option>{% for country in countries %}<option {% if country == filters.country %}selected{% endif %}>{{ country }}</option>{% endfor %}</select></label>
+      {% for key, title in [('queue', 'Work status'), ('registration', 'Registration'), ('connection', 'Connection'), ('cost', 'Cost')] %}
+        <label>{{ title }}<select name="{{ key }}"><option value="">All</option>{% for value, label in choices[key].items() %}<option value="{{ value }}" {% if filters[key] == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+      {% endfor %}
+      <label>Follow-up<select name="due"><option value="">Any date</option><option value="1" {% if filters.due %}selected{% endif %}>Due today or overdue</option></select></label>
+      <div class="register-actions"><button type="submit">Filter</button><a href="{{ url_for('utility_onboarding_list') }}">Clear</a></div>
+    </form>
+    <p class="muted">Showing {{ records|length }} of {{ totals.tracked }} utilities. Totals above cover the full list.</p>
+    <div class="register-table-wrap">
+      <table class="register-table">
+        <thead><tr><th>Utility</th><th>Progress</th><th>Next action</th><th>Owner / follow-up</th></tr></thead>
+        <tbody>{% for record in records %}
+          <tr>
+            <td data-label="Utility"><a class="utility-name" href="{{ url_for('utility_onboarding_detail', utility_id=record.id) }}">{{ record.name }}</a><p>{{ record.country }} · {{ record.territory }}</p></td>
+            <td data-label="Progress"><span class="register-status {{ 'is-blocked' if record.queue == 'blocked' else '' }}">{{ choices.queue[record.queue] }}</span><p>{{ choices.registration[record.registration] }}<br>{{ choices.connection[record.connection] }}</p><small>{{ choices.cost[record.cost] }}</small></td>
+            <td data-label="Next action"><p>{{ record.next_action }}</p>{% if record.blocker %}<details><summary>What’s blocking this?</summary><p>{{ record.blocker }}</p></details>{% endif %}</td>
+            <td data-label="Owner / follow-up">{{ record.owner or 'Unassigned' }}<p class="{{ 'register-due' if record.due else '' }}">{{ record.follow_up or 'No follow-up date' }}</p><small>Reviewed {{ record.reviewed_on or 'not yet' }}</small></td>
+          </tr>
+        {% else %}<tr><td colspan="4">No utilities match these filters. Clear the filters or add a utility.</td></tr>{% endfor %}</tbody>
+      </table>
+    </div>
+  </section>
+</main>
+{% endblock %}

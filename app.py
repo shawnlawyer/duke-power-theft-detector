@@ -69,6 +69,7 @@ from werkzeug.utils import secure_filename
 from utility_guides import UTILITY_DOWNLOAD_GUIDES, get_utility_download_guide
 import national_grid
 import xcel
+import utility_onboarding
 
 try:
     import psycopg
@@ -1798,6 +1799,7 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
 def migrate_database(conn: DatabaseConnection) -> None:
     national_grid.ensure_schema(conn)
     xcel.ensure_schema(conn)
+    utility_onboarding.ensure_schema(conn)
     if conn.kind == "postgres":
         migrate_database_postgres(conn)
         ensure_equipment_history_table(conn)
@@ -16611,6 +16613,7 @@ def create_web_app() -> Flask:
 
     national_grid.register_routes(app, sys.modules[__name__], current_customer_user)
     xcel.register_routes(app, sys.modules[__name__], current_customer_user)
+    utility_onboarding.register_routes(app, sys.modules[__name__], require_staff_user)
     return app
 
 
