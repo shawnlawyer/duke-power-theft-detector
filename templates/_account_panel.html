@@ -469,6 +469,25 @@
       {% endif %}
     </div>
   {% endif %}
+  {% set green_button_key = coned_oru_provider_key(selected_connection_provider) %}
+  {% if green_button_key %}
+    <div class="connection-workflow">
+      <h3>Connect your {{ selected_connection_provider }} account</h3>
+      {% if coned_oru_available(green_button_key) %}
+        <p class="plain-note">Sign in with {{ selected_connection_provider }} in a new tab and choose what to share. Your password stays with the utility. We'll match your account before importing any readings.</p>
+        {% if is_customer and can_manage_account %}
+          <form action="{{ url_for('coned_oru_start', key=green_button_key|lower) }}" method="post" target="_blank" rel="noopener">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+            <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Connect {{ selected_connection_provider }}</button>
+          </form>
+        {% endif %}
+        <p class="plain-note">Choose Sync now after connecting. Estimated readings stay out of your measured history. Remove the connection to stop updates here, and manage sharing with the utility to withdraw permission there too.</p>
+      {% else %}
+        <p class="plain-note">Automatic updates are being prepared. You can still download your Green Button history from {{ selected_connection_provider }} and upload it here.</p>
+      {% endif %}
+    </div>
+  {% endif %}
   {% if provider_is_duke %}
     <div class="connection-workflow">
       <div class="section-header">
