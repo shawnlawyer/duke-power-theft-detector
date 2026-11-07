@@ -67,6 +67,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
 from utility_guides import UTILITY_DOWNLOAD_GUIDES, get_utility_download_guide
+import coned_oru
 import national_grid
 import xcel
 import utility_onboarding
@@ -1718,6 +1719,7 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
 def migrate_database(conn: DatabaseConnection) -> None:
     national_grid.ensure_schema(conn)
     xcel.ensure_schema(conn)
+    coned_oru.ensure_schema(conn)
     utility_onboarding.ensure_schema(conn)
     if conn.kind == "postgres":
         migrate_database_postgres(conn)
@@ -6941,6 +6943,7 @@ def clear_utility_access_if_unauthorized(
     if int(remaining["count"] if remaining is not None else 0) > 0:
         return False
     conn.execute("DELETE FROM xcel_oauth_states WHERE account_number = (SELECT account_number FROM accounts WHERE id = ?)", (int(account_id),))
+    conn.execute("DELETE FROM coned_oru_oauth_states WHERE account_number = (SELECT account_number FROM accounts WHERE id = ?)", (int(account_id),))
     cursor = conn.execute(
         """
         UPDATE utility_connections
@@ -7435,6 +7438,7 @@ def execute_account_data_deletion(request_id: int, staff_user_id: int) -> dict[s
                 quarantined_files.append((original_path, quarantine_path))
 
             conn.execute("DELETE FROM xcel_oauth_states WHERE account_number = (SELECT account_number FROM accounts WHERE id = ?)", (account_id,))
+            conn.execute("DELETE FROM coned_oru_oauth_states WHERE account_number = (SELECT account_number FROM accounts WHERE id = ?)", (account_id,))
             tables = (
                 "xcel_meter_bindings",
                 "imported_files",
@@ -8360,6 +8364,8 @@ def save_utility_connection(account_number: str | None, form_like) -> dict[str, 
         raise ValueError("Use National Grid sign-in to create this connection.")
     if access_method == xcel.METHOD:
         raise ValueError("Use Xcel sign-in to create this connection.")
+    if access_method == coned_oru.METHOD:
+        raise ValueError("Use the utility sign-in steps to create a Green Button connection.")
     access_identifier = clean_optional_text(form_like.get("access_identifier"))
     if access_identifier and "://" in access_identifier:
         access_identifier = validate_utility_export_url(access_identifier)
@@ -8779,6 +8785,8 @@ def sync_utility_connection(account_number: str | None, connection_id: int) -> d
         imported = national_grid.sync(sys.modules[__name__], connection)
     elif connection["access_method"] == xcel.METHOD:
         imported = xcel.sync(sys.modules[__name__], connection)
+    elif connection["access_method"] == coned_oru.METHOD:
+        imported = coned_oru.sync(sys.modules[__name__], connection)
     else:
         exported = fetch_utility_connection_export(connection)
         filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
@@ -8802,6 +8810,7 @@ def run_scheduled_utility_sync(account_number: str | None = None) -> dict[str, o
     ensure_database()
     with get_db_connection() as conn:
         conn.execute("DELETE FROM xcel_oauth_states WHERE expires_at < ?", (int(time.time()),))
+        conn.execute("DELETE FROM coned_oru_oauth_states WHERE expires_at < ?", (int(time.time()),))
         conn.commit()
     connections = list_saved_utility_connections_for_sync(account_number=account_number)
     results: list[dict[str, object]] = []
@@ -13326,6 +13335,8 @@ def create_web_app() -> Flask:
             "national_grid_provider_matches": national_grid.provider_matches,
             "xcel_available": xcel.available(),
             "xcel_provider_matches": xcel.provider_matches,
+            "coned_oru_provider_key": coned_oru.provider_key,
+            "coned_oru_available": coned_oru.available,
             "csrf_token": get_csrf_token,
             "today_iso": ddate.today().isoformat(),
             "app_base_url": build_public_base_url(),
@@ -16532,6 +16543,7 @@ def create_web_app() -> Flask:
 
     national_grid.register_routes(app, sys.modules[__name__], current_customer_user)
     xcel.register_routes(app, sys.modules[__name__], current_customer_user)
+    coned_oru.register_routes(app, sys.modules[__name__], current_customer_user)
     utility_onboarding.register_routes(app, sys.modules[__name__], require_staff_user)
     return app
 

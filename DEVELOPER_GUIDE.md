@@ -37,7 +37,7 @@ Tests use temporary paths. Never point tests at the production database.
 | Review pages | `templates/index.html`, `templates/_analysis_surface.html`, `templates/_staff_panel.html` | commission/reviewer dashboard and drilldowns |
 | Public pages | `templates/marketing_*.html`, `templates/marketing_base.html`, `static/hew-design.css`, `templates/_hew_ui.html` | public website and product copy |
 | Database setup | `migrate_database_postgres()` and `migrate_database()` in `app.py` | Postgres and SQLite schema creation/migrations |
-| Utility adapters | parser classes near `parse_interval_file()` | Green Button ESPI XML, Duke-style XML, and interval CSV |
+| Utility adapters | parser classes near `parse_interval_file()`; `national_grid.py`, `xcel.py`, `coned_oru.py` | Green Button ESPI XML, Duke-style XML, and interval CSV |
 | Tests | `tests/test_app.py`, `tests/test_omen_deploy_contract.py`, `tests/test_release_security_contract.py` | behavior, import, security, and deployment contracts |
 | Production | `deploy/ec2/README.md`, `deploy/ec2/home-energy-watch.service`, `deploy/ec2/home-energy-watch-direct.sh` | EC2 Docker launch and operations |
 
@@ -128,6 +128,23 @@ Tests cover alias matching, account switching, page rendering, and the existing 
 Connections use `access_method=duke_oauth`. `sync_utility_connection()` dispatches those records to `sync_duke_oauth_connection()`; all other saved export connections keep the existing fetch-and-parse path. Duke sync fetches completed hourly readings for a rolling 30-day window, combines multiple electric meters at the same timestamp, refreshes the encrypted token bundle, and passes the frame through `import_interval_frame_to_db()`. This overlap is intentional: identical readings are idempotent and conflicts preserve the stored value.
 
 Production must run `python app.py --sync-utilities` daily. A failed or expired Duke token should mark the connection failed and tell the customer to connect again; it must not remove existing readings. Keep the manual Duke Usage Details link and History upload UI available even when a Duke automatic connection exists.
+
+### Con Edison and Orange & Rockland connection (switched off)
+
+`coned_oru.py` holds a Green Button Connect My Data connector for Con Edison (`CONED`) and Orange & Rockland (`ORU`), in the same shape as `national_grid.py` and `xcel.py`: `config()`, `available()`, `sync(app_module, connection)`, and `register_routes()`, with `access_method=coned_oru_green_button`.
+
+It is **disabled in source**. `coned_oru.IMPLEMENTATION_READY` is `False` and is deliberately not an environment flag. The same check gates the account-page button, the start and return routes, saving, and manual and scheduled sync. Setting the `POWER_CONED_GREEN_BUTTON_*` / `POWER_ORU_GREEN_BUTTON_*` variables (including `..._APPROVED=true`) is necessary but not sufficient. Customer uploads remain the supported path until it is turned on.
+
+What it already does: provider-returned resource addresses only (the configured scope is sent once at sign-in and never re-requested on refresh), HTTPS-only same-origin requests that never follow redirects and are size-bounded, encrypted token storage, a stored account/subscription binding checked against the utility's `AuthorizationModel` at sign-in and on every sync, one-time sign-in state tied to the browser, a cross-worker sync lease, conditional token replacement that cannot restore a withdrawn or replaced connection, and `connection_guard` on import. HTTP 202 (batch still being prepared) is an error, never an empty import.
+
+Before turning it on, verify with utility-issued test credentials and finish:
+
+1. The real authorization/customer/usage-point shapes, scopes, expiry and revocation responses. Fixtures in `tests/test_green_button.py` are synthetic.
+2. The asynchronous batch lifecycle: persisted pending requests, authenticated notifications, fetching every chunk, per-file account checks, idempotent retries.
+3. Any separately hosted download origins (only the token endpoint's origin is allowed today).
+4. PostgreSQL concurrency tests against real reconnect/withdrawal timing, utility acceptance, confirmed no-cost access, and explicit approval.
+
+Source: Con Edison's Share My Data onboarding guide, including the Swagger and Postman downloads it links. Never commit signed download URLs, utility credentials, or customer response payloads.
 
 ## Weather, inventory, and baselines
 
