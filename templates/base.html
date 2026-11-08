@@ -1,3 +1,4 @@
+{% from "_hew_ui.html" import logo, icon %}
 <!doctype html>
 <html lang="en">
   <head>
@@ -5,11 +6,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ page_title or "Home Energy Watch" }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    {% if not (staff_user or customer_user) %}
+      <link rel="stylesheet" href="{{ url_for('static', filename='hew-design.css') }}">
+    {% endif %}
     <script defer src="{{ url_for('static', filename='app.js') }}"></script>
     {% block extra_head %}{% endblock %}
   </head>
   {% set active_user = staff_user if staff_user else customer_user %}
-  <body class="{{ 'app-body' if active_user else 'auth-body' }}">
+  <body class="{{ 'app-body' if active_user else 'auth-body hew hew-auth' }}">
     {% if active_user %}
       {% set nav_account = active_account_number if active_account_number is defined else request.args.get('account_number', '') %}
       <div class="app-shell">
@@ -114,15 +118,30 @@
             </div>
           </header>
     {% else %}
-      <div class="shell">
-        <header class="site-header">
-          <div class="header-row">
-            <div>
-              <p class="eyebrow">Home Energy Watch</p>
-              <h1>{{ page_title or ("Usage findings" if analysis else "Customer history") }}</h1>
-            </div>
+      <header class="hew-header">
+        <div class="hew-wrap hew-header-inner">
+          <a class="hew-brand" href="{{ marketing_base_url or '/' }}">{{ logo() }}<span>Home Energy Watch</span></a>
+          <div class="hew-auth-actions">
+            {% if request.endpoint not in ['login', 'customer_login'] %}
+              <a class="hew-btn hew-btn-ghost-light" href="{{ url_for('login') }}">Sign In</a>
+            {% endif %}
+            {% if request.endpoint != 'customer_signup' %}
+              <a class="hew-btn hew-btn-primary" href="{{ url_for('customer_signup') }}">Get Started</a>
+            {% endif %}
           </div>
-        </header>
+        </div>
+      </header>
+      <div class="hew-auth-stage">
+        <aside class="hew-auth-aside" aria-hidden="true">
+          <p class="hew-auth-aside-kicker">{{ icon("leaf") }} Home Energy Watch</p>
+          <p class="hew-auth-aside-title">Your home's electricity history, clear and organized.</p>
+          <ul>
+            <li>{{ icon("check") }} Bring in your utility history in minutes</li>
+            <li>{{ icon("check") }} Spot unusual overnight use and changes</li>
+            <li>{{ icon("check") }} Share a clean record when you need one</li>
+          </ul>
+        </aside>
+        <div class="shell hew-auth-shell">
     {% endif %}
 
     {% with messages = get_flashed_messages() %}
@@ -137,6 +156,11 @@
 
     {% block content %}{% endblock %}
 
+    {% if not active_user %}
+        </div>
+      </div>
+    {% endif %}
+
     <footer class="app-footer">
       <span>Home Energy Watch</span>
       <nav aria-label="Legal">
@@ -148,8 +172,6 @@
 
     {% if active_user %}
         </div>
-      </div>
-    {% else %}
       </div>
     {% endif %}
   </body>
