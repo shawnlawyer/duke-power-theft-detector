@@ -909,3 +909,243 @@ body.hew {
   .hew-btn { transition: none; }
   .hew-btn:hover { transform: none; }
 }
+
+/* -- Signed-out app screens ----------------------------------------------
+ * Sign in, sign up, password and link pages render through base.html with
+ * the older app stylesheet. On those pages the app tokens are remapped to the
+ * design system, and the shared components are restyled to match the site.
+ */
+
+body.hew-auth {
+  --paper: #ffffff;
+  --paper-raised: #ffffff;
+  --paper-recessed: var(--hew-teal-50);
+  --ground: var(--hew-surface-alt, #f4f8f7);
+  --ink: var(--hew-ink);
+  --ink-2: var(--hew-ink-2);
+  --ink-3: #5f716d;
+  --rule: var(--hew-line);
+  --rule-soft: var(--hew-line);
+  --rule-strong: var(--hew-line-strong);
+  --rule-ink: var(--hew-forest-900);
+  --accent: var(--hew-forest-600);
+  --accent-ink: var(--hew-forest-800);
+  --accent-wash: var(--hew-teal-50);
+  --accent-line: var(--hew-teal-200);
+  --radius: var(--hew-radius-sm);
+  --sans: var(--hew-font-body);
+  --mono: var(--hew-font-body);
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  font-size: 16px;
+  background:
+    radial-gradient(1100px 520px at 100% 0%, var(--hew-teal-100), transparent 60%),
+    radial-gradient(900px 480px at 0% 100%, var(--hew-mint-100), transparent 55%),
+    #f4f8f7;
+}
+
+.hew-auth-actions {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+}
+.hew-auth-actions .hew-btn { min-height: 38px; padding: 0 16px; font-size: 0.9rem; white-space: nowrap; }
+
+.hew-auth-stage {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 520px);
+  gap: 56px;
+  align-items: center;
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 56px var(--hew-gutter, 20px);
+}
+.hew-auth-stage:has(.signup-layout) { grid-template-columns: minmax(0, 1fr); max-width: 1120px; }
+.hew-auth-stage:has(.signup-layout) .hew-auth-aside { display: none; }
+
+.hew-auth-aside { display: grid; gap: 18px; color: var(--hew-forest-900); }
+.hew-auth-aside-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--hew-forest-600);
+}
+.hew-auth-aside-title {
+  font-family: var(--hew-font-display);
+  font-size: clamp(1.9rem, 3.6vw, 2.7rem);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+.hew-auth-aside ul { display: grid; gap: 12px; margin: 6px 0 0; padding: 0; list-style: none; }
+.hew-auth-aside li { display: flex; align-items: center; gap: 10px; color: var(--hew-ink-2); font-weight: 500; }
+.hew-auth-aside li .hew-icon {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 5px;
+  border-radius: 50%;
+  background: var(--hew-mint-100);
+  color: var(--hew-forest-700);
+}
+
+.hew-auth .hew-auth-shell { display: block; min-height: 0; max-width: none; padding: 0; margin: 0; }
+.hew-auth .auth-layout { max-width: none; padding: 0; }
+.hew-auth .signup-layout { display: block; width: 100%; max-width: 780px; margin: 0 auto; padding: 0; }
+
+.hew-auth .auth-block {
+  gap: 20px;
+  padding: 36px;
+  border: 1px solid var(--hew-line);
+  border-radius: var(--hew-radius-lg);
+  background: #fff;
+  box-shadow: 0 24px 60px -28px rgba(11, 58, 53, 0.35);
+}
+.hew-auth .section-header { display: block; padding: 0; border: 0; }
+.hew-auth .section-header h2 { margin: 6px 0 8px; font-size: clamp(1.6rem, 3vw, 2rem); }
+.hew-auth .section-kicker {
+  font-family: var(--hew-font-body);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--hew-teal-500);
+}
+.hew-auth .plain-note,
+.hew-auth .auth-note,
+.hew-auth .section-header > div > p:not(.section-kicker) { font-size: 0.95rem; line-height: 1.55; color: var(--hew-ink-2); }
+.hew-auth label > small { font-size: 0.82rem; color: #5f716d; }
+
+.hew-auth .auth-block form,
+.hew-auth .account-form { display: grid; gap: 16px; }
+.hew-auth label > span:first-child {
+  margin-bottom: 6px;
+  font-family: var(--hew-font-body);
+  font-size: 0.88rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--hew-ink);
+}
+.hew-auth input[type="text"],
+.hew-auth input[type="email"],
+.hew-auth input[type="password"],
+.hew-auth input[type="tel"],
+.hew-auth input[type="number"],
+.hew-auth select,
+.hew-auth textarea {
+  min-height: 48px;
+  padding: 10px 14px;
+  border: 1.5px solid var(--hew-line-strong);
+  border-radius: var(--hew-radius-sm);
+  font-family: var(--hew-font-body);
+  font-size: 1rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.hew-auth input:focus,
+.hew-auth select:focus,
+.hew-auth textarea:focus {
+  outline: none;
+  border-color: var(--hew-teal-500);
+  box-shadow: 0 0 0 4px var(--hew-teal-100);
+}
+.hew-auth input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--hew-forest-600); }
+
+.hew-auth button[type="submit"],
+.hew-auth .button-primary,
+.hew-auth .button-link {
+  width: 100%;
+  min-height: 50px;
+  padding: 0 22px;
+  border: 1.5px solid var(--hew-mint-500);
+  border-radius: var(--hew-radius-sm);
+  background: var(--hew-mint-500);
+  color: var(--hew-forest-900);
+  font-family: var(--hew-font-body);
+  font-size: 1rem;
+  font-weight: 700;
+}
+.hew-auth button[type="submit"]:hover,
+.hew-auth .button-primary:hover,
+.hew-auth .button-link:hover {
+  border-color: var(--hew-mint-400);
+  background: var(--hew-mint-400);
+  color: var(--hew-forest-900);
+}
+.hew-auth .button-secondary {
+  min-height: 46px;
+  padding: 0 20px;
+  border: 1.5px solid var(--hew-line-strong);
+  border-radius: var(--hew-radius-sm);
+  background: #fff;
+  color: var(--hew-forest-900);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+.hew-auth .button-row,
+.hew-auth .app-layout form > .button-row { display: grid; gap: 10px; justify-self: stretch; }
+.hew-auth .button-row > * { width: 100%; }
+.hew-auth .inline-link { color: var(--hew-forest-600); font-family: inherit; font-size: inherit; font-weight: 600; letter-spacing: 0; text-transform: none; text-decoration: underline; text-underline-offset: 3px; }
+
+.hew-auth .plan-card,
+.hew-auth .choice-card {
+  padding: 18px;
+  border: 1.5px solid var(--hew-line);
+  border-radius: var(--hew-radius);
+  background: #fff;
+}
+.hew-auth .plan-card:has(input:checked) { border-color: var(--hew-mint-500); box-shadow: 0 0 0 4px var(--hew-mint-100); }
+.hew-auth .signup-pricing .plan-card { display: grid; gap: 4px; background: var(--hew-teal-50); }
+.hew-auth .signup-pricing .plan-card:only-child input[type="radio"] { display: none; }
+.hew-auth .signup-pricing .plan-card strong { order: -1; font-family: var(--hew-font-display); font-size: 1.15rem; color: var(--hew-forest-900); }
+.hew-auth .signup-pricing .plan-card span { margin: 0; font-size: 1rem; font-weight: 600; color: var(--hew-forest-700); text-transform: none; letter-spacing: 0; font-family: var(--hew-font-body); }
+.hew-auth .signup-pricing .plan-card small { font-size: 0.9rem; color: var(--hew-ink-2); }
+.hew-auth .plan-price { font-family: var(--hew-font-display); font-size: 1.6rem; color: var(--hew-forest-900); }
+.hew-auth .plan-points li { font-size: 0.92rem; }
+.hew-auth .plan-points li::before { top: 11px; background: var(--hew-mint-500); height: 2px; }
+
+.hew-auth .flash-list { width: 100%; max-width: 1080px; margin: 0 auto; padding: 20px var(--hew-gutter, 20px) 0; }
+.hew-auth .flash {
+  padding: 12px 16px;
+  border: 1px solid var(--hew-teal-200);
+  border-radius: var(--hew-radius);
+  background: var(--hew-teal-50);
+  color: var(--hew-forest-900);
+  font-size: 0.95rem;
+}
+
+.hew-auth .app-footer {
+  justify-content: center;
+  gap: 18px;
+  padding: 22px var(--hew-gutter, 20px);
+  border-top: 1px solid var(--hew-line);
+  background: transparent;
+  font-family: var(--hew-font-body);
+  font-size: 0.85rem;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--hew-ink-2);
+}
+.hew-auth .app-footer a { color: var(--hew-ink-2); }
+.hew-auth .app-footer a:hover { color: var(--hew-forest-600); }
+
+@media (max-width: 900px) {
+  .hew-auth-stage { grid-template-columns: minmax(0, 1fr); gap: 28px; padding-top: 32px; padding-bottom: 40px; }
+  .hew-auth-aside ul { display: none; }
+  .hew-auth-aside-title { font-size: 1.6rem; }
+  .hew-auth-stage { align-items: start; }
+}
+
+@media (max-width: 560px) {
+  .hew-auth-stage { padding-top: 24px; }
+  .hew-auth-aside { display: none; }
+  .hew-auth .auth-block { padding: 24px 20px; }
+  .hew-auth .field-grid { grid-template-columns: minmax(0, 1fr); }
+  .hew-auth .hew-brand span { display: none; }
+}
