@@ -67,6 +67,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
 from utility_guides import UTILITY_DOWNLOAD_GUIDES, get_utility_download_guide
+import account_cleanup
 import coned_oru
 import national_grid
 import xcel
@@ -695,6 +696,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-encrypt all sealed secrets with the first POWER_DATA_ENCRYPTION_KEY and exit",
     )
+    parser.add_argument("--list-accounts", action="store_true", help="Print every account with its address, emails, billing and readings, then exit")
+    parser.add_argument("--purge-accounts", nargs="+", metavar="ACCOUNT_NUMBER", help="Permanently delete these accounts (dry run unless --confirm-purge)")
+    parser.add_argument("--confirm-purge", action="store_true", help="Actually delete the accounts named by --purge-accounts")
     parser.add_argument("--host", default="0.0.0.0", help="Web host to bind when using --serve")
     parser.add_argument("--port", type=int, default=8000, help="Web port to bind when using --serve")
     return parser
@@ -16910,6 +16914,24 @@ def main() -> None:
         print(f"Unreadable secrets: {reseal_summary['failed']}")
         if reseal_summary["failed"]:
             sys.exit(1)
+        return
+
+    if args.list_accounts:
+        for item in account_cleanup.list_accounts_for_review(sys.modules[__name__]):
+            print(json.dumps(item, sort_keys=True))
+        return
+
+    if args.purge_accounts:
+        try:
+            purge_summary = account_cleanup.purge_accounts(
+                sys.modules[__name__], args.purge_accounts, confirm=args.confirm_purge
+            )
+        except Exception as exc:
+            print(f"Error purging accounts: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(purge_summary, sort_keys=True))
+        if not args.confirm_purge:
+            print("Dry run only. Nothing was deleted. Add --confirm-purge to delete.")
         return
 
     if args.ensure_owner_free_play_code:
