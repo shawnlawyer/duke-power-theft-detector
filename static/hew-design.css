@@ -916,7 +916,8 @@ body.hew {
  * design system, and the shared components are restyled to match the site.
  */
 
-body.hew-auth {
+body.hew-auth,
+body.hew-app {
   --paper: #ffffff;
   --paper-raised: #ffffff;
   --paper-recessed: var(--hew-teal-50);
@@ -924,6 +925,7 @@ body.hew-auth {
   --ink: var(--hew-ink);
   --ink-2: var(--hew-ink-2);
   --ink-3: #5f716d;
+  --ink-4: #8a9a96;
   --rule: var(--hew-line);
   --rule-soft: var(--hew-line);
   --rule-strong: var(--hew-line-strong);
@@ -935,6 +937,9 @@ body.hew-auth {
   --radius: var(--hew-radius-sm);
   --sans: var(--hew-font-body);
   --mono: var(--hew-font-body);
+}
+
+body.hew-auth {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
@@ -1148,4 +1153,249 @@ body.hew-auth {
   .hew-auth .auth-block { padding: 24px 20px; }
   .hew-auth .field-grid { grid-template-columns: minmax(0, 1fr); }
   .hew-auth .hew-brand span { display: none; }
+}
+
+/* -- Signed-in app ---------------------------------------------------------
+ * The signed-in screens keep their layouts and data components from
+ * styles.css. Here the shell (sidebar, top bar) is redrawn to match the
+ * dashboard mockup, and shared components pick up the design system.
+ */
+
+body.hew-app {
+  --sidebar-w: 248px;
+  --ok: var(--hew-forest-600);
+  --ok-wash: var(--hew-mint-100);
+  --flag: #b4471f;
+  --flag-wash: #fdeee6;
+  --flag-line: #f2c3aa;
+  font-size: 14px;
+  background: var(--hew-surface-2);
+}
+
+/* sidebar */
+.hew-app .app-sidebar {
+  border-right: 0;
+  background: var(--hew-forest-800);
+  color: rgba(255, 255, 255, 0.82);
+}
+.hew-app .app-brand { padding: 20px 18px 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.hew-app .brand-lockup { gap: 10px; color: #fff; }
+.hew-app .app-sidebar .brand-mark { width: 34px; height: 34px; background: none; }
+.hew-app .app-sidebar .brand-mark .hew-logo { width: 34px; height: 34px; }
+.hew-app .brand-lockup .eyebrow {
+  font-family: var(--hew-font-display);
+  font-size: 0.98rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #fff;
+}
+.hew-app .brand-lockup strong { font-size: 0.78rem; font-weight: 500; color: var(--hew-mint-400); }
+
+.hew-app .sidebar-account {
+  margin: 14px 14px 6px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--hew-radius);
+  background: rgba(255, 255, 255, 0.05);
+}
+.hew-app .sidebar-account .label { color: rgba(255, 255, 255, 0.55); }
+.hew-app .sidebar-account strong { font-family: var(--hew-font-body); font-size: 0.95rem; color: #fff; }
+.hew-app .sidebar-account p { font-size: 0.8rem; color: rgba(255, 255, 255, 0.65); }
+
+.hew-app .app-nav { gap: 2px; padding: 10px 12px; }
+.hew-app .app-nav a {
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border-left: 0;
+  border-radius: var(--hew-radius-sm);
+  color: rgba(255, 255, 255, 0.78);
+}
+.hew-app .app-nav a .hew-icon { flex: none; width: 19px; height: 19px; }
+.hew-app .app-nav a span { font-size: 0.92rem; font-weight: 500; }
+.hew-app .app-nav a small { display: none; }
+.hew-app .app-nav a:hover { background: rgba(255, 255, 255, 0.07); color: #fff; }
+.hew-app .app-nav a.active { background: var(--hew-forest-600); color: #fff; }
+.hew-app .app-nav a.active .hew-icon { color: var(--hew-mint-400); }
+
+.hew-app .sidebar-session { padding: 16px 18px; border-top: 1px solid rgba(255, 255, 255, 0.08); }
+.hew-app .sidebar-session .label { color: rgba(255, 255, 255, 0.55); }
+.hew-app .sidebar-session strong { font-size: 0.9rem; color: #fff; }
+.hew-app .sidebar-session p { font-size: 0.8rem; color: rgba(255, 255, 255, 0.6); }
+.hew-app .sidebar-session button.button-secondary[type="submit"] {
+  border-color: rgba(255, 255, 255, 0.25);
+  background: transparent;
+  color: #fff;
+}
+.hew-app .sidebar-session button.button-secondary[type="submit"]:hover { border-color: var(--hew-mint-400); background: rgba(255, 255, 255, 0.06); color: #fff; }
+
+/* top bar and page */
+.hew-app .app-main-shell { background: var(--hew-surface-2); }
+.hew-app .app-topbar {
+  padding: 18px var(--gutter);
+  border-bottom: 1px solid var(--hew-line);
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+}
+.hew-app .app-topbar h1 { font-family: var(--hew-font-display); font-size: 1.45rem; font-weight: 700; color: var(--hew-forest-900); }
+.hew-app .app-topbar .eyebrow { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; color: var(--hew-teal-500); }
+.hew-app .topbar-chip { padding: 5px 12px; border-radius: var(--hew-radius-pill); font-size: 0.8rem; }
+
+.hew-app .eyebrow,
+.hew-app .section-kicker,
+.hew-app .label { font-family: var(--hew-font-body); font-weight: 700; color: var(--hew-teal-500); }
+
+.hew-app h2 { font-family: var(--hew-font-display); color: var(--hew-forest-900); }
+.hew-app .section-header h2 { font-size: 1.15rem; }
+.hew-app .section-header > div > p:not(.section-kicker),
+.hew-app .plain-note { font-size: 0.88rem; line-height: 1.5; color: var(--hew-ink-2); }
+
+/* cards */
+.hew-app .section-block {
+  gap: 14px;
+  padding: 20px 22px 22px;
+  border: 1px solid var(--hew-line);
+  border-radius: var(--hew-radius);
+  background: #fff;
+  box-shadow: var(--hew-shadow-sm);
+}
+
+/* tables */
+.hew-app table { font-size: 0.86rem; }
+.hew-app thead th {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--hew-line);
+  background: var(--hew-surface-2);
+  font-family: var(--hew-font-body);
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--hew-ink-3);
+}
+.hew-app thead th:first-child { border-top-left-radius: var(--hew-radius-sm); }
+.hew-app thead th:last-child { border-top-right-radius: var(--hew-radius-sm); }
+.hew-app tbody td { padding: 10px 12px; border-bottom-color: var(--hew-line); }
+.hew-app tbody tr:hover { background: var(--hew-teal-50); }
+
+/* forms and buttons */
+.hew-app input[type="text"],
+.hew-app input[type="email"],
+.hew-app input[type="password"],
+.hew-app input[type="number"],
+.hew-app input[type="date"],
+.hew-app input[type="search"],
+.hew-app input[type="url"],
+.hew-app input[type="tel"],
+.hew-app select,
+.hew-app textarea {
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1.5px solid var(--hew-line-strong);
+  border-radius: var(--hew-radius-sm);
+  font-family: var(--hew-font-body);
+  font-size: 0.92rem;
+}
+.hew-app input:focus,
+.hew-app select:focus,
+.hew-app textarea:focus {
+  outline: none;
+  border-color: var(--hew-teal-500);
+  box-shadow: 0 0 0 3px var(--hew-teal-100);
+}
+.hew-app label > span:first-child { font-family: var(--hew-font-body); font-size: 0.82rem; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--hew-ink); }
+
+.hew-app button[type="submit"],
+.hew-app .button-primary,
+.hew-app .button-link {
+  min-height: 40px;
+  padding: 0 18px;
+  border: 1.5px solid var(--hew-mint-500);
+  border-radius: var(--hew-radius-sm);
+  background: var(--hew-mint-500);
+  color: var(--hew-forest-900);
+  font-family: var(--hew-font-body);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+.hew-app button[type="submit"]:hover,
+.hew-app .button-primary:hover,
+.hew-app .button-link:hover { border-color: var(--hew-mint-400); background: var(--hew-mint-400); color: var(--hew-forest-900); }
+.hew-app .button-secondary,
+.hew-app button.button-secondary[type="submit"] {
+  border: 1.5px solid var(--hew-line-strong);
+  border-radius: var(--hew-radius-sm);
+  background: #fff;
+  color: var(--hew-forest-900);
+  font-weight: 600;
+}
+.hew-app .button-secondary:hover { border-color: var(--hew-forest-600); background: var(--hew-teal-50); color: var(--hew-forest-900); }
+.hew-app button,
+.hew-app .button-secondary,
+.hew-app .button-link { letter-spacing: 0; text-transform: none; }
+.hew-app .panel-title {
+  border-bottom-color: var(--hew-line);
+  font-family: var(--hew-font-display);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--hew-forest-900);
+}
+.hew-app .mini-panel h3,
+.hew-app .detail-column h3 {
+  font-family: var(--hew-font-display);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--hew-forest-900);
+}
+.hew-app .account-switcher { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.hew-app .account-switcher label { font-size: 0.8rem; font-weight: 600; color: var(--hew-ink-2); }
+.hew-app .account-switcher select { width: auto; min-width: 160px; }
+.hew-app .profile-bar { border-radius: 0 4px 4px 0; background: var(--hew-teal-400); }
+.hew-app .profile-row.overnight .profile-bar { background: var(--hew-amber-500); }
+.hew-app .chart-series-line.chart-series-current,
+.hew-app .chart-series-line.meter { stroke: var(--hew-teal-500); }
+.hew-app .legend-swatch.chart-series-current { background: var(--hew-teal-500); }
+.hew-app .button-small { min-height: 32px; padding: 0 12px; font-size: 0.82rem; }
+.hew-app button.danger { border-color: var(--hew-red-500); background: #fff; color: var(--hew-red-500); }
+.hew-app .inline-link,
+.hew-app a:where(:not([class])) { color: var(--hew-forest-600); font-weight: 600; }
+
+.hew-app .flash {
+  border: 1px solid var(--hew-teal-200);
+  border-radius: var(--hew-radius);
+  background: var(--hew-teal-50);
+  color: var(--hew-forest-900);
+}
+
+.hew-app .app-footer {
+  border-top: 1px solid var(--hew-line);
+  background: transparent;
+  font-family: var(--hew-font-body);
+  font-size: 0.8rem;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--hew-ink-3);
+}
+
+.hew-app .commission-preview-banner {
+  border-bottom: 1px solid var(--hew-amber-500);
+  background: var(--hew-amber-100);
+  color: var(--hew-forest-900);
+}
+
+@media (max-width: 860px) {
+  .hew-app .app-sidebar { border-bottom: 0; }
+  .hew-app .app-brand { padding: 14px 16px; }
+  .hew-app .sidebar-account { margin: 0 12px 4px; padding: 10px 12px; }
+  .hew-app .app-nav { flex-wrap: nowrap; overflow-x: auto; padding: 8px 12px 12px; }
+  .hew-app .app-nav a { padding: 8px 12px; border-bottom: 0; white-space: nowrap; }
+  .hew-app .app-nav a.active { border-bottom: 0; }
+  .hew-app .sidebar-session { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; }
+  .hew-app .sidebar-session p { margin-bottom: 0; }
+  .hew-app .app-topbar { position: static; padding: 14px var(--gutter); }
+  .hew-app .section-block { padding: 16px; }
 }

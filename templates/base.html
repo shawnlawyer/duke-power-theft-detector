@@ -6,21 +6,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ page_title or "Home Energy Watch" }}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-    {% if not (staff_user or customer_user) %}
-      <link rel="stylesheet" href="{{ url_for('static', filename='hew-design.css') }}">
-    {% endif %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='hew-design.css') }}">
     <script defer src="{{ url_for('static', filename='app.js') }}"></script>
     {% block extra_head %}{% endblock %}
   </head>
   {% set active_user = staff_user if staff_user else customer_user %}
-  <body class="{{ 'app-body' if active_user else 'auth-body hew hew-auth' }}">
+  <body class="{{ 'app-body hew hew-app' if active_user else 'auth-body hew hew-auth' }}">
     {% if active_user %}
       {% set nav_account = active_account_number if active_account_number is defined else request.args.get('account_number', '') %}
       <div class="app-shell">
         <aside class="app-sidebar">
           <div class="app-brand">
             <a class="brand-lockup" href="{{ url_for('customer_dashboard' if customer_user and not staff_user else 'index', account_number=nav_account) }}">
-              <span class="brand-mark">HEW</span>
+              <span class="brand-mark">{{ logo("hew-logo") }}</span>
               <div>
                 <p class="eyebrow">Home Energy Watch</p>
                 <strong>{{ "Review desk" if staff_user else "Home record" }}</strong>
@@ -40,32 +38,32 @@
 
           <nav class="app-nav" aria-label="Main menu">
             {% if staff_user %}
-              <a class="{% if request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('index', account_number=nav_account) }}"><span>Review</span><small>Dashboard</small></a>
+              <a class="{% if request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('index', account_number=nav_account) }}">{{ icon("bars") }}<span>Review</span><small>Dashboard</small></a>
               {% if not commission_read_only|default(false) %}
-                <a class="{% if request.endpoint == 'account_page' %}active{% endif %}" href="{{ url_for('account_page', account_number=nav_account) }}"><span>Customer</span><small>Profile</small></a>
-                <a class="{% if request.endpoint == 'people_page' %}active{% endif %}" href="{{ url_for('people_page', account_number=nav_account) }}"><span>People</span><small>Access</small></a>
-                <a class="{% if request.endpoint == 'utility_page' %}active{% endif %}" href="{{ url_for('utility_page', account_number=nav_account) }}"><span>Utility</span><small>Connection</small></a>
-                <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}"><span>Inventory</span><small>Loads</small></a>
-                <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}"><span>History</span><small>Uploads</small></a>
-                <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}"><span>Staff</span><small>Team</small></a>
+                <a class="{% if request.endpoint == 'account_page' %}active{% endif %}" href="{{ url_for('account_page', account_number=nav_account) }}">{{ icon("home") }}<span>Customer</span><small>Profile</small></a>
+                <a class="{% if request.endpoint == 'people_page' %}active{% endif %}" href="{{ url_for('people_page', account_number=nav_account) }}">{{ icon("users") }}<span>People</span><small>Access</small></a>
+                <a class="{% if request.endpoint == 'utility_page' %}active{% endif %}" href="{{ url_for('utility_page', account_number=nav_account) }}">{{ icon("plug") }}<span>Utility</span><small>Connection</small></a>
+                <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}">{{ icon("fan") }}<span>Inventory</span><small>Loads</small></a>
+                <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}">{{ icon("upload") }}<span>History</span><small>Uploads</small></a>
+                <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}">{{ icon("users") }}<span>Staff</span><small>Team</small></a>
                 {% if staff_user.role == "Commissioner" %}
-                  <a class="{% if (request.endpoint or '').startswith('utility_onboarding_') %}active{% endif %}" href="{{ url_for('utility_onboarding_list') }}"><span>Utilities</span><small>Onboarding</small></a>
+                  <a class="{% if (request.endpoint or '').startswith('utility_onboarding_') %}active{% endif %}" href="{{ url_for('utility_onboarding_list') }}">{{ icon("grid") }}<span>Utilities</span><small>Onboarding</small></a>
                 {% endif %}
               {% endif %}
-              <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}"><span>Security</span><small>Access</small></a>
+              <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}">{{ icon("shield") }}<span>Security</span><small>Access</small></a>
               {% if staff_user.role == "Commissioner" and not commission_read_only|default(false) %}
-                <a class="{% if request.endpoint in ['data_requests_page', 'review_data_request', 'execute_data_request', 'place_legal_hold', 'release_legal_hold'] %}active{% endif %}" href="{{ url_for('data_requests_page') }}"><span>Data requests</span><small>Records</small></a>
-                <a class="{% if request.endpoint == 'audit_page' %}active{% endif %}" href="{{ url_for('audit_page') }}"><span>Audit</span><small>History</small></a>
+                <a class="{% if request.endpoint in ['data_requests_page', 'review_data_request', 'execute_data_request', 'place_legal_hold', 'release_legal_hold'] %}active{% endif %}" href="{{ url_for('data_requests_page') }}">{{ icon("document") }}<span>Data requests</span><small>Records</small></a>
+                <a class="{% if request.endpoint == 'audit_page' %}active{% endif %}" href="{{ url_for('audit_page') }}">{{ icon("clock") }}<span>Audit</span><small>History</small></a>
               {% endif %}
             {% else %}
-              <a class="{% if request.endpoint == 'customer_dashboard' %}active{% endif %}" href="{{ url_for('customer_dashboard', account_number=nav_account) }}"><span>Review</span><small>Dashboard</small></a>
-              <a class="{% if request.endpoint == 'customer_account_page' %}active{% endif %}" href="{{ url_for('customer_account_page', account_number=nav_account) }}"><span>Account</span><small>Profile</small></a>
-              <a class="{% if request.endpoint == 'customer_utility_page' %}active{% endif %}" href="{{ url_for('customer_utility_page', account_number=nav_account) }}"><span>Utility</span><small>Connection</small></a>
-              <a class="{% if request.endpoint == 'customer_inventory_page' %}active{% endif %}" href="{{ url_for('customer_inventory_page', account_number=nav_account) }}"><span>Inventory</span><small>Loads</small></a>
-              <a class="{% if request.endpoint == 'customer_history_page' %}active{% endif %}" href="{{ url_for('customer_history_page', account_number=nav_account) }}"><span>History</span><small>Uploads</small></a>
-              <a class="{% if request.endpoint == 'customer_admin_page' %}active{% endif %}" href="{{ url_for('customer_admin_page', account_number=nav_account) }}"><span>Administration</span><small>Access</small></a>
-              <a class="{% if request.endpoint in ['customer_data_requests_page', 'request_account_deletion', 'cancel_account_deletion'] %}active{% endif %}" href="{{ url_for('customer_data_requests_page') }}"><span>My data</span><small>Exports</small></a>
-              <a class="{% if request.endpoint == 'customer_billing_page' %}active{% endif %}" href="{{ url_for('customer_billing_page', account_number=nav_account) }}"><span>Billing</span><small>Plan</small></a>
+              <a class="{% if request.endpoint == 'customer_dashboard' %}active{% endif %}" href="{{ url_for('customer_dashboard', account_number=nav_account) }}">{{ icon("bars") }}<span>Review</span><small>Dashboard</small></a>
+              <a class="{% if request.endpoint == 'customer_account_page' %}active{% endif %}" href="{{ url_for('customer_account_page', account_number=nav_account) }}">{{ icon("home") }}<span>Account</span><small>Profile</small></a>
+              <a class="{% if request.endpoint == 'customer_utility_page' %}active{% endif %}" href="{{ url_for('customer_utility_page', account_number=nav_account) }}">{{ icon("plug") }}<span>Utility</span><small>Connection</small></a>
+              <a class="{% if request.endpoint == 'customer_inventory_page' %}active{% endif %}" href="{{ url_for('customer_inventory_page', account_number=nav_account) }}">{{ icon("fan") }}<span>Inventory</span><small>Loads</small></a>
+              <a class="{% if request.endpoint == 'customer_history_page' %}active{% endif %}" href="{{ url_for('customer_history_page', account_number=nav_account) }}">{{ icon("upload") }}<span>History</span><small>Uploads</small></a>
+              <a class="{% if request.endpoint == 'customer_admin_page' %}active{% endif %}" href="{{ url_for('customer_admin_page', account_number=nav_account) }}">{{ icon("settings") }}<span>Administration</span><small>Access</small></a>
+              <a class="{% if request.endpoint in ['customer_data_requests_page', 'request_account_deletion', 'cancel_account_deletion'] %}active{% endif %}" href="{{ url_for('customer_data_requests_page') }}">{{ icon("download") }}<span>My data</span><small>Exports</small></a>
+              <a class="{% if request.endpoint == 'customer_billing_page' %}active{% endif %}" href="{{ url_for('customer_billing_page', account_number=nav_account) }}">{{ icon("layers") }}<span>Billing</span><small>Plan</small></a>
             {% endif %}
           </nav>
 
