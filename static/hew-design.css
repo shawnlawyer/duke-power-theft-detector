@@ -1437,3 +1437,12 @@ body.hew-app {
   color: var(--hew-red-500);
 }
 .hew-app button.danger[type="submit"]:hover { background: var(--hew-red-500); color: #fff; }
+
+/* Space between a form's last field and its buttons. Grid and flex forms
+ * already space their children with `gap`; this covers buttons that sit in a
+ * fieldset or other plain block right after fields, notes or details. */
+.hew-app .form-fieldset { display: grid; gap: 12px; min-width: 0; }
+.hew-app .form-fieldset > :is(button, .button-link) { justify-self: start; }
+.hew-app :is(form:not([class]), fieldset, .form-fieldset, div, section, details)
+  > :is(.field-grid, label, p, details, fieldset, .form-fieldset, textarea, select)
+  + :is(button, .button-row, .button-link) { margin-top: 14px; }
