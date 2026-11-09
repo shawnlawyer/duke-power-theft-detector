@@ -186,3 +186,46 @@ def purge_accounts(api, account_numbers, *, confirm=False):
         metadata={"accounts": len(found), "customers": len(summary["customers_removed"]), "files": len(files)},
     )
     return summary
+
+
+def purge_all_except(api, keep_numbers, *, confirm=False):
+    """Purge every account except those named, skipping anything that looks real.
+
+    Accounts with a paid subscription, a legal hold or uploaded meter readings
+    are never swept up in bulk; they are reported so a person can decide.
+    """
+    keep = {api.normalize_account_number(n) for n in keep_numbers if str(n or "").strip()}
+    if not keep:
+        raise ValueError("Name at least one account to keep.")
+    with api.get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT accounts.account_number,
+                   EXISTS (SELECT 1 FROM customer_billing b WHERE b.account_id = accounts.id
+                           AND b.subscription_status IN ('active', 'trialing', 'past_due')) AS paid,
+                   EXISTS (SELECT 1 FROM account_legal_holds h WHERE h.account_id = accounts.id
+                           AND h.status = 'active') AS held,
+                   EXISTS (SELECT 1 FROM interval_readings r WHERE r.account_id = accounts.id) AS has_readings
+            FROM accounts
+            ORDER BY accounts.id
+            """
+        ).fetchall()
+    missing = sorted(keep - {row["account_number"] for row in rows})
+    if missing:
+        raise ValueError("Account to keep was not found: " + ", ".join(missing))
+    targets, skipped = [], []
+    for row in rows:
+        number = row["account_number"]
+        if number in keep:
+            continue
+        reasons = [label for label, flag in (("paid", row["paid"]), ("legal hold", row["held"]),
+                                             ("has meter readings", row["has_readings"])) if flag]
+        if reasons and number != api.DEFAULT_ACCOUNT_NUMBER:
+            skipped.append({"account_number": number, "reasons": reasons})
+        else:
+            targets.append(number)
+    summary = purge_accounts(api, targets, confirm=confirm) if targets else {
+        "accounts": [], "customers_removed": [], "files": 0, "rows": 0, "confirmed": confirm}
+    summary["kept"] = sorted(keep)
+    summary["skipped_for_review"] = skipped
+    return summary

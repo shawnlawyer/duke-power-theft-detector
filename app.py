@@ -698,6 +698,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--list-accounts", action="store_true", help="Print every account with its address, emails, billing and readings, then exit")
     parser.add_argument("--purge-accounts", nargs="+", metavar="ACCOUNT_NUMBER", help="Permanently delete these accounts (dry run unless --confirm-purge)")
+    parser.add_argument("--purge-all-except", nargs="+", metavar="ACCOUNT_NUMBER", help="Purge every account except these, skipping paid, held or data-bearing accounts (dry run unless --confirm-purge)")
     parser.add_argument("--confirm-purge", action="store_true", help="Actually delete the accounts named by --purge-accounts")
     parser.add_argument("--host", default="0.0.0.0", help="Web host to bind when using --serve")
     parser.add_argument("--port", type=int, default=8000, help="Web port to bind when using --serve")
@@ -16921,11 +16922,16 @@ def main() -> None:
             print(json.dumps(item, sort_keys=True))
         return
 
-    if args.purge_accounts:
+    if args.purge_accounts or args.purge_all_except:
         try:
-            purge_summary = account_cleanup.purge_accounts(
-                sys.modules[__name__], args.purge_accounts, confirm=args.confirm_purge
-            )
+            if args.purge_all_except:
+                purge_summary = account_cleanup.purge_all_except(
+                    sys.modules[__name__], args.purge_all_except, confirm=args.confirm_purge
+                )
+            else:
+                purge_summary = account_cleanup.purge_accounts(
+                    sys.modules[__name__], args.purge_accounts, confirm=args.confirm_purge
+                )
         except Exception as exc:
             print(f"Error purging accounts: {exc}", file=sys.stderr)
             sys.exit(1)

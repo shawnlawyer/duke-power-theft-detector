@@ -83,3 +83,29 @@ def test_paid_unknown_and_held_accounts_are_refused(db):
     with pytest.raises(ValueError, match="No such account"):
         account_cleanup.purge_accounts(app, ["nope"], confirm=True)
     assert app.find_account("paid-1") is not None
+
+
+def test_purge_all_except_keeps_named_and_real_looking_accounts(db):
+    fake_account("910046647361", "owner@example.com", address="33 Real Lane")
+    fake_account("bot-1", "bot1@example.com", address="Svtpe")
+    fake_account("bot-2", "bot2@example.com", address="Anpvyww")
+    fake_account("has-data", "maybe@example.com", address="9 Data St")
+    app.import_interval_file_to_db(FIXTURE, account_number="has-data")
+    app.save_household_profile("primary", {"address": "33 Real Lane", "zip_code": "28715"})
+
+    dry = account_cleanup.purge_all_except(app, ["910046647361"])
+    assert sorted(dry["accounts"]) == ["bot-1", "bot-2", "primary"]
+    assert dry["skipped_for_review"] == [{"account_number": "has-data", "reasons": ["has meter readings"]}]
+    assert app.find_account("bot-1") is not None
+
+    account_cleanup.purge_all_except(app, ["910046647361"], confirm=True)
+    assert app.find_account("bot-1") is None and app.find_account("bot-2") is None
+    assert app.get_customer_user_by_email("bot1@example.com") is None
+    assert app.find_account("910046647361")["address"] == "33 Real Lane"
+    assert app.find_account("has-data") is not None
+    assert not app.find_account("primary")["address"]
+
+
+def test_purge_all_except_requires_a_real_keep(db):
+    with pytest.raises(ValueError, match="not found"):
+        account_cleanup.purge_all_except(app, ["typo"], confirm=True)
