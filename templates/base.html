@@ -46,12 +46,12 @@
                 <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}">{{ icon("fan") }}<span>Inventory</span><small>Loads</small></a>
                 <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}">{{ icon("upload") }}<span>History</span><small>Uploads</small></a>
                 <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}">{{ icon("users") }}<span>Staff</span><small>Team</small></a>
-                {% if staff_user.role == "Commissioner" %}
+                {% if staff_user.role in staff_admin_roles %}
                   <a class="{% if (request.endpoint or '').startswith('utility_onboarding_') %}active{% endif %}" href="{{ url_for('utility_onboarding_list') }}">{{ icon("grid") }}<span>Utilities</span><small>Onboarding</small></a>
                 {% endif %}
               {% endif %}
               <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}">{{ icon("shield") }}<span>Security</span><small>Access</small></a>
-              {% if staff_user.role == "Commissioner" and not commission_read_only|default(false) %}
+              {% if staff_user.role in staff_admin_roles and not commission_read_only|default(false) %}
                 <a class="{% if request.endpoint in ['data_requests_page', 'review_data_request', 'execute_data_request', 'place_legal_hold', 'release_legal_hold'] %}active{% endif %}" href="{{ url_for('data_requests_page') }}">{{ icon("document") }}<span>Data requests</span><small>Records</small></a>
                 <a class="{% if request.endpoint == 'audit_page' %}active{% endif %}" href="{{ url_for('audit_page') }}">{{ icon("clock") }}<span>Audit</span><small>History</small></a>
               {% endif %}

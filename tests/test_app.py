@@ -5558,8 +5558,8 @@ def test_staff_access_management_requires_commissioner_and_protects_self(tmp_pat
 
     unchanged = app.get_staff_user_by_id(int(commissioner["id"]))
     assert self_change.status_code == 200
-    assert b"Ask another commissioner to change your access" in self_change.data
-    assert unchanged["role"] == "Commissioner"
+    assert b"Ask another admin to change your access" in self_change.data
+    assert unchanged["role"] == "Owner"
     assert unchanged["is_active"] is True
     assert forbidden.status_code == 302
     assert forbidden.headers["Location"].endswith("/")

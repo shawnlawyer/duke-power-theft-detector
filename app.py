@@ -116,7 +116,11 @@ DEFAULT_DATABASE_URL = (os.getenv("POWER_DATABASE_URL") or os.getenv("DATABASE_U
 MAX_UPLOAD_BYTES = int(os.getenv("POWER_MAX_UPLOAD_MB", "25")) * 1024 * 1024
 MAX_EXPORT_REPORT_BYTES = int(os.getenv("POWER_MAX_EXPORT_REPORT_MB", "25")) * 1024 * 1024
 ALLOWED_SUFFIXES = {".xml", ".csv"}
-STAFF_ROLES = ("Commissioner", "Analyst", "Investigator")
+STAFF_ROLES = ("Owner", "Admin", "Commissioner", "Analyst", "Investigator")
+# Owner runs the business; Admins run the staff desk; Commissioners only review.
+STAFF_ADMIN_ROLES = ("Owner", "Admin")
+OWNER_EMAIL = "shawn@epistemiccognition.com"
+OWNER_FULL_NAME = "Shawn Lawyer"
 INVITE_EXPIRY_DAYS = 7
 AUTH_RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 AUTH_RATE_LIMIT_MAX_ATTEMPTS = 5
@@ -1731,6 +1735,7 @@ def migrate_database(conn: DatabaseConnection) -> None:
     if conn.kind == "postgres":
         migrate_database_postgres(conn)
         ensure_equipment_history_table(conn)
+        migrate_staff_roles(conn)
         return
 
     default_account_id = ensure_accounts_table(conn)
@@ -2448,6 +2453,7 @@ def migrate_database(conn: DatabaseConnection) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_billing_account_id ON customer_billing (account_id)")
     ensure_equipment_history_table(conn)
     seed_commission_registry(conn)
+    migrate_staff_roles(conn)
 
 
 def clean_email(value: str | None) -> str:
@@ -3726,7 +3732,7 @@ def list_staff_users() -> list[dict[str, object]]:
             SELECT id, email, full_name, role, is_active, invite_token, invite_token_hash,
                    invite_expires_at, password_hash, auth_version, mfa_enabled_at, last_login_at
             FROM staff_users
-            ORDER BY CASE WHEN role = 'Commissioner' THEN 0 ELSE 1 END, full_name, email
+            ORDER BY CASE role WHEN 'Owner' THEN 0 WHEN 'Admin' THEN 1 WHEN 'Commissioner' THEN 2 ELSE 3 END, full_name, email
             """
         ).fetchall()
     staff: list[dict[str, object]] = []
@@ -3753,7 +3759,48 @@ def get_staff_user_by_id(staff_user_id: int | None) -> dict[str, object] | None:
     return serialize_staff_user_row(row)
 
 
-def create_first_staff_user(email: str, full_name: str, password: str, role: str = "Commissioner") -> dict[str, object]:
+def migrate_staff_roles(conn) -> None:
+    """One-time split of the old top "Commissioner" role into Owner and Admin.
+
+    Before Owner existed, internal staff with full control held the Commissioner
+    role. The owner sign-in (POWER_OWNER_EMAIL, default OWNER_EMAIL) becomes
+    Owner, created if needed; other internal Commissioners become Admins. Staff
+    tied to a commission organization stay Commissioners, which is review-only.
+    """
+    if conn.execute("SELECT 1 FROM staff_users WHERE role = 'Owner'").fetchone():
+        return
+    internal = conn.execute(
+        """
+        SELECT staff_users.id, staff_users.full_name FROM staff_users
+        WHERE staff_users.role = 'Commissioner'
+          AND NOT EXISTS (SELECT 1 FROM staff_commission_access a WHERE a.staff_user_id = staff_users.id)
+        ORDER BY staff_users.id
+        """
+    ).fetchall()
+    if not internal:
+        return  # A fresh install gets its Owner from create_first_staff_user.
+    owner_email = clean_email(os.getenv("POWER_OWNER_EMAIL") or OWNER_EMAIL)
+    for row in internal:
+        conn.execute("UPDATE staff_users SET role = 'Admin' WHERE id = ?", (int(row["id"]),))
+    timestamp = timestamp_now()
+    existing = conn.execute("SELECT id FROM staff_users WHERE email = ?", (owner_email,)).fetchone()
+    if existing is not None:
+        conn.execute(
+            "UPDATE staff_users SET role = 'Owner', is_active = 1, auth_version = auth_version + 1, updated_at = ? WHERE id = ?",
+            (timestamp, int(existing["id"])),
+        )
+        conn.execute("DELETE FROM staff_commission_access WHERE staff_user_id = ?", (int(existing["id"]),))
+    else:
+        conn.execute(
+            """
+            INSERT INTO staff_users (email, full_name, role, password_hash, is_active, auth_version, created_at, updated_at)
+            VALUES (?, ?, 'Owner', NULL, 1, 1, ?, ?)
+            """,
+            (owner_email, OWNER_FULL_NAME, timestamp, timestamp),
+        )
+
+
+def create_first_staff_user(email: str, full_name: str, password: str, role: str = "Owner") -> dict[str, object]:
     normalized_email = clean_email(email)
     normalized_name = (full_name or "").strip() or "Commission user"
     normalized_role = clean_role(role)
@@ -3832,9 +3879,17 @@ def invite_staff_user(email: str, full_name: str, role: str, invited_by_id: int)
     timestamp = timestamp_now()
     with get_db_connection() as conn:
         existing = conn.execute(
-            "SELECT id, password_hash FROM staff_users WHERE email = ?",
+            "SELECT id, password_hash, role FROM staff_users WHERE email = ?",
             (normalized_email,),
         ).fetchone()
+        inviter = conn.execute("SELECT role FROM staff_users WHERE id = ?", (int(invited_by_id),)).fetchone()
+        inviter_role = str(inviter["role"]) if inviter is not None else ""
+        if inviter_role not in STAFF_ADMIN_ROLES:
+            raise ValueError("Admin access is required for that action.")
+        if inviter_role != "Owner" and (
+            normalized_role == "Owner" or (existing is not None and existing["role"] == "Owner")
+        ):
+            raise ValueError("Only the owner can grant or change owner access.")
         if existing is None:
             conn.execute(
                 """
@@ -3893,7 +3948,7 @@ def update_staff_user_access(
     actor_id = int(acting_staff_user_id)
     normalized_role = clean_role(role)
     if target_id == actor_id:
-        raise ValueError("Ask another commissioner to change your access.")
+        raise ValueError("Ask another admin to change your access.")
     timestamp = timestamp_now()
     with get_db_connection() as conn:
         if conn.kind == "postgres":
@@ -3913,18 +3968,25 @@ def update_staff_user_access(
             conn.rollback()
             raise ValueError("That staff member is no longer available.")
         before = serialize_staff_user_row(target) or {}
-        removing_active_commissioner = (
+        actor = conn.execute("SELECT role, is_active FROM staff_users WHERE id = ?", (actor_id,)).fetchone()
+        if actor is None or not bool(actor["is_active"]) or actor["role"] not in STAFF_ADMIN_ROLES:
+            conn.rollback()
+            raise ValueError("Admin access is required for that action.")
+        if actor["role"] != "Owner" and "Owner" in {before["role"], normalized_role}:
+            conn.rollback()
+            raise ValueError("Only the owner can grant or change owner access.")
+        removing_active_owner = (
             bool(before["is_active"])
-            and before["role"] == "Commissioner"
-            and (not is_active or normalized_role != "Commissioner")
+            and before["role"] == "Owner"
+            and (not is_active or normalized_role != "Owner")
         )
-        if removing_active_commissioner:
-            commissioner_count = conn.execute(
-                "SELECT COUNT(*) AS count FROM staff_users WHERE role = 'Commissioner' AND is_active = 1"
+        if removing_active_owner:
+            owner_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM staff_users WHERE role = 'Owner' AND is_active = 1"
             ).fetchone()
-            if commissioner_count is None or int(commissioner_count["count"]) <= 1:
+            if owner_count is None or int(owner_count["count"]) <= 1:
                 conn.rollback()
-                raise ValueError("At least one active commissioner must remain.")
+                raise ValueError("At least one active owner must remain.")
         conn.execute(
             """
             UPDATE staff_users
@@ -8128,9 +8190,9 @@ def reset_staff_mfa_by_commissioner(
             """,
             (target_id,),
         ).fetchone()
-        if actor is None or not bool(actor["is_active"]) or actor["role"] != "Commissioner":
+        if actor is None or not bool(actor["is_active"]) or actor["role"] not in STAFF_ADMIN_ROLES:
             conn.rollback()
-            raise ValueError("Commissioner access is required for that action.")
+            raise ValueError("Admin access is required for that action.")
         if target is None:
             conn.rollback()
             raise ValueError("That staff member is no longer available.")
@@ -13169,6 +13231,11 @@ def create_web_app() -> Flask:
                         return jsonify({"error": message}), 403
                     return message, 403
                 return {"kind": "commission", "user": staff_user, "commission": commission_access}
+            if write and staff_user["role"] == "Commissioner":
+                message = "Commissioner access is review-only."
+                if api:
+                    return jsonify({"error": message}), 403
+                return message, 403
             return {"kind": "staff", "user": staff_user}
 
         customer_user = current_customer_user()
@@ -13236,11 +13303,11 @@ def create_web_app() -> Flask:
         staff_user = require_staff_user(api=api)
         if not isinstance(staff_user, dict):
             return staff_user
-        if staff_user["role"] != "Commissioner" or is_commission_staff(staff_user):
+        if staff_user["role"] not in STAFF_ADMIN_ROLES or is_commission_staff(staff_user):
             message = (
-                "Exit the commission preview to use Commissioner tools."
-                if staff_user["role"] == "Commissioner"
-                else "Commissioner access is required for that action."
+                "Exit the commission preview to use admin tools."
+                if staff_user["role"] in STAFF_ADMIN_ROLES
+                else "Admin access is required for that action."
             )
             if api:
                 return jsonify({"error": message}), 403
@@ -13504,11 +13571,13 @@ def create_web_app() -> Flask:
         )
         return {
             "staff_user": layout_staff_user,
-            "commission_read_only": layout_commission is not None,
+            "commission_read_only": layout_commission is not None
+            or (layout_staff_user is not None and layout_staff_user.get("role") == "Commissioner"),
+            "staff_admin_roles": STAFF_ADMIN_ROLES,
             "commission_preview": layout_commission if layout_commission and layout_commission.get("preview") else None,
             "commission_organizations": (
                 list_commission_organizations()
-                if layout_staff_user is not None and layout_staff_user.get("role") == "Commissioner" and layout_commission is None
+                if layout_staff_user is not None and layout_staff_user.get("role") in STAFF_ADMIN_ROLES and layout_commission is None
                 else []
             ),
             "customer_user": current_customer_user(),
@@ -15552,6 +15621,8 @@ def create_web_app() -> Flask:
             if not numbers:
                 raise ValueError("Choose at least one account first.")
             if action in {"disable", "enable"}:
+                if staff_user["role"] != "Owner":
+                    raise PermissionError("Only the owner can disable or enable accounts.")
                 for number in numbers:
                     set_account_disabled(number, action == "disable")
                     record_audit_event(
