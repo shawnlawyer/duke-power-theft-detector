@@ -67,6 +67,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
 from utility_guides import UTILITY_DOWNLOAD_GUIDES, get_utility_download_guide
+import account_cleanup
 import coned_oru
 import national_grid
 import xcel
@@ -695,6 +696,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-encrypt all sealed secrets with the first POWER_DATA_ENCRYPTION_KEY and exit",
     )
+    parser.add_argument("--list-accounts", action="store_true", help="Print every account with its address, emails, billing and readings, then exit")
+    parser.add_argument("--purge-accounts", nargs="+", metavar="ACCOUNT_NUMBER", help="Permanently delete these accounts (dry run unless --confirm-purge)")
+    parser.add_argument("--purge-all-except", nargs="+", metavar="ACCOUNT_NUMBER", help="Purge every account except these, skipping paid, held or data-bearing accounts (dry run unless --confirm-purge)")
+    parser.add_argument("--confirm-purge", action="store_true", help="Actually delete the accounts named by --purge-accounts")
     parser.add_argument("--host", default="0.0.0.0", help="Web host to bind when using --serve")
     parser.add_argument("--port", type=int, default=8000, help="Web port to bind when using --serve")
     return parser
@@ -1072,6 +1077,8 @@ def ensure_accounts_table(conn: DatabaseConnection) -> int:
         conn.execute("ALTER TABLE accounts ADD COLUMN energy_company TEXT")
     if "meter_value" not in account_columns:
         conn.execute("ALTER TABLE accounts ADD COLUMN meter_value TEXT")
+    if "disabled_at" not in account_columns:
+        conn.execute("ALTER TABLE accounts ADD COLUMN disabled_at TEXT")
     timestamp = timestamp_now()
     conn.execute(
         """
@@ -6243,10 +6250,34 @@ def serialize_account_row(row: sqlite3.Row | tuple | None) -> dict[str, object] 
         "baseline_date": mapping["baseline_date"],
         "meter_value": mapping.get("meter_value") or "",
         "address": mapping.get("address") or "",
+        "disabled_at": mapping.get("disabled_at") or "",
     }
 
 
 ACCOUNT_FIELD_UNSET = object()
+
+
+def set_account_disabled(account_number: str | None, disabled: bool) -> dict[str, object]:
+    """Disabled accounts stay on file but customers cannot open them and they stop syncing."""
+    normalized = normalize_account_number(account_number)
+    with get_db_connection() as conn:
+        changed = conn.execute(
+            "UPDATE accounts SET disabled_at = ?, updated_at = ? WHERE account_number = ?",
+            (timestamp_now() if disabled else None, timestamp_now(), normalized),
+        ).rowcount
+        conn.commit()
+    if not changed:
+        raise ValueError("That account was not found.")
+    return find_account(normalized) or {}
+
+
+def account_is_disabled(account_number: str | None) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT disabled_at FROM accounts WHERE account_number = ?",
+            (normalize_account_number(account_number),),
+        ).fetchone()
+    return bool(row and row["disabled_at"])
 
 
 def get_or_create_account(
@@ -6264,7 +6295,7 @@ def get_or_create_account(
     normalized_meter_value = clean_meter_value(meter_value) if meter_value_supplied else None
     existing = conn.execute(
         """
-        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value, disabled_at
         FROM accounts
         WHERE account_number = ?
         """,
@@ -6297,7 +6328,7 @@ def get_or_create_account(
             )
             existing = conn.execute(
                 """
-                SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+                SELECT id, account_number, display_name, energy_company, baseline_date, meter_value, disabled_at
                 FROM accounts
                 WHERE account_number = ?
                 """,
@@ -6324,7 +6355,7 @@ def get_or_create_account(
     )
     created = conn.execute(
         """
-        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value, disabled_at
         FROM accounts
         WHERE account_number = ?
         """,
@@ -6342,7 +6373,7 @@ def rename_account_number(
     replacement_normalized = clean_account_number(replacement_account_number)
     current = conn.execute(
         """
-        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value, disabled_at
         FROM accounts
         WHERE account_number = ?
         """,
@@ -6364,7 +6395,7 @@ def rename_account_number(
     )
     updated = conn.execute(
         """
-        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value, disabled_at
         FROM accounts
         WHERE id = ?
         """,
@@ -6377,7 +6408,7 @@ def list_accounts() -> list[dict[str, object]]:
     with get_db_connection() as conn:
         rows = conn.execute(
             """
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value, accounts.disabled_at,
                    household_profiles.address
             FROM accounts
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
@@ -6429,7 +6460,7 @@ def list_account_page(search: str | None = None, page: int = 1, per_page: int = 
         offset = (safe_page - 1) * safe_per_page
         rows = conn.execute(
             f"""
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value, accounts.disabled_at,
                    household_profiles.address
             FROM accounts
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
@@ -6465,7 +6496,7 @@ def find_account(account_number: str | None) -> dict[str, object] | None:
     with get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value, accounts.disabled_at,
                    household_profiles.address
             FROM accounts
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
@@ -6507,7 +6538,7 @@ def list_customer_account_page(
             FROM account_access_emails
             JOIN accounts ON accounts.id = account_access_emails.account_id
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
-            WHERE account_access_emails.email = ?
+            WHERE accounts.disabled_at IS NULL AND account_access_emails.email = ?
             {search_clause}
             """,
             tuple(params),
@@ -6518,12 +6549,12 @@ def list_customer_account_page(
         offset = (safe_page - 1) * safe_per_page
         rows = conn.execute(
             f"""
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value, accounts.disabled_at,
                    household_profiles.address
             FROM account_access_emails
             JOIN accounts ON accounts.id = account_access_emails.account_id
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
-            WHERE account_access_emails.email = ?
+            WHERE accounts.disabled_at IS NULL AND account_access_emails.email = ?
             {search_clause}
             ORDER BY accounts.display_name, accounts.account_number
             LIMIT ? OFFSET ?
@@ -6550,6 +6581,19 @@ def list_customer_account_page(
     }
 
 
+def customer_has_disabled_account(email: str) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM account_access_emails
+            JOIN accounts ON accounts.id = account_access_emails.account_id
+            WHERE account_access_emails.email = ? AND accounts.disabled_at IS NOT NULL
+            """,
+            (clean_email(email),),
+        ).fetchone()
+    return row is not None
+
+
 def customer_has_account_access(email: str, account_number: str | None) -> bool:
     return get_customer_account_access(email, account_number) is not None
 
@@ -6564,6 +6608,7 @@ def get_customer_account_access(email: str, account_number: str | None) -> dict[
             FROM account_access_emails
             JOIN accounts ON accounts.id = account_access_emails.account_id
             WHERE account_access_emails.email = ? AND accounts.account_number = ?
+              AND accounts.disabled_at IS NULL
             """,
             (normalized_email, normalized_account),
         ).fetchone()
@@ -8447,6 +8492,7 @@ def list_saved_utility_connections_for_sync(account_number: str | None = None) -
             FROM utility_connections
             JOIN accounts ON accounts.id = utility_connections.account_id
             {where_clause}
+            {"AND" if where_clause else "WHERE"} accounts.disabled_at IS NULL
             ORDER BY accounts.account_number, utility_connections.provider_name, utility_connections.connection_label
             """,
             params,
@@ -13371,7 +13417,7 @@ def create_web_app() -> Flask:
     def render_customer_setup_page(customer_user: dict[str, object], page_title: str, setup_section: str):
         context = build_customer_account_context(customer_user, page_title, setup_section)
         if context is None:
-            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True)
+            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True, has_disabled_account=customer_has_disabled_account(str(customer_user["email"])))
         return render_template("setup_section.html", **context)
 
     def build_customer_signup_form_state(form_like=None) -> dict[str, str]:
@@ -13510,7 +13556,7 @@ def create_web_app() -> Flask:
         account_page_number = parse_positive_int(request.args.get("account_page"), default=1)
         scaffold = build_customer_account_scaffold(customer_user, account_number, account_search, account_page_number)
         if scaffold["account"] is None:
-            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True)
+            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True, has_disabled_account=customer_has_disabled_account(str(customer_user["email"])))
 
         latest_analysis = None
         account = scaffold["account"]
@@ -14573,7 +14619,7 @@ def create_web_app() -> Flask:
             return customer_user
         context = build_customer_account_context(customer_user, "History")
         if context is None:
-            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True)
+            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True, has_disabled_account=customer_has_disabled_account(str(customer_user["email"])))
         return render_template("history_page.html", **context)
 
     @app.get("/customer/billing")
@@ -15491,6 +15537,54 @@ def create_web_app() -> Flask:
             page_title="Commission Review",
             commission_read_only=commission_read_only,
         )
+
+    @app.post("/accounts/manage")
+    def manage_accounts():
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        return_to = request.form.get("return_to") or ""
+        if not is_safe_local_path(return_to):
+            return_to = url_for("account_page")
+        action = (request.form.get("action") or "").strip()
+        numbers = list(dict.fromkeys(n.strip() for n in request.form.getlist("account_numbers") if n.strip()))
+        try:
+            if not numbers:
+                raise ValueError("Choose at least one account first.")
+            if action in {"disable", "enable"}:
+                for number in numbers:
+                    set_account_disabled(number, action == "disable")
+                    record_audit_event(
+                        f"account.{action}d",
+                        actor_type="staff",
+                        actor_id=int(staff_user["id"]),
+                        account_number=number,
+                        target_type="account",
+                        target_id=number,
+                    )
+                flash(f"{'Disabled' if action == 'disable' else 'Enabled'} {len(numbers)} account{'' if len(numbers) == 1 else 's'}.")
+            elif action == "delete":
+                if (request.form.get("confirm_delete") or "").strip().upper() != "DELETE":
+                    raise ValueError("Type DELETE in the box to confirm. Nothing was deleted.")
+                summary = account_cleanup.purge_accounts(sys.modules[__name__], numbers, confirm=True)
+                record_audit_event(
+                    "account.deleted",
+                    actor_type="staff",
+                    actor_id=int(staff_user["id"]),
+                    target_type="account",
+                    metadata={"accounts": len(summary["accounts"]), "customers": len(summary["customers_removed"])},
+                )
+                flash(
+                    f"Deleted {len(summary['accounts'])} account{'' if len(summary['accounts']) == 1 else 's'}"
+                    f" and {len(summary['customers_removed'])} sign-in{'' if len(summary['customers_removed']) == 1 else 's'}."
+                )
+                if any(f"account_number={n}" in return_to for n in numbers):
+                    return_to = url_for("account_page")
+            else:
+                raise ValueError("Choose Disable, Enable or Delete.")
+        except Exception as exc:
+            flash(user_facing_error_message(exc))
+        return redirect(return_to)
 
     @app.get("/account")
     def account_page():
@@ -16910,6 +17004,29 @@ def main() -> None:
         print(f"Unreadable secrets: {reseal_summary['failed']}")
         if reseal_summary["failed"]:
             sys.exit(1)
+        return
+
+    if args.list_accounts:
+        for item in account_cleanup.list_accounts_for_review(sys.modules[__name__]):
+            print(json.dumps(item, sort_keys=True))
+        return
+
+    if args.purge_accounts or args.purge_all_except:
+        try:
+            if args.purge_all_except:
+                purge_summary = account_cleanup.purge_all_except(
+                    sys.modules[__name__], args.purge_all_except, confirm=args.confirm_purge
+                )
+            else:
+                purge_summary = account_cleanup.purge_accounts(
+                    sys.modules[__name__], args.purge_accounts, confirm=args.confirm_purge
+                )
+        except Exception as exc:
+            print(f"Error purging accounts: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(purge_summary, sort_keys=True))
+        if not args.confirm_purge:
+            print("Dry run only. Nothing was deleted. Add --confirm-purge to delete.")
         return
 
     if args.ensure_owner_free_play_code:
