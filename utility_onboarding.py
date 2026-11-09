@@ -133,7 +133,7 @@ def register_routes(app, host, require_staff):
         staff = require_staff()
         if not isinstance(staff, dict):
             return staff
-        if staff["role"] != "Commissioner" or host.get_staff_commission_access(int(staff["id"])) is not None:
+        if staff["role"] not in host.STAFF_ADMIN_ROLES or host.get_staff_commission_access(int(staff["id"])) is not None:
             abort(403)
         return staff
 

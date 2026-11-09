@@ -45,7 +45,8 @@
     <button type="submit" class="button-secondary">Search</button>
   </form>
 
-  {% set can_admin_accounts = staff_user and staff_user.role == 'Commissioner' and not commission_read_only and not is_customer %}
+  {% set can_admin_accounts = staff_user and staff_user.role in staff_admin_roles and not commission_read_only and not is_customer %}
+  {% set can_toggle_accounts = can_admin_accounts and staff_user.role == 'Owner' %}
   {% if known_accounts %}
     <div class="account-chip-list{% if can_admin_accounts %} is-selectable{% endif %}">
       {% for known in known_accounts %}
@@ -73,8 +74,10 @@
         <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="return_to" value="{{ return_path }}">
         <span class="account-admin-label">Selected accounts</span>
-        <button type="submit" name="action" value="disable" class="button-secondary button-small">Disable</button>
-        <button type="submit" name="action" value="enable" class="button-secondary button-small">Enable</button>
+        {% if can_toggle_accounts %}
+          <button type="submit" name="action" value="disable" class="button-secondary button-small">Disable</button>
+          <button type="submit" name="action" value="enable" class="button-secondary button-small">Enable</button>
+        {% endif %}
         <label class="account-delete-confirm">
           <span>Type DELETE to delete</span>
           <input type="text" name="confirm_delete" autocomplete="off" placeholder="DELETE">
@@ -114,10 +117,12 @@
         <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="return_to" value="{{ return_path }}">
         <input type="hidden" name="account_numbers" value="{{ current_account.account_number }}">
-        {% if current_account.disabled_at %}
-          <button type="submit" name="action" value="enable" class="button-secondary button-small">Enable account</button>
-        {% else %}
-          <button type="submit" name="action" value="disable" class="button-secondary button-small">Disable account</button>
+        {% if can_toggle_accounts %}
+          {% if current_account.disabled_at %}
+            <button type="submit" name="action" value="enable" class="button-secondary button-small">Enable account</button>
+          {% else %}
+            <button type="submit" name="action" value="disable" class="button-secondary button-small">Disable account</button>
+          {% endif %}
         {% endif %}
         <label class="account-delete-confirm">
           <span>Type DELETE to delete this account</span>
