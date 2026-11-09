@@ -4613,6 +4613,76 @@ def ensure_customer_user_for_email(email: str, full_name: str | None = None) -> 
     return get_customer_user_by_email(normalized_email)
 
 
+FIRST_SIGN_IN_TOKEN_PREFIX = "first_"
+FIRST_SIGN_IN_SALT = "home-energy-watch.first-sign-in"
+
+
+def first_sign_in_serializer():
+    from itsdangerous import URLSafeTimedSerializer
+
+    return URLSafeTimedSerializer(get_app_secret(), salt=FIRST_SIGN_IN_SALT)
+
+
+def create_first_sign_in_token(email: str, kind: str) -> str:
+    """A signed link for someone who has access but no sign-in record yet.
+
+    Nothing is written when the link is requested; the sign-in record is created
+    only when the emailed link is used, and the link stops working once it exists.
+    """
+    signed = first_sign_in_serializer().dumps({"email": clean_email(email), "kind": kind})
+    # Same character set as the stored one-time tokens, so links survive any mail client.
+    return FIRST_SIGN_IN_TOKEN_PREFIX + base64.urlsafe_b64encode(signed.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def read_first_sign_in_token(token: str | None) -> dict[str, str] | None:
+    from itsdangerous import BadSignature
+
+    value = str(token or "")
+    if not value.startswith(FIRST_SIGN_IN_TOKEN_PREFIX):
+        return None
+    encoded = value[len(FIRST_SIGN_IN_TOKEN_PREFIX):]
+    try:
+        signed = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+        payload = first_sign_in_serializer().loads(signed, max_age=LOGIN_TOKEN_EXPIRY_MINUTES * 60)
+    except (BadSignature, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("kind") not in {"customer", "commission"} or not payload.get("email"):
+        return None
+    email = clean_email(str(payload["email"]))
+    # Single use: once the sign-in record exists, this link is spent.
+    if get_staff_user_by_email(email) is not None or get_customer_user_by_email(email) is not None:
+        return None
+    if payload["kind"] == "commission" and get_commission_for_email(email) is None:
+        return None
+    if payload["kind"] == "customer" and not email_has_account_access(email):
+        return None
+    return {"email": email, "kind": str(payload["kind"])}
+
+
+def email_has_account_access(email: str) -> bool:
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT 1 FROM account_access_emails WHERE email = ? LIMIT 1",
+            (clean_email(email),),
+        ).fetchone() is not None
+
+
+def send_first_sign_in_email(email: str, kind: str, base_url: str) -> None:
+    token = create_first_sign_in_token(email, kind)
+    login_url = build_absolute_url(base_url, f"/login/token?{urlencode({'token': token})}")
+    send_transactional_email(
+        clean_email(email),
+        "Your Home Energy Watch sign-in link",
+        (
+            "Hello,\n\n"
+            "Use this one-time link to open Home Energy Watch.\n\n"
+            f"{login_url}\n\n"
+            f"This link expires in {LOGIN_TOKEN_EXPIRY_MINUTES} minutes and works once. "
+            "If you did not request it, you can ignore this message.\n"
+        ),
+    )
+
+
 def send_customer_login_link_email(customer_user: dict[str, object], base_url: str) -> None:
     token = create_customer_auth_token(
         int(customer_user["id"]),
@@ -14723,9 +14793,10 @@ def create_web_app() -> Flask:
         token = request.args.get("token", "")
         # Look the token up without using it, so the page can name the account. A
         # person sent someone else's link sees whose account it would open.
-        record = load_valid_customer_auth_token(token, "login")
-        account_email = str(record["customer_user"]["email"]) if record else ""
-        if not record:
+        first = read_first_sign_in_token(token)
+        record = None if first else load_valid_customer_auth_token(token, "login")
+        account_email = first["email"] if first else (str(record["customer_user"]["email"]) if record else "")
+        if not first and not record:
             staff_record = load_valid_staff_auth_token(token, "login")
             account_email = str(staff_record["staff_user"]["email"]) if staff_record else ""
         if not account_email:
@@ -14742,6 +14813,47 @@ def create_web_app() -> Flask:
     @app.post("/login/token")
     def login_token_post():
         token = request.form.get("token", "")
+        first = read_first_sign_in_token(token)
+        if first is not None:
+            # The first time someone with access signs in, their record is created here.
+            if first["kind"] == "commission":
+                staff_user = ensure_commission_staff_user(first["email"])
+                if staff_user is None:
+                    flash("That sign-in link is no longer available.")
+                    return redirect(url_for("login"))
+                establish_staff_session(staff_user)
+                mark_staff_login_succeeded(int(staff_user["id"]))
+                record_audit_event(
+                    "staff.login_succeeded",
+                    actor_type="staff",
+                    actor_id=int(staff_user["id"]),
+                    target_type="staff_user",
+                    target_id=staff_user["id"],
+                    metadata={"method": "first_email_link"},
+                )
+                return redirect(url_for("index"))
+            customer_user = ensure_customer_user_for_email(first["email"])
+            if customer_user is None:
+                flash("That sign-in link is no longer available.")
+                return redirect(url_for("login"))
+            with get_db_connection() as conn:
+                conn.execute(
+                    "UPDATE customer_users SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?",
+                    (timestamp_now(), int(customer_user["id"])),
+                )
+                conn.commit()
+            customer_user = get_customer_user_by_id(int(customer_user["id"])) or customer_user
+            start_customer_session(customer_user)
+            record_audit_event(
+                "customer.login_succeeded",
+                actor_type="customer",
+                actor_id=int(customer_user["id"]),
+                account_number=choose_customer_account_number(str(customer_user["email"])),
+                target_type="customer_user",
+                target_id=customer_user["id"],
+                metadata={"method": "first_email_link"},
+            )
+            return redirect(url_for("customer_dashboard"))
         try:
             customer_user = consume_customer_login_token(token)
         except ValueError:
@@ -14832,18 +14944,19 @@ def create_web_app() -> Flask:
             except Exception as exc:
                 delivery_error = type(exc).__name__
 
-        record_audit_event(
-            "password_reset_requested",
-            actor_type=user_kind or "anonymous",
-            actor_id=None if user is None else int(user["id"]),
-            target_type=None if user_kind is None else f"{user_kind}_user",
-            target_id=None if user is None else user["id"],
-            metadata={
-                "delivery_attempted": delivered,
-                "delivery_error": delivery_error,
-                "user_kind": user_kind,
-            },
-        )
+        if user is not None:  # Nothing is recorded for an email that has no sign-in.
+            record_audit_event(
+                "password_reset_requested",
+                actor_type=user_kind,
+                actor_id=int(user["id"]),
+                target_type=f"{user_kind}_user",
+                target_id=user["id"],
+                metadata={
+                    "delivery_attempted": delivered,
+                    "delivery_error": delivery_error,
+                    "user_kind": user_kind,
+                },
+            )
         return render_template(
             "customer_forgot_password.html",
             page_title="Reset Your Password",
@@ -14951,28 +15064,36 @@ def create_web_app() -> Flask:
         if limit_status["blocked"] or account_limit_blocked("sign_in", email, 20, 3600):
             return render_template("login_link_notice.html", page_title="Check Your Email"), 429
         record_auth_failure("sign_in", identity_hash)
+        # The sign-in form never creates anything. Unknown emails get the same
+        # notice and no message; people with access but no sign-in record yet get
+        # a signed link, and their record is created only when they use it.
         # Staff identities win: a customer must never be able to turn a staff
         # member's sign-in into a customer session by listing their email.
         staff_user = get_staff_user_by_email(email)
-        if staff_user is None and get_commission_for_email(email) is not None:
-            staff_user = ensure_commission_staff_user(email)
-        customer_user = None if staff_user is not None else ensure_customer_user_for_email(email)
+        customer_user = None if staff_user is not None else get_customer_user_by_email(email)
+        base_url = build_public_base_url(request.url_root)
         delivered = False
         try:
             if customer_user is not None and customer_user.get("is_active"):
-                send_customer_login_link_email(customer_user, build_public_base_url(request.url_root))
+                send_customer_login_link_email(customer_user, base_url)
                 delivered = True
             elif staff_user is not None and staff_user.get("is_active"):
-                send_staff_login_link_email(staff_user, build_public_base_url(request.url_root))
+                send_staff_login_link_email(staff_user, base_url)
                 delivered = True
+            elif staff_user is None and customer_user is None:
+                if get_commission_for_email(email) is not None:
+                    send_first_sign_in_email(email, "commission", base_url)
+                elif email_has_account_access(email):
+                    send_first_sign_in_email(email, "customer", base_url)
         except Exception:
             delivered = False
-        record_audit_event(
-            "auth.login_link_requested",
-            actor_type="customer" if customer_user is not None else ("staff" if staff_user is not None else "anonymous"),
-            actor_id=None if customer_user is None and staff_user is None else int((customer_user or staff_user)["id"]),
-            metadata={"delivery_attempted": delivered},
-        )
+        if customer_user is not None or staff_user is not None:
+            record_audit_event(
+                "auth.login_link_requested",
+                actor_type="customer" if customer_user is not None else "staff",
+                actor_id=int((customer_user or staff_user)["id"]),
+                metadata={"delivery_attempted": delivered},
+            )
         return render_template("login_link_notice.html", page_title="Check Your Email")
 
     @app.post("/login/passkey/start")
