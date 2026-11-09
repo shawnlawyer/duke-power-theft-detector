@@ -1399,3 +1399,41 @@ body.hew-app {
   .hew-app .app-topbar { position: static; padding: 14px var(--gutter); }
   .hew-app .section-block { padding: 16px; }
 }
+
+/* Commissioner account controls: select, disable/enable, delete. */
+.hew-app .account-chip-list.is-selectable { align-items: center; }
+.hew-app .account-select { display: inline-flex; align-items: center; margin-right: -2px; }
+.hew-app .account-select input { width: 18px; height: 18px; accent-color: var(--hew-forest-600); }
+.hew-app .account-status-badge {
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: var(--hew-radius-pill);
+  background: var(--hew-amber-100);
+  color: #8a4b0f;
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 700;
+}
+.hew-app .account-admin-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.hew-app .account-admin-label { align-self: center; font-size: 0.82rem; font-weight: 600; color: var(--hew-ink-2); }
+.hew-app .account-delete-confirm { display: grid; gap: 2px; }
+.hew-app .account-delete-confirm span { font-size: 0.72rem !important; color: var(--hew-ink-3) !important; }
+.hew-app .account-delete-confirm input { width: 130px; min-height: 32px; }
+.hew-app .account-admin-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--hew-line);
+  border-radius: var(--hew-radius-sm);
+  background: var(--hew-surface-2);
+}
+.hew-app button.danger,
+.hew-app button.danger[type="submit"] {
+  border: 1.5px solid var(--hew-red-500);
+  background: #fff;
+  color: var(--hew-red-500);
+}
+.hew-app button.danger[type="submit"]:hover { background: var(--hew-red-500); color: #fff; }

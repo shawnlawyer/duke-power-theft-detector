@@ -45,9 +45,15 @@
     <button type="submit" class="button-secondary">Search</button>
   </form>
 
+  {% set can_admin_accounts = staff_user and staff_user.role == 'Commissioner' and not commission_read_only and not is_customer %}
   {% if known_accounts %}
-    <div class="account-chip-list">
+    <div class="account-chip-list{% if can_admin_accounts %} is-selectable{% endif %}">
       {% for known in known_accounts %}
+        {% if can_admin_accounts %}
+          <label class="account-select">
+            <input type="checkbox" name="account_numbers" value="{{ known.account_number }}" form="account-bulk-actions" aria-label="Select account {{ known.account_number }}">
+          </label>
+        {% endif %}
         <a
           class="account-chip {% if known.account_number == current_account.account_number %}active{% endif %}"
           href="{{ url_for(account_list_endpoint, account_number=known.account_number, account_search=current_account_page.search if current_account_page else '', account_page=current_account_page.page if current_account_page else 1) }}"
@@ -58,9 +64,24 @@
           {% else %}
             <span>Account {{ known.account_number }}</span>
           {% endif %}
+          {% if known.disabled_at %}<em class="account-status-badge">Disabled</em>{% endif %}
         </a>
       {% endfor %}
     </div>
+    {% if can_admin_accounts %}
+      <form id="account-bulk-actions" class="account-admin-bar" action="{{ url_for('manage_accounts') }}" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="return_to" value="{{ return_path }}">
+        <span class="account-admin-label">Selected accounts</span>
+        <button type="submit" name="action" value="disable" class="button-secondary button-small">Disable</button>
+        <button type="submit" name="action" value="enable" class="button-secondary button-small">Enable</button>
+        <label class="account-delete-confirm">
+          <span>Type DELETE to delete</span>
+          <input type="text" name="confirm_delete" autocomplete="off" placeholder="DELETE">
+        </label>
+        <button type="submit" name="action" value="delete" class="button-small danger">Delete</button>
+      </form>
+    {% endif %}
     {% if current_account_page %}
       <div class="pagination-row">
         <span>{{ current_account_page.total }} customer{{ '' if current_account_page.total == 1 else 's' }}</span>
@@ -75,6 +96,36 @@
         </div>
       </div>
     {% endif %}
+  {% endif %}
+
+  {% if can_admin_accounts and current_account %}
+    <div class="account-admin-panel">
+      <div>
+        <strong>Account status: {{ "Disabled" if current_account.disabled_at else "Active" }}</strong>
+        <p class="plain-note">
+          {% if current_account.disabled_at %}
+            Disabled {{ current_account.disabled_at[:10] }}. Customers can't open it and automatic updates are paused.
+          {% else %}
+            Disabling keeps the record but blocks customer access and automatic updates.
+          {% endif %}
+        </p>
+      </div>
+      <form class="account-admin-bar" action="{{ url_for('manage_accounts') }}" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="return_to" value="{{ return_path }}">
+        <input type="hidden" name="account_numbers" value="{{ current_account.account_number }}">
+        {% if current_account.disabled_at %}
+          <button type="submit" name="action" value="enable" class="button-secondary button-small">Enable account</button>
+        {% else %}
+          <button type="submit" name="action" value="disable" class="button-secondary button-small">Disable account</button>
+        {% endif %}
+        <label class="account-delete-confirm">
+          <span>Type DELETE to delete this account</span>
+          <input type="text" name="confirm_delete" autocomplete="off" placeholder="DELETE">
+        </label>
+        <button type="submit" name="action" value="delete" class="button-small danger">Delete account</button>
+      </form>
+    </div>
   {% endif %}
 
   <form

@@ -109,3 +109,82 @@ def test_purge_all_except_keeps_named_and_real_looking_accounts(db):
 def test_purge_all_except_requires_a_real_keep(db):
     with pytest.raises(ValueError, match="not found"):
         account_cleanup.purge_all_except(app, ["typo"], confirm=True)
+
+
+# --- Commissioner buttons -----------------------------------------------------
+
+from test_app import customer_sign_in, sign_in  # noqa: E402
+
+
+@pytest.fixture
+def commissioner(db):
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+    sign_in(client)
+    return client
+
+
+def manage(client, action, numbers, **extra):
+    return client.post("/accounts/manage", data={"action": action, "account_numbers": numbers,
+                                                  "return_to": "/account", **extra})
+
+
+def test_account_page_shows_buttons_to_commissioner(commissioner):
+    fake_account("bot-1", "bot1@example.com")
+    page = commissioner.get("/account?account_number=bot-1").data
+    assert b"Disable account" in page and b"Delete account" in page
+    assert b'name="account_numbers" value="bot-1" form="account-bulk-actions"' in page
+
+
+def test_disable_blocks_customer_and_enable_restores(commissioner):
+    fake_account("bot-1", "bot1@example.com")
+    manage(commissioner, "disable", ["bot-1"])
+    assert app.find_account("bot-1")["disabled_at"]
+    assert b"Disabled" in commissioner.get("/account?account_number=bot-1").data
+
+    customer = app.web_app.test_client()
+    customer_sign_in(customer, "bot1@example.com")
+    blocked = customer.get("/customer/account?account_number=bot-1")
+    assert b"This account has been disabled" in blocked.data
+    assert not app.customer_has_account_access("bot1@example.com", "bot-1")
+
+    manage(commissioner, "enable", ["bot-1"])
+    assert not app.find_account("bot-1")["disabled_at"]
+    assert customer.get("/customer/account?account_number=bot-1").status_code == 200
+
+
+def test_disabled_accounts_do_not_sync(db):
+    fake_account("bot-1", "bot1@example.com")
+    with app.get_db_connection() as conn:
+        account_id = app.find_account("bot-1")["id"]
+        conn.execute(
+            "INSERT INTO utility_connections (account_id, provider_name, connection_label, access_method, status, created_at, updated_at) "
+            "VALUES (?, 'Duke', 'Feed', 'manual_feed', 'Ready', 'now', 'now')", (account_id,))
+        conn.commit()
+    assert len(app.list_saved_utility_connections_for_sync()) == 1
+    app.set_account_disabled("bot-1", True)
+    assert app.list_saved_utility_connections_for_sync() == []
+
+
+def test_bulk_delete_needs_typed_confirmation(commissioner):
+    fake_account("bot-1", "bot1@example.com")
+    fake_account("bot-2", "bot2@example.com")
+    manage(commissioner, "delete", ["bot-1", "bot-2"])
+    assert app.find_account("bot-1") is not None
+    response = manage(commissioner, "delete", ["bot-1", "bot-2"], confirm_delete="DELETE")
+    assert response.status_code == 302
+    assert app.find_account("bot-1") is None and app.find_account("bot-2") is None
+    assert app.get_customer_user_by_email("bot1@example.com") is None
+
+
+def test_only_commissioners_can_manage(db):
+    fake_account("bot-1", "bot1@example.com")
+    app.web_app.config["TESTING"] = True
+    customer = app.web_app.test_client()
+    customer_sign_in(customer, "bot1@example.com")
+    manage(customer, "delete", ["bot-1"], confirm_delete="DELETE")
+    manage(customer, "disable", ["bot-1"])
+    assert app.find_account("bot-1") is not None and not app.find_account("bot-1")["disabled_at"]
+    anonymous = app.web_app.test_client()
+    manage(anonymous, "delete", ["bot-1"], confirm_delete="DELETE")
+    assert app.find_account("bot-1") is not None
