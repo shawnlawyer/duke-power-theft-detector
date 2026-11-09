@@ -171,6 +171,10 @@ Billing calls belong in the backend. Plans are defined by `BILLING_PLAN_DEFINITI
 
 Subscribers can create unlimited reports while active. Commission access is free and read-only. Required production variables include `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_HOME`, and `POWER_BILLING_ENABLED`. Keep billing closed until the annual Price ID is installed and verified. Do not create live charges, subscriptions, refunds, or provider configuration changes without explicit approval.
 
+**Paid sign-up writes nothing until payment.** When billing is open, `POST /signup` only runs read-only checks (`check_customer_signup`). It then holds the form in the session, encrypted with `seal_secret_value`, for at most 24 hours. Stripe receives the email, plus an opaque `client_reference_id` of `signup:<random>` and no other form data. The account, profile, access record, policy acceptance, data permission, billing row and audit events are created only in `GET /signup/complete`, after Stripe confirms the checkout is paid and belongs to that browser's reference. That step then tags the Stripe subscription with `customer_user_id`/`account_id`, so later webhooks find the account.
+
+A `checkout.session.completed` webhook for an unfinished sign-up writes no customer data. It logs `billing.signup_checkout_completed` with the Stripe session id only. If a customer paid but lost the browser session, that log line and the Stripe dashboard are how support finds the payment. When billing is closed, sign-up still creates the account right away, because there is no payment step.
+
 ## Route map
 
 | Surface | Main routes |
@@ -180,7 +184,7 @@ Subscribers can create unlimited reports while active. Commission access is free
 | Staff | `/staff`, `/people`, `/utility`, `/inventory`, `/history`, `/audit`, `/data-requests` |
 | Imports/reports | `POST /analyze`, `POST /compare`, `GET /reports/<filename>` |
 | API | `/api/files`, `/api/supported-feeds`, `/api/utility-by-zip`, `/api/day-detail`, `POST /api/analyze` |
-| Billing | `POST /billing/checkout`, `/billing/success`, `/billing/cancel`, `POST /billing/portal`, `POST /stripe/webhook` |
+| Billing | `GET /signup/complete`, `POST /billing/checkout`, `/billing/success`, `/billing/cancel`, `POST /billing/portal`, `POST /stripe/webhook` |
 | Operations | `/health`, `/robots.txt`, `/sitemap.xml` |
 
 Routes are declared inside `create_web_app()`. Use the route-level authorization helper before loading account data or changing state.

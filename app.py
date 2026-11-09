@@ -5686,21 +5686,8 @@ def build_stripe_metadata(customer_user: dict[str, object], plan: dict[str, obje
     return metadata
 
 
-def create_customer_checkout_session(
-    customer_user: dict[str, object],
-    plan_id: str | None,
-    base_url: str,
-    account_number: str | None = None,
-) -> dict[str, object]:
-    if not billing_checkout_enabled():
-        raise ValueError("Online payment is not open yet.")
-    configure_stripe()
-    plan = get_billing_plan(plan_id)
-    if not plan.get("offered"):
-        raise ValueError("That plan is no longer offered.")
-    account_id = resolve_customer_account_id(int(customer_user["id"]), account_number)
-    if account_id is None:
-        raise ValueError("Choose an electric account before starting billing.")
+def validated_stripe_price_id(plan: dict[str, object]) -> str:
+    """Return the plan's Stripe price after checking it charges what the plan says."""
     price_id = get_stripe_price_id(plan)
     if not price_id:
         raise ValueError("Payment is not connected for that plan yet.")
@@ -5716,6 +5703,108 @@ def create_customer_checkout_session(
         or bool(extract_mapping_value(price, "livemode")) != get_stripe_secret_key().startswith("sk_live_")
     ):
         raise ValueError(f"The {plan['name']} price is not configured correctly. Payment cannot start.")
+    return price_id
+
+
+# New customers pay before anything they typed is written to the database.
+# Until payment completes, the sign-up form lives only in the encrypted
+# session cookie; Stripe sees the email and an opaque reference.
+SIGNUP_CHECKOUT_REFERENCE_PREFIX = "signup:"
+PENDING_SIGNUP_SESSION_KEY = "pending_signup"
+PENDING_SIGNUP_MAX_AGE_SECONDS = 24 * 3600
+PENDING_SIGNUP_MAX_SEALED_LENGTH = 3000
+SIGNUP_FORM_FIELDS = (
+    "full_name", "email", "account_number", "energy_company", "meter_value", "address", "zip_code",
+    "plan_id", "occupant_count", "year_built", "square_footage", "heating_system", "cooling_system",
+    "water_heater", "notes",
+)
+PAID_CHECKOUT_PAYMENT_STATUSES = {"paid", "no_payment_required"}
+
+
+def create_signup_checkout_session(
+    email: str,
+    plan_id: str | None,
+    reference: str,
+    base_url: str,
+    affiliate_slug: str | None = None,
+) -> dict[str, object]:
+    if not billing_checkout_enabled():
+        raise ValueError("Online payment is not open yet.")
+    configure_stripe()
+    plan = get_billing_plan(plan_id)
+    if not plan.get("offered"):
+        raise ValueError("That plan is no longer offered.")
+    price_id = validated_stripe_price_id(plan)
+    metadata = {
+        "project": "home-energy-watch",
+        "project_name": "Home Energy Watch",
+        "project_domain": "app.homeenergywatch.com",
+        "plan_id": str(plan["id"]),
+        "billing_interval": str(plan["billing_interval"]),
+        "signup_reference": reference,
+    }
+    if affiliate_slug and get_affiliate_by_slug(affiliate_slug):
+        metadata["affiliate_slug"] = affiliate_slug
+    session_obj = stripe.checkout.Session.create(
+        mode="subscription",
+        customer_email=clean_email(email),
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{base_url}/signup/complete?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{base_url}/signup?resume=1",
+        client_reference_id=SIGNUP_CHECKOUT_REFERENCE_PREFIX + reference,
+        metadata=metadata,
+        subscription_data={"metadata": metadata},
+        allow_promotion_codes=True,
+    )
+    session_id = normalize_stripe_id(session_obj)
+    session_url = str(extract_mapping_value(session_obj, "url") or "")
+    if not session_id or not session_url:
+        raise ValueError("Payment could not start. Please try again.")
+    return {"id": session_id, "url": session_url}
+
+
+def retrieve_paid_signup_checkout(session_id: str, reference: str) -> object:
+    """Load a sign-up checkout and confirm it is this browser's and is paid."""
+    configure_stripe()
+    session_obj = stripe.checkout.Session.retrieve(
+        session_id,
+        expand=["subscription", "payment_intent.charges", "invoice"],
+    )
+    owner = str(extract_mapping_value(session_obj, "client_reference_id") or "")
+    if not reference or not secrets.compare_digest(owner, SIGNUP_CHECKOUT_REFERENCE_PREFIX + reference):
+        raise PermissionError("That payment belongs to a different sign-up.")
+    payment_status = str(extract_mapping_value(session_obj, "payment_status") or "")
+    if payment_status not in PAID_CHECKOUT_PAYMENT_STATUSES:
+        raise ValueError("Payment has not finished yet. Please wait a moment and try again.")
+    return session_obj
+
+
+def link_signup_subscription(customer_user: dict[str, object], plan_id: str, account_id: int, session_obj: object) -> None:
+    """Tag the Stripe subscription so later webhooks find the new account."""
+    subscription_id = normalize_stripe_id(extract_mapping_value(session_obj, "subscription"))
+    if not subscription_id or not hasattr(stripe, "Subscription"):
+        return
+    metadata = build_stripe_metadata(customer_user, get_billing_plan(plan_id))
+    metadata["account_id"] = str(account_id)
+    stripe.Subscription.modify(subscription_id, metadata=metadata)
+
+
+def create_customer_checkout_session(
+    customer_user: dict[str, object],
+    plan_id: str | None,
+    base_url: str,
+    account_number: str | None = None,
+) -> dict[str, object]:
+    if not billing_checkout_enabled():
+        raise ValueError("Online payment is not open yet.")
+    configure_stripe()
+    plan = get_billing_plan(plan_id)
+    if not plan.get("offered"):
+        raise ValueError("That plan is no longer offered.")
+    account_id = resolve_customer_account_id(int(customer_user["id"]), account_number)
+    if account_id is None:
+        raise ValueError("Choose an electric account before starting billing.")
+    price_id = validated_stripe_price_id(plan)
     metadata = build_stripe_metadata(customer_user, plan)
     metadata["account_id"] = str(account_id)
     session_obj = stripe.checkout.Session.create(
@@ -5854,6 +5943,16 @@ def refresh_customer_billing_from_stripe(customer_user: dict[str, object], sessi
     if metadata_account_id and not customer_can_reach_account_id(str(customer_user["email"]), metadata_account_id):
         raise PermissionError("That checkout session is for an account this sign-in cannot reach.")
     plan_id = str(metadata.get("plan_id") or billing["plan_id"])
+    return apply_checkout_session_to_billing(customer_user, session_obj, metadata_account_id, plan_id)
+
+
+def apply_checkout_session_to_billing(
+    customer_user: dict[str, object],
+    session_obj: object,
+    account_id: int,
+    plan_id: str,
+) -> dict[str, object]:
+    target_session_id = normalize_stripe_id(session_obj)
     subscription_obj = extract_mapping_value(session_obj, "subscription")
     subscription_id = normalize_stripe_id(subscription_obj)
     subscription_status = str(extract_mapping_value(subscription_obj, "status") or "")
@@ -5866,7 +5965,7 @@ def refresh_customer_billing_from_stripe(customer_user: dict[str, object], sessi
         int(customer_user["id"]),
         plan_id,
         billing_status,
-        account_id=metadata_account_id,
+        account_id=account_id,
         checkout_session_id=target_session_id,
         stripe_customer_id=normalize_stripe_id(extract_mapping_value(session_obj, "customer")),
         stripe_subscription_id=subscription_id,
@@ -5890,6 +5989,14 @@ def handle_stripe_event(event: object) -> None:
         metadata = read_checkout_metadata(event_object)
         customer_user_id = metadata.get("customer_user_id")
         if not customer_user_id:
+            if str(extract_mapping_value(event_object, "client_reference_id") or "").startswith(SIGNUP_CHECKOUT_REFERENCE_PREFIX):
+                # The account is created when the customer returns from Stripe.
+                # Log only the Stripe id so an unfinished paid sign-up can be found.
+                emit_application_log(
+                    "billing.signup_checkout_completed",
+                    checkout_session_id=normalize_stripe_id(event_object),
+                    payment_status=str(extract_mapping_value(event_object, "payment_status") or ""),
+                )
             return
         plan_id = str(metadata.get("plan_id") or "home")
         account_id = int(metadata["account_id"]) if str(metadata.get("account_id") or "").isdigit() else None
@@ -9081,6 +9188,41 @@ def save_household_profile(account_number: str | None, form_like) -> dict[str, o
     return load_household_profile(account_number)
 
 
+def check_customer_signup(
+    *,
+    email: str,
+    account_number: str | None,
+    energy_company: str,
+    meter_value: str | None,
+    household_form,
+    plan_id: str | None,
+    authenticated_customer_user_id: int | None = None,
+) -> None:
+    """Run the sign-up checks without writing anything."""
+    normalized_email = clean_email(email)
+    normalized_account_number = clean_account_number(account_number)
+    if not clean_energy_company(energy_company):
+        raise ValueError("Enter the service address so we can identify the energy company.")
+    clean_meter_value(meter_value)
+    get_billing_plan(plan_id)
+    clean_household_profile_values(household_form, require_address=True, require_zip=True)
+    with get_db_connection() as conn:
+        existing_user = conn.execute(
+            "SELECT id, is_active FROM customer_users WHERE email = ?",
+            (normalized_email,),
+        ).fetchone()
+        if existing_user is not None and (
+            authenticated_customer_user_id != int(existing_user["id"])
+            or not bool(existing_user["is_active"])
+        ):
+            raise ValueError("Sign in with your email link before adding another electric account.")
+        if conn.execute(
+            "SELECT id FROM accounts WHERE account_number = ?",
+            (normalized_account_number,),
+        ).fetchone() is not None:
+            raise ValueError("That electric account is already registered. Sign in or contact support for access.")
+
+
 def create_customer_signup(
     *,
     email: str,
@@ -9096,6 +9238,7 @@ def create_customer_signup(
     evidence_user_agent_hash: str | None = None,
     meter_value: str | None = None,
     authenticated_customer_user_id: int | None = None,
+    accepted_at: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     normalized_email = clean_email(email)
     normalized_name = (full_name or "").strip() or normalized_email
@@ -9204,7 +9347,7 @@ def create_customer_signup(
         record_customer_policy_acceptance(
             conn,
             int(customer_user["id"]),
-            accepted_at=timestamp,
+            accepted_at=accepted_at or timestamp,
             remote_hash=evidence_remote_hash,
             user_agent_hash=evidence_user_agent_hash,
         )
@@ -9212,7 +9355,7 @@ def create_customer_signup(
             conn,
             account_id=int(account["id"]),
             customer_user_id=int(customer_user["id"]),
-            granted_at=timestamp,
+            granted_at=accepted_at or timestamp,
             remote_hash=evidence_remote_hash,
             user_agent_hash=evidence_user_agent_hash,
         )
@@ -13293,7 +13436,8 @@ def create_web_app() -> Flask:
         start_customer_session(customer_user)
         billing = load_customer_billing(int(customer_user["id"]), account_number=account_number)
         selected_plan = get_billing_plan(str(billing["plan_id"]))
-        if selected_plan["payment_ready"]:
+        already_paid = str(billing.get("status") or "") in {"active", "trialing"}
+        if selected_plan["payment_ready"] and not already_paid:
             try:
                 session_obj = create_customer_checkout_session(
                     customer_user,
@@ -13479,44 +13623,29 @@ def create_web_app() -> Flask:
         )
         return redirect(url_for("index"))
 
-    @app.get("/signup")
-    def customer_signup():
-        if current_customer_user() is not None and current_staff_user() is None:
-            return redirect(url_for("customer_dashboard"))
-        return render_customer_signup_page(request.args)
-
-    @app.post("/signup")
-    def customer_signup_post():
-        selected_plan_id = request.form.get("plan_id") or DEFAULT_BILLING_PLAN_ID
+    def load_pending_signup() -> dict[str, object] | None:
+        sealed = session.get(PENDING_SIGNUP_SESSION_KEY)
+        if not sealed:
+            return None
         try:
-            accept_policies = form_checkbox_checked(request.form.get("accept_policies"))
-            confirm_account_authority = form_checkbox_checked(
-                request.form.get("confirm_account_authority")
-            )
-            if not accept_policies:
-                raise ValueError("Agree to the Terms and Privacy Notice to create an account.")
-            if not confirm_account_authority:
-                raise ValueError("Confirm that you are allowed to manage this electric account.")
-            energy_company = resolve_energy_company_for_form(request.form, require_zip=True)
-            customer_user, account, billing = create_customer_signup(
-                email=request.form.get("email", ""),
-                full_name=request.form.get("full_name", ""),
-                password=request.form.get("password", ""),
-                account_number=request.form.get("account_number"),
-                energy_company=energy_company,
-                meter_value=request.form.get("meter_value"),
-                plan_id=selected_plan_id,
-                household_form=request.form,
-                accept_policies=accept_policies,
-                confirm_account_authority=confirm_account_authority,
-                evidence_remote_hash=request_remote_hash(),
-                evidence_user_agent_hash=request_user_agent_hash(),
-                authenticated_customer_user_id=(current_customer_user() or {}).get("id"),
-            )
-        except Exception as exc:
-            flash(user_facing_error_message(exc))
-            return render_customer_signup_page(request.form)
+            pending = json.loads(unseal_secret_value(str(sealed)) or "")
+            if not isinstance(pending, dict) or not isinstance(pending.get("fields"), dict):
+                raise ValueError("pending sign-up is malformed")
+            if time.time() - float(pending.get("created_at") or 0) > PENDING_SIGNUP_MAX_AGE_SECONDS:
+                raise ValueError("pending sign-up expired")
+        except Exception:
+            session.pop(PENDING_SIGNUP_SESSION_KEY, None)
+            return None
+        return pending
 
+    def save_pending_signup(pending: dict[str, object]) -> None:
+        sealed = seal_secret_value(json.dumps(pending, sort_keys=True, separators=(",", ":")))
+        if not sealed or len(sealed) > PENDING_SIGNUP_MAX_SEALED_LENGTH:
+            raise ValueError("Some details are too long to hold during payment. Shorten the house notes and try again.")
+        session.permanent = True
+        session[PENDING_SIGNUP_SESSION_KEY] = sealed
+
+    def record_signup_events(customer_user: dict[str, object], account: dict[str, object], billing: dict[str, object]) -> None:
         record_audit_event(
             "customer.signup",
             actor_type="customer",
@@ -13561,6 +13690,8 @@ def create_web_app() -> Flask:
                 "authorization_scope": UTILITY_AUTHORIZATION_SCOPE,
             },
         )
+
+    def finish_signup_response(customer_user: dict[str, object], account: dict[str, object]):
         if not customer_user.get("email_verified"):
             session.clear()
             session.permanent = True
@@ -13590,8 +13721,180 @@ def create_web_app() -> Flask:
                     metadata={"error_type": type(exc).__name__},
                 )
             return render_verification_notice(str(customer_user["email"]))
-
         return continue_customer_after_verification(customer_user, str(account["account_number"]))
+
+    @app.get("/signup")
+    def customer_signup():
+        if current_customer_user() is not None and current_staff_user() is None:
+            return redirect(url_for("customer_dashboard"))
+        pending = load_pending_signup()
+        if pending is None:
+            return render_customer_signup_page(request.args)
+        if request.args.get("resume") != "1" and pending.get("checkout_session_id"):
+            # A customer who paid but never got back from Stripe can finish here.
+            try:
+                retrieve_paid_signup_checkout(str(pending["checkout_session_id"]), str(pending["reference"]))
+                return redirect(url_for("customer_signup_complete", session_id=pending["checkout_session_id"]))
+            except Exception:
+                pass
+        return render_customer_signup_page(pending["fields"])
+
+    def start_paid_signup(energy_company: str, plan_id: str):
+        authenticated_customer_user_id = (current_customer_user() or {}).get("id")
+        check_customer_signup(
+            email=request.form.get("email", ""),
+            account_number=request.form.get("account_number"),
+            energy_company=energy_company,
+            meter_value=request.form.get("meter_value"),
+            household_form=request.form,
+            plan_id=plan_id,
+            authenticated_customer_user_id=authenticated_customer_user_id,
+        )
+        reference = secrets.token_urlsafe(24)
+        pending = {
+            "version": 1,
+            "reference": reference,
+            "created_at": int(time.time()),
+            "accepted_at": timestamp_now(),
+            "fields": {name: str(request.form.get(name) or "")[:1000] for name in SIGNUP_FORM_FIELDS},
+            "energy_company": energy_company,
+            "plan_id": plan_id,
+            "evidence_remote_hash": request_remote_hash(),
+            "evidence_user_agent_hash": request_user_agent_hash(),
+            "authenticated_customer_user_id": authenticated_customer_user_id,
+            "affiliate_slug": str(session.get("affiliate_slug") or ""),
+            "checkout_session_id": "cs_" + "x" * 64,
+        }
+        save_pending_signup(pending)  # Size check before anything reaches Stripe.
+        try:
+            checkout = create_signup_checkout_session(
+                str(pending["fields"]["email"]),
+                plan_id,
+                reference,
+                build_public_base_url(request.url_root),
+                affiliate_slug=str(pending["affiliate_slug"]) or None,
+            )
+        except Exception:
+            session.pop(PENDING_SIGNUP_SESSION_KEY, None)
+            raise
+        pending["checkout_session_id"] = str(checkout["id"])
+        save_pending_signup(pending)
+        return redirect(str(checkout["url"]))
+
+    @app.post("/signup")
+    def customer_signup_post():
+        selected_plan_id = request.form.get("plan_id") or DEFAULT_BILLING_PLAN_ID
+        try:
+            accept_policies = form_checkbox_checked(request.form.get("accept_policies"))
+            confirm_account_authority = form_checkbox_checked(
+                request.form.get("confirm_account_authority")
+            )
+            if not accept_policies:
+                raise ValueError("Agree to the Terms and Privacy Notice to create an account.")
+            if not confirm_account_authority:
+                raise ValueError("Confirm that you are allowed to manage this electric account.")
+            energy_company = resolve_energy_company_for_form(request.form, require_zip=True)
+            if get_billing_plan(selected_plan_id).get("payment_ready"):
+                return start_paid_signup(energy_company, selected_plan_id)
+            customer_user, account, billing = create_customer_signup(
+                email=request.form.get("email", ""),
+                full_name=request.form.get("full_name", ""),
+                password=request.form.get("password", ""),
+                account_number=request.form.get("account_number"),
+                energy_company=energy_company,
+                meter_value=request.form.get("meter_value"),
+                plan_id=selected_plan_id,
+                household_form=request.form,
+                accept_policies=accept_policies,
+                confirm_account_authority=confirm_account_authority,
+                evidence_remote_hash=request_remote_hash(),
+                evidence_user_agent_hash=request_user_agent_hash(),
+                authenticated_customer_user_id=(current_customer_user() or {}).get("id"),
+            )
+        except Exception as exc:
+            flash(user_facing_error_message(exc))
+            return render_customer_signup_page(request.form)
+
+        record_signup_events(customer_user, account, billing)
+        return finish_signup_response(customer_user, account)
+
+    @app.get("/signup/complete")
+    def customer_signup_complete():
+        pending = load_pending_signup()
+        session_id = (request.args.get("session_id") or "").strip()
+        if pending is None:
+            if current_customer_user() is not None:
+                return redirect(url_for("customer_dashboard"))
+            flash(
+                "Your payment went through, but this browser no longer has your sign-up details. "
+                f"Contact {SUPPORT_EMAIL} and we will finish setting up your account."
+            )
+            return redirect(url_for("login"))
+        if not session_id or not secrets.compare_digest(session_id, str(pending.get("checkout_session_id") or "")):
+            flash("That payment link does not match this sign-up. Please start again.")
+            return redirect(url_for("customer_signup", resume=1))
+        authenticated_customer_user_id = pending.get("authenticated_customer_user_id")
+        if authenticated_customer_user_id and (current_customer_user() or {}).get("id") != authenticated_customer_user_id:
+            flash("Sign in with the same account that started this payment.")
+            return redirect(url_for("login"))
+        try:
+            session_obj = retrieve_paid_signup_checkout(session_id, str(pending["reference"]))
+        except Exception as exc:
+            flash(user_facing_error_message(exc))
+            return redirect(url_for("customer_signup", resume=1))
+        fields = pending["fields"]
+        try:
+            customer_user, account, billing = create_customer_signup(
+                email=str(fields.get("email") or ""),
+                full_name=str(fields.get("full_name") or ""),
+                account_number=str(fields.get("account_number") or ""),
+                energy_company=str(pending["energy_company"]),
+                meter_value=str(fields.get("meter_value") or ""),
+                plan_id=str(pending["plan_id"]),
+                household_form=fields,
+                accept_policies=True,
+                confirm_account_authority=True,
+                evidence_remote_hash=pending.get("evidence_remote_hash"),
+                evidence_user_agent_hash=pending.get("evidence_user_agent_hash"),
+                authenticated_customer_user_id=authenticated_customer_user_id,
+                accepted_at=str(pending["accepted_at"]),
+            )
+        except Exception as exc:
+            log_handled_exception("billing.signup_finalize_failed", exc)
+            emit_application_log("billing.signup_finalize_failed", checkout_session_id=session_id)
+            flash(
+                f"Your payment went through, but we could not finish setting up the account ({user_facing_error_message(exc)}). "
+                f"Contact {SUPPORT_EMAIL} and we will sort it out."
+            )
+            return redirect(url_for("login"))
+        session.pop(PENDING_SIGNUP_SESSION_KEY, None)
+        billing = apply_checkout_session_to_billing(customer_user, session_obj, int(account["id"]), str(pending["plan_id"]))
+        try:
+            link_signup_subscription(customer_user, str(pending["plan_id"]), int(account["id"]), session_obj)
+        except Exception as exc:
+            log_handled_exception("billing.signup_subscription_link_failed", exc)
+        affiliate = get_affiliate_by_slug(str(pending.get("affiliate_slug") or ""))
+        amount = extract_stripe_amount_total(session_obj)
+        if affiliate is not None and amount is not None:
+            record_affiliate_commission(
+                affiliate,
+                session_id,
+                int(customer_user["id"]),
+                amount,
+                extract_stripe_currency(session_obj) or "usd",
+                resolve_stripe_payment_reference(session_obj),
+            )
+        record_signup_events(customer_user, account, billing)
+        record_audit_event(
+            "billing.signup_paid",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=str(account["account_number"]),
+            target_type="stripe_checkout_session",
+            target_id=session_id,
+            metadata={"plan_id": str(pending["plan_id"])},
+        )
+        return finish_signup_response(customer_user, account)
 
     @app.get("/customer/verification-sent")
     def customer_verification_sent():

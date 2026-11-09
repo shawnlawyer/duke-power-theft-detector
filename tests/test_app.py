@@ -3058,50 +3058,6 @@ def install_fake_passkeys(monkeypatch):
     return server
 
 
-def test_customer_signup_paid_plan_redirects_to_stripe_checkout(tmp_path, monkeypatch):
-    configure_tmp_paths(tmp_path, monkeypatch)
-    stub_utility_lookup(monkeypatch, company="Duke Energy Carolinas, LLC")
-    app.web_app.config["TESTING"] = True
-    install_fake_stripe(monkeypatch)
-    monkeypatch.setenv("POWER_PUBLIC_BASE_URL", "https://app.homeenergywatch.com")
-
-    client = app.web_app.test_client()
-    response = client.post(
-        "/signup",
-        data={
-            "full_name": "Home Owner",
-            "email": "owner@example.com",
-            "password": "customer-password-123",
-            "account_number": "duke-123",
-            "address": "123 Main St Charlotte NC",
-            "zip_code": "28205",
-            "plan_id": "home",
-            "accept_policies": "yes",
-            "confirm_account_authority": "yes",
-        },
-        follow_redirects=False,
-    )
-    customer = app.get_customer_user_by_email("owner@example.com")
-    billing = app.load_customer_billing(int(customer["id"]))
-    checkout_call = FakeStripeCheckoutSession.calls[0]
-
-    assert response.status_code == 302
-    assert response.headers["Location"] == "https://checkout.stripe.com/c/cs_test_123"
-    assert checkout_call["mode"] == "subscription"
-    assert checkout_call["line_items"] == [{"price": "price_home_123", "quantity": 1}]
-    assert checkout_call["success_url"] == "https://app.homeenergywatch.com/billing/success?session_id={CHECKOUT_SESSION_ID}"
-    assert checkout_call["cancel_url"] == "https://app.homeenergywatch.com/billing/cancel"
-    assert checkout_call["allow_promotion_codes"] is True
-    assert checkout_call["metadata"]["project"] == "home-energy-watch"
-    assert checkout_call["metadata"]["customer_user_id"] == str(customer["id"])
-    assert checkout_call["metadata"]["plan_id"] == "home"
-    assert billing["status"] == "checkout_started"
-    assert billing["checkout_session_id"] == "cs_test_123"
-    assert billing["stripe_customer_id"] == "cus_123"
-    assert billing["stripe_subscription_id"] == "sub_123"
-    assert billing["stripe_payment_reference"] == "cs_test_123"
-
-
 def test_customer_checkout_rejects_monthly_price(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     install_fake_stripe(monkeypatch)
