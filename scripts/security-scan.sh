@@ -10,8 +10,10 @@ TRIVY_CACHE_DIR="${TRIVY_CACHE_DIR:-/tmp/home-energy-watch-trivy-cache}"
 
 mkdir -p "$TRIVY_CACHE_DIR"
 
-docker build -t "$IMAGE_TAG" .
-docker run --rm "$IMAGE_TAG" python -m pytest
+docker build --pull --no-cache -t "$IMAGE_TAG" .
+# The image runs as the unprivileged app user and /app is read-only to it,
+# so skip the pytest cache instead of warning about an unwritable directory.
+docker run --rm "$IMAGE_TAG" python -m pytest -p no:cacheprovider
 docker run --rm \
   -v "$ROOT_DIR:/workspace:ro" \
   -w /workspace \

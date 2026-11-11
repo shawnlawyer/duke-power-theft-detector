@@ -1,0 +1,43 @@
+{% set guide_account = analysis.account if analysis else account %}
+{% set selected_download_guide = get_utility_download_guide(guide_account.energy_company) %}
+{% set guide_customer_mode = customer_mode|default(false) %}
+{% set guide_history_url = url_for('customer_history_page' if guide_customer_mode else 'history_page', account_number=guide_account.account_number) %}
+
+{% macro download_steps(guide) %}
+  <p class="plain-note">{{ guide.summary }}</p>
+  <ol class="utility-download-steps">
+    {% for step in guide.steps %}<li>{{ step }}</li>{% endfor %}
+  </ol>
+  <p class="utility-download-note">{{ guide.note }}</p>
+  <div class="guide-actions">
+    <a class="button-link" href="{{ guide.url }}" target="_blank" rel="noopener noreferrer">{{ guide.link_label }}</a>
+    {% if request.endpoint not in ['customer_history_page', 'history_page'] %}
+      <a class="inline-link" href="{{ guide_history_url }}#history-import">Open History</a>
+    {% endif %}
+  </div>
+{% endmacro %}
+
+<div class="utility-download-guides" aria-labelledby="utility-download-heading">
+  <h3 id="utility-download-heading">Get your utility history</h3>
+  {% if selected_download_guide %}
+    <article class="guide-row" data-selected-utility="{{ selected_download_guide.slug }}">
+      <p class="section-kicker">Customer download</p>
+      <h4>{{ selected_download_guide.title }}</h4>
+      {{ download_steps(selected_download_guide) }}
+    </article>
+  {% else %}
+    <p class="plain-note">Choose your utility below for download instructions. You can save its name on the <a class="inline-link" href="{{ url_for('customer_account_page' if guide_customer_mode else 'account_page', account_number=guide_account.account_number) }}">Account page</a>.</p>
+  {% endif %}
+  <p class="plain-note">A download guide is not an automatic connection. Files must match a supported format; a utility name alone does not guarantee that every export will work. Daily totals and bill PDFs cannot show overnight usage.</p>
+  <details class="utility-download-directory">
+    <summary>{{ 'Download instructions for other utilities' if selected_download_guide else 'Find download instructions' }}</summary>
+    {% for guide in utility_download_guides %}
+      {% if guide != selected_download_guide %}
+        <details class="utility-download-option">
+          <summary>{{ guide.provider }}</summary>
+          {{ download_steps(guide) }}
+        </details>
+      {% endif %}
+    {% endfor %}
+  </details>
+</div>

@@ -1,0 +1,30 @@
+{% extends "marketing_base.html" %}
+{% from "_hew_ui.html" import icon %}
+
+{% block content %}
+  <section class="hew-page-hero">
+    <div class="hew-wrap">
+      <span class="hew-eyebrow">About us</span>
+      <h1>Better energy understanding begins with better information.</h1>
+      <p class="hew-lead">Home Energy Watch turns complex electricity readings into accessible insights that support informed household and professional decisions.</p>
+    </div>
+  </section>
+
+  <section class="hew-section">
+    <div class="hew-wrap">
+      <div class="hew-feature-grid">
+        <article class="hew-card hew-feature"><span class="hew-icon-tile">{{ icon("leaf") }}</span><h3>Our mission</h3><p>Give every household a clear, organized view of its own electricity history.</p></article>
+        <article class="hew-card hew-feature"><span class="hew-icon-tile is-blue">{{ icon("search") }}</span><h3>Our approach</h3><p>Start from the readings your utility provides, and show the rule behind every finding.</p></article>
+        <article class="hew-card hew-feature"><span class="hew-icon-tile is-mint">{{ icon("shield") }}</span><h3>Data responsibility</h3><p>Your history stays yours. We don't sell household energy data, and you can download everything on file.</p></article>
+        <article class="hew-card hew-feature"><span class="hew-icon-tile is-amber">{{ icon("spark") }}</span><h3>Commitment to clarity</h3><p>Plain language, measured results and honest limits, so you can decide what the numbers mean.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="hew-cta">
+    <div class="hew-wrap hew-cta-inner">
+      <div><h2>Get to know Home Energy Watch.</h2><p>See how it turns your utility data into a clear record.</p></div>
+      <a class="hew-btn hew-btn-primary" href="{{ how_it_works_url }}">See How It Works</a>
+    </div>
+  </section>
+{% endblock %}

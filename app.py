@@ -31,16 +31,19 @@ import zipfile
 from datetime import date as ddate, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
-from urllib.error import HTTPError
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+from urllib.request import Request, urlopen
+import urllib.request
+import http.client
+import ipaddress
+import socket
 from uuid import uuid4
 
 import aiohttp
 from aiodukeenergy import Auth0Client, DukeEnergy, DukeEnergyAuth
 from dateutil import tz
-from cryptography.fernet import Fernet, InvalidToken
-from flask import Flask, flash, g, has_request_context, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
+from flask import Flask, abort, flash, g, has_request_context, jsonify, make_response, redirect, render_template, request, send_from_directory, session, url_for
 from werkzeug.exceptions import HTTPException
 import pandas as pd
 from lxml import etree
@@ -62,6 +65,13 @@ from fido2.webauthn import (
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
+
+from utility_guides import UTILITY_DOWNLOAD_GUIDES, get_utility_download_guide
+import account_cleanup
+import coned_oru
+import national_grid
+import xcel
+import utility_onboarding
 
 try:
     import psycopg
@@ -106,7 +116,11 @@ DEFAULT_DATABASE_URL = (os.getenv("POWER_DATABASE_URL") or os.getenv("DATABASE_U
 MAX_UPLOAD_BYTES = int(os.getenv("POWER_MAX_UPLOAD_MB", "25")) * 1024 * 1024
 MAX_EXPORT_REPORT_BYTES = int(os.getenv("POWER_MAX_EXPORT_REPORT_MB", "25")) * 1024 * 1024
 ALLOWED_SUFFIXES = {".xml", ".csv"}
-STAFF_ROLES = ("Commissioner", "Analyst", "Investigator")
+STAFF_ROLES = ("Owner", "Admin", "Commissioner", "Analyst", "Investigator")
+# Owner runs the business; Admins run the staff desk; Commissioners only review.
+STAFF_ADMIN_ROLES = ("Owner", "Admin")
+OWNER_EMAIL = "shawn@epistemiccognition.com"
+OWNER_FULL_NAME = "Shawn Lawyer"
 INVITE_EXPIRY_DAYS = 7
 AUTH_RATE_LIMIT_WINDOW_SECONDS = 15 * 60
 AUTH_RATE_LIMIT_MAX_ATTEMPTS = 5
@@ -122,12 +136,23 @@ PASSKEY_ISSUER = "Home Energy Watch"
 PASSKEY_USER_KINDS = ("staff", "customer")
 PASSKEY_SESSION_KEY_PREFIX = "pending_passkey_"
 PASSKEY_USER_VERIFICATION = UserVerificationRequirement.PREFERRED
+# Staff passkeys stand in for the authenticator app, so the device must verify
+# the person (PIN or biometric); a bare security-key tap is not enough.
+STAFF_PASSKEY_USER_VERIFICATION = UserVerificationRequirement.REQUIRED
+
+
+def passkey_user_verification(kind: str) -> UserVerificationRequirement:
+    return STAFF_PASSKEY_USER_VERIFICATION if kind == "staff" else PASSKEY_USER_VERIFICATION
 CUSTOMER_AUTH_TOKEN_PURPOSES = ("verify_email", "password_reset", "login")
 STAFF_AUTH_TOKEN_PURPOSES = ("password_reset", "login")
 LOGIN_TOKEN_EXPIRY_MINUTES = 15
 EMAIL_OUTBOX: list[dict[str, str]] = []
 CUSTOMER_ACCESS_LEVELS = ("Viewer", "Manager")
 APP_LOGGER_NAME = "home_energy_watch"
+FLAGGED_INTERVAL_CAVEAT = "Flagged intervals are prompts for review, not proof of theft, tampering, or a billing error."
+HOUSEHOLD_ASSISTANT_MAX_QUESTION_CHARS = 2000
+HOUSEHOLD_ASSISTANT_RATE_LIMIT = 20
+HOUSEHOLD_ASSISTANT_RATE_WINDOW_SECONDS = 60 * 60
 
 
 def get_application_log_level() -> int:
@@ -179,6 +204,32 @@ def emit_application_log(event: str, **fields: object) -> None:
     else:
         message = " ".join(f"{key}={value}" for key, value in record.items())
     get_application_logger().info(message)
+
+
+GENERIC_ERROR_MESSAGE = "Something went wrong. Please try again or contact support."
+
+
+def log_handled_exception(event: str, exc: BaseException) -> None:
+    payload = {
+        "event": event,
+        "exception_type": exc.__class__.__name__,
+        "request_id": str(getattr(g, "request_id", "") or "") if has_request_context() else "",
+    }
+    get_application_logger().error(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
+USER_FACING_EXCEPTION_TYPES = (ValueError, PermissionError, FileNotFoundError)
+
+
+def user_facing_error_message(exc: BaseException, event: str = "request.handled_error") -> str:
+    """Return validation messages as-is; log anything unexpected and return a generic message."""
+    if isinstance(exc, USER_FACING_EXCEPTION_TYPES):
+        return str(exc)
+    log_handled_exception(event, exc)
+    return GENERIC_ERROR_MESSAGE
 
 
 ENERGY_COMPANY_GROUPS = (
@@ -351,58 +402,9 @@ DUKE_OAUTH_CONNECTION_LABEL = "Duke automatic feed"
 DUKE_OAUTH_PENDING_SESSION_KEY = "pending_duke_oauth"
 DUKE_OAUTH_EXPIRY_MINUTES = 10
 DUKE_SYNC_LOOKBACK_DAYS = 30
-GREEN_BUTTON_ACCESS_METHOD = "green_button_oauth"
-GREEN_BUTTON_PENDING_SESSION_KEY = "pending_green_button"
-GREEN_BUTTON_EXPIRY_MINUTES = 10
-# Deliberately not an environment flag: batch delivery and utility acceptance
-# tests must be completed before any customer-facing entry point is enabled.
-GREEN_BUTTON_IMPLEMENTATION_READY = False
-GREEN_BUTTON_PROVIDERS = {
-    "con edison": "CONED",
-    "con edison company of new york": "CONED",
-    "orange & rockland": "ORU",
-    "orange and rockland": "ORU",
-}
-GREEN_BUTTON_DEFAULT_SCOPE = os.getenv(
-    "POWER_GREEN_BUTTON_SCOPE",
-    "FB=1_3_4_5_7_8_10_15_16_51_53_56_57_58_60;IntervalDuration=Monthly_3600_900_300;BlockDuration=Monthly_Daily;HistoryLength=63072000",
-).strip()
-GREEN_BUTTON_CONFIG = {
-    "CONED": {
-        "label": "Con Edison",
-        "authorize_url": os.getenv("POWER_CONED_GREEN_BUTTON_AUTHORIZE_URL", "").strip(),
-        "token_url": os.getenv("POWER_CONED_GREEN_BUTTON_TOKEN_URL", "").strip(),
-        "resource_url": os.getenv("POWER_CONED_GREEN_BUTTON_RESOURCE_URL", "").strip(),
-        "client_id": os.getenv("POWER_CONED_GREEN_BUTTON_CLIENT_ID", "").strip(),
-        "client_secret": os.getenv("POWER_CONED_GREEN_BUTTON_CLIENT_SECRET", "").strip(),
-        "bulk_id": os.getenv("POWER_CONED_GREEN_BUTTON_BULK_ID", "").strip(),
-        "scope": os.getenv("POWER_CONED_GREEN_BUTTON_SCOPE", GREEN_BUTTON_DEFAULT_SCOPE).strip(),
-        "approved": os.getenv("POWER_CONED_GREEN_BUTTON_APPROVED", "false").lower() == "true",
-    },
-    "ORU": {
-        "label": "Orange & Rockland",
-        "authorize_url": os.getenv("POWER_ORU_GREEN_BUTTON_AUTHORIZE_URL", "").strip(),
-        "token_url": os.getenv("POWER_ORU_GREEN_BUTTON_TOKEN_URL", "").strip(),
-        "resource_url": os.getenv("POWER_ORU_GREEN_BUTTON_RESOURCE_URL", "").strip(),
-        "client_id": os.getenv("POWER_ORU_GREEN_BUTTON_CLIENT_ID", "").strip(),
-        "client_secret": os.getenv("POWER_ORU_GREEN_BUTTON_CLIENT_SECRET", "").strip(),
-        "bulk_id": os.getenv("POWER_ORU_GREEN_BUTTON_BULK_ID", "").strip(),
-        "scope": os.getenv("POWER_ORU_GREEN_BUTTON_SCOPE", GREEN_BUTTON_DEFAULT_SCOPE).strip(),
-        "approved": os.getenv("POWER_ORU_GREEN_BUTTON_APPROVED", "false").lower() == "true",
-    },
-}
-
-
-class _RejectRedirects(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ValueError("The utility returned an unexpected redirect.")
-
-
-def no_redirect_opener():
-    return build_opener(_RejectRedirects)
 GREEN_BUTTON_CONNECT_URL = "https://www.greenbuttonalliance.org/green-button-connect-my-data-cmd"
 GREEN_BUTTON_DOWNLOAD_URL = "https://www.greenbuttonalliance.org/green-button-download-my-data-dmd"
-XCEL_GREEN_BUTTON_APPLICATION_URL = "https://www.xcelenergy.com/staticfiles/xe-responsive/Partners/Green_Button_Program_Service_Application.pdf"
+XCEL_GREEN_BUTTON_APPLICATION_URL = "https://myenergy.xcelenergy.com/greenbutton/green-vendor"
 XCEL_MY_ACCOUNT_URL = "https://myenergy.xcelenergy.com/"
 NCUC_DATA_ACCESS_ORDER_URL = "https://starw1.ncuc.gov/NCUC/ViewFile.aspx?Id=b18eb0c3-6968-47d0-adbf-9f1b6ea8f680"
 UTILITY_ACCESS_GUIDES = (
@@ -443,7 +445,7 @@ UTILITY_ACCESS_GUIDES = (
         "summary": "In Xcel Energy My Account, use Green Button Download My Data to save your usage file, then upload the Green Button XML from History. Home Energy Watch accepts the standard Green Button format and keeps overlapping readings from replacing older records.",
         "action_label": "Open Xcel My Account",
         "action_url": XCEL_MY_ACCOUNT_URL,
-        "secondary_label": "View Xcel provider application",
+        "secondary_label": "Open Xcel provider registration",
         "secondary_url": XCEL_GREEN_BUTTON_APPLICATION_URL,
     },
     {
@@ -483,14 +485,28 @@ BILLING_PLAN_DEFINITIONS = (
     {
         "id": "home",
         "name": "Home Watch",
-        "annual_price_label": "$239.88 / year",
+        "price_label": "$239.88 / year",
+        "unit_amount": 23988,
         "billing_interval": "year",
         "account_limit": 1,
+        "offered": True,
+        "featured": False,
         "checkout_supported": True,
         "stripe_price_env": "STRIPE_PRICE_HOME",
         "summary": "For one electric account with unlimited saved reports.",
+        "feature_labels": (
+            "Usage analytics",
+            "Overnight baseline",
+            "Anomaly detection",
+            "Appliance and weather insights",
+            "Unlimited saved reports",
+        ),
     },
 )
+DEFAULT_BILLING_PLAN_ID = "home"
+LEGACY_BILLING_PLAN_ALIASES = {"review": "home", "agency": "home"}
+
+
 COMMISSION_REGISTRY_SEED = (
     {
         "key": "nc-state",
@@ -500,6 +516,8 @@ COMMISSION_REGISTRY_SEED = (
         "domains": ("psncuc.gov", "ncuc.gov"),
     },
 )
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+SUPPORT_EMAIL = os.getenv("POWER_SUPPORT_EMAIL", "support@homeenergywatch.com")
 DEFAULT_MARKETING_HOSTS = ("homeenergywatch.com", "www.homeenergywatch.com")
 DEFAULT_APP_HOSTS = ("app.homeenergywatch.com",)
 CURRENT_TERMS_VERSION = "2026-07-21"
@@ -529,7 +547,9 @@ class DatabaseConnection:
 
     def _translate_query(self, query: str) -> str:
         if self.kind == "postgres":
-            return query.replace("?", "%s")
+            # Escape literal percent signs first (for example LIKE 'prefix_%'), then
+            # turn SQLite-style ? placeholders into psycopg's %s.
+            return query.replace("%", "%%").replace("?", "%s")
         return query
 
     def execute(self, query: str, params: tuple | list | None = None):
@@ -675,6 +695,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=DEFAULT_OWNER_FREE_PLAY_VALID_DAYS,
         help="Days until expiration for a created owner promotion code",
     )
+    parser.add_argument(
+        "--reseal-secrets",
+        action="store_true",
+        help="Re-encrypt all sealed secrets with the first POWER_DATA_ENCRYPTION_KEY and exit",
+    )
+    parser.add_argument("--list-accounts", action="store_true", help="Print every account with its address, emails, billing and readings, then exit")
+    parser.add_argument("--purge-accounts", nargs="+", metavar="ACCOUNT_NUMBER", help="Permanently delete these accounts (dry run unless --confirm-purge)")
+    parser.add_argument("--purge-all-except", nargs="+", metavar="ACCOUNT_NUMBER", help="Purge every account except these, skipping paid, held or data-bearing accounts (dry run unless --confirm-purge)")
+    parser.add_argument("--confirm-purge", action="store_true", help="Actually delete the accounts named by --purge-accounts")
     parser.add_argument("--host", default="0.0.0.0", help="Web host to bind when using --serve")
     parser.add_argument("--port", type=int, default=8000, help="Web port to bind when using --serve")
     return parser
@@ -683,6 +712,21 @@ def build_cli_parser() -> argparse.ArgumentParser:
 def ensure_data_dirs() -> None:
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def is_safe_local_path(value: str | None) -> bool:
+    """True only for same-site paths like "/account?x=1".
+
+    Browsers treat a backslash like a forward slash, so "/\\evil.example" would
+    otherwise slip past a simple "starts with one slash" check and leave the site.
+    """
+    candidate = str(value or "")
+    if not candidate.startswith("/") or candidate.startswith("//"):
+        return False
+    if "\\" in candidate or any(ord(char) < 32 or ord(char) == 127 for char in candidate):
+        return False
+    parts = urlsplit(candidate)
+    return not parts.scheme and not parts.netloc
 
 
 def normalize_account_number(value: str | None) -> str:
@@ -858,7 +902,10 @@ def table_columns(conn: DatabaseConnection, name: str) -> set[str]:
             """,
             (name,),
         ).fetchall()
-        return {str(row["column_name"]) for row in rows}
+        return {
+            row["column_name"].decode("utf-8") if isinstance(row["column_name"], bytes) else str(row["column_name"])
+            for row in rows
+        }
     return {row[1] for row in conn.execute(f"PRAGMA table_info({name})").fetchall()}
 
 
@@ -1034,6 +1081,8 @@ def ensure_accounts_table(conn: DatabaseConnection) -> int:
         conn.execute("ALTER TABLE accounts ADD COLUMN energy_company TEXT")
     if "meter_value" not in account_columns:
         conn.execute("ALTER TABLE accounts ADD COLUMN meter_value TEXT")
+    if "disabled_at" not in account_columns:
+        conn.execute("ALTER TABLE accounts ADD COLUMN disabled_at TEXT")
     timestamp = timestamp_now()
     conn.execute(
         """
@@ -1608,6 +1657,24 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         ON audit_events (action, occurred_at)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_stripe_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            created BIGINT,
+            subscription_id TEXT,
+            processed_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("ALTER TABLE processed_stripe_events ADD COLUMN IF NOT EXISTS subscription_id TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_processed_stripe_events_subscription
+        ON processed_stripe_events (subscription_id, created)
+        """
+    )
     backfill_audit_event_hashes(conn)
     billing_columns = table_columns(conn, "customer_billing")
     if not billing_columns:
@@ -1661,9 +1728,14 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
 
 
 def migrate_database(conn: DatabaseConnection) -> None:
+    national_grid.ensure_schema(conn)
+    xcel.ensure_schema(conn)
+    coned_oru.ensure_schema(conn)
+    utility_onboarding.ensure_schema(conn)
     if conn.kind == "postgres":
         migrate_database_postgres(conn)
         ensure_equipment_history_table(conn)
+        migrate_staff_roles(conn)
         return
 
     default_account_id = ensure_accounts_table(conn)
@@ -2310,6 +2382,25 @@ def migrate_database(conn: DatabaseConnection) -> None:
         ON audit_events (action, occurred_at)
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS processed_stripe_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            created INTEGER,
+            subscription_id TEXT,
+            processed_at TEXT NOT NULL
+        )
+        """
+    )
+    if "subscription_id" not in table_columns(conn, "processed_stripe_events"):
+        conn.execute("ALTER TABLE processed_stripe_events ADD COLUMN subscription_id TEXT")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_processed_stripe_events_subscription
+        ON processed_stripe_events (subscription_id, created)
+        """
+    )
     backfill_audit_event_hashes(conn)
     billing_columns = table_columns(conn, "customer_billing")
     if not billing_columns:
@@ -2362,6 +2453,7 @@ def migrate_database(conn: DatabaseConnection) -> None:
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_billing_account_id ON customer_billing (account_id)")
     ensure_equipment_history_table(conn)
     seed_commission_registry(conn)
+    migrate_staff_roles(conn)
 
 
 def clean_email(value: str | None) -> str:
@@ -2477,7 +2569,55 @@ def get_staff_commission_access(staff_user_id: int | None) -> dict[str, object] 
             """,
             (int(staff_user_id),),
         ).fetchone()
+    if row is not None:
+        return dict(row)
+    return get_commission_preview(int(staff_user_id))
+
+
+COMMISSION_PREVIEW_SESSION_KEY = "commission_preview"
+
+
+def get_commission_preview(staff_user_id: int) -> dict[str, object] | None:
+    """The commission a Commissioner is previewing in this browser session, if any.
+
+    While previewing, every permission check treats the Commissioner exactly like a
+    member of that commission: read-only, limited to its jurisdiction.
+    """
+    if not has_request_context():
+        return None
+    preview = session.get(COMMISSION_PREVIEW_SESSION_KEY)
+    if not isinstance(preview, dict) or int(preview.get("staff_user_id") or 0) != int(staff_user_id):
+        return None
+    commission = get_commission_organization(int(preview.get("commission_id") or 0))
+    if commission is None:
+        return None
+    return {**commission, "preview": True}
+
+
+def get_commission_organization(commission_id: int) -> dict[str, object] | None:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT id, registry_key, name, jurisdiction_code, jurisdiction_type
+            FROM commission_organizations
+            WHERE id = ? AND is_active = 1
+            """,
+            (int(commission_id),),
+        ).fetchone()
     return None if row is None else dict(row)
+
+
+def list_commission_organizations() -> list[dict[str, object]]:
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, registry_key, name, jurisdiction_code, jurisdiction_type
+            FROM commission_organizations
+            WHERE is_active = 1
+            ORDER BY name
+            """
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def infer_jurisdiction_code(address: str | None, energy_company: str | None = None) -> str | None:
@@ -2861,15 +3001,20 @@ def send_transactional_email(recipient: str, subject: str, text_body: str) -> No
     boto3.client("sesv2", region_name=get_email_region()).send_email(**message)
 
 
-def get_data_encryption_cipher() -> Fernet:
-    key = (os.getenv("POWER_DATA_ENCRYPTION_KEY") or "").strip()
-    if not key:
+def get_data_encryption_keys() -> list[str]:
+    """Comma-separated POWER_DATA_ENCRYPTION_KEY; the first key encrypts, all keys decrypt."""
+    keys = [part.strip() for part in (os.getenv("POWER_DATA_ENCRYPTION_KEY") or "").split(",") if part.strip()]
+    if not keys:
         if is_production_environment():
             raise RuntimeError("POWER_DATA_ENCRYPTION_KEY is required in production.")
         digest = hashlib.sha256(f"home-energy-watch:{get_app_secret()}".encode("utf-8")).digest()
-        key = base64.urlsafe_b64encode(digest).decode("ascii")
+        keys = [base64.urlsafe_b64encode(digest).decode("ascii")]
+    return keys
+
+
+def get_data_encryption_cipher() -> MultiFernet:
     try:
-        return Fernet(key.encode("ascii"))
+        return MultiFernet([Fernet(key.encode("ascii")) for key in get_data_encryption_keys()])
     except (TypeError, ValueError) as exc:
         raise RuntimeError("POWER_DATA_ENCRYPTION_KEY must be a valid Fernet key.") from exc
 
@@ -2899,6 +3044,13 @@ def validate_runtime_security() -> None:
     sslmode = parse_qs(parsed_database_url.query).get("sslmode", [""])[0].lower()
     if sslmode not in {"require", "verify-ca", "verify-full"}:
         raise RuntimeError("POWER_DATABASE_URL must require TLS in production.")
+    if sslmode != "verify-full":
+        # "require" encrypts but does not check the server certificate or host name.
+        emit_application_log(
+            "security.database_tls_unverified",
+            sslmode=sslmode,
+            recommendation="Use sslmode=verify-full with PGSSLROOTCERT pointing at the RDS CA bundle.",
+        )
     get_data_encryption_cipher()
     if email_delivery_backend() != "ses":
         raise RuntimeError("POWER_EMAIL_BACKEND must be ses in production.")
@@ -2983,6 +3135,52 @@ def clear_auth_failures(scope: str, identity_hash: str) -> None:
             (scope, identity_hash),
         )
         conn.commit()
+
+
+def consume_rate_limit(
+    scope: str,
+    identity: str,
+    max_attempts: int,
+    window_seconds: int,
+    now_epoch: int | None = None,
+) -> dict[str, int | bool]:
+    """Fixed-window limiter stored alongside the auth limits; returns allowed and retry_after."""
+    now = int(time.time()) if now_epoch is None else int(now_epoch)
+    identity_hash = hmac.new(
+        get_app_secret().encode("utf-8"), f"{scope}:{identity}".encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT window_start_epoch, attempt_count
+            FROM auth_rate_limits
+            WHERE scope = ? AND identity_hash = ?
+            """,
+            (scope, identity_hash),
+        ).fetchone()
+        if row is None or now - int(row["window_start_epoch"]) >= window_seconds:
+            window_start = now
+            attempt_count = 0
+        else:
+            window_start = int(row["window_start_epoch"])
+            attempt_count = int(row["attempt_count"])
+        if attempt_count >= max_attempts:
+            return {"allowed": False, "retry_after": max(1, window_start + window_seconds - now)}
+        conn.execute(
+            """
+            INSERT INTO auth_rate_limits (
+                scope, identity_hash, window_start_epoch, attempt_count, blocked_until_epoch, updated_at
+            )
+            VALUES (?, ?, ?, ?, NULL, ?)
+            ON CONFLICT(scope, identity_hash) DO UPDATE SET
+                window_start_epoch = excluded.window_start_epoch,
+                attempt_count = excluded.attempt_count,
+                updated_at = excluded.updated_at
+            """,
+            (scope, identity_hash, window_start, attempt_count + 1, timestamp_now()),
+        )
+        conn.commit()
+    return {"allowed": True, "retry_after": 0}
 
 
 def clean_role(value: str | None) -> str:
@@ -3272,21 +3470,6 @@ def update_passkey_credential_use(actor_kind: str, actor_id: int, credential_id:
         conn.commit()
 
 
-def load_passkey_credential(actor_kind: str, actor_id: int, credential_id: str) -> dict[str, object] | None:
-    kind = normalize_passkey_kind(actor_kind)
-    with get_db_connection() as conn:
-        row = conn.execute(
-            """
-            SELECT id, actor_kind, actor_id, credential_id, nickname, public_key, sign_count,
-                   transports, last_used_at, is_active, created_at, updated_at
-            FROM passkey_credentials
-            WHERE actor_kind = ? AND actor_id = ? AND credential_id = ? AND is_active = 1
-            """,
-            (kind, int(actor_id), credential_id),
-        ).fetchone()
-    return serialize_passkey_credential_row(row)
-
-
 def remove_passkey_credential(actor_kind: str, actor_id: int, credential_id: int) -> dict[str, object]:
     kind = normalize_passkey_kind(actor_kind)
     timestamp = timestamp_now()
@@ -3339,27 +3522,13 @@ def get_passkey_user(kind: str, email: str | None) -> dict[str, object] | None:
     return user
 
 
-def resolve_sign_in_user(email: str, password: str) -> tuple[str, dict[str, object]]:
-    try:
-        customer_user = authenticate_customer_user(email, password)
-    except EmailVerificationRequired as exc:
-        raise exc
-    except Exception:
-        customer_user = None
-    else:
-        return "customer", customer_user
-
-    staff_user = authenticate_staff_user(email, password)
-    return "staff", staff_user
-
-
 def resolve_passkey_login(email: str) -> tuple[str, dict[str, object]] | None:
-    customer_user = get_passkey_user("customer", email)
-    if customer_user is not None:
-        return "customer", customer_user
     staff_user = get_passkey_user("staff", email)
     if staff_user is not None:
         return "staff", staff_user
+    customer_user = get_passkey_user("customer", email)
+    if customer_user is not None:
+        return "customer", customer_user
     return None
 
 
@@ -3401,7 +3570,7 @@ def start_passkey_enrollment(
             str(user["full_name"]),
         ),
         credentials=list_passkey_descriptors(normalized_kind, int(user["id"])),
-        user_verification=PASSKEY_USER_VERIFICATION,
+        user_verification=passkey_user_verification(normalized_kind),
     )
     session[passkey_session_key(normalized_kind, "enrollment")] = {
         "user_id": int(user["id"]),
@@ -3459,6 +3628,8 @@ def start_passkey_login(
     server = build_passkey_server(origin)
     options, state = server.authenticate_begin(
         descriptors,
+        # Same value for every account so the challenge does not reveal who is staff;
+        # staff user verification is enforced when the assertion is checked.
         user_verification=PASSKEY_USER_VERIFICATION,
     )
     session[passkey_session_key(normalized_kind, "login")] = {
@@ -3467,6 +3638,21 @@ def start_passkey_login(
         "next": (next_url or "").strip(),
         "origin": (origin or build_public_base_url()).rstrip("/"),
     }
+    return normalize_passkey_json_value(dict(options.public_key))
+
+
+def start_decoy_passkey_login(email: str | None, origin: str | None = None) -> dict[str, object]:
+    server = build_passkey_server(origin)
+    # Stable per email (like a real credential ID) so repeated calls look the same.
+    decoy_id = hmac.new(
+        get_app_secret().encode("utf-8"),
+        f"passkey-decoy:{(email or '').strip().lower()}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    fake_credential = PublicKeyCredentialDescriptor(type=PublicKeyCredentialType.PUBLIC_KEY, id=decoy_id)
+    options, _ = server.authenticate_begin([fake_credential], user_verification=PASSKEY_USER_VERIFICATION)
+    for kind in PASSKEY_USER_KINDS:
+        session.pop(passkey_session_key(kind, "login"), None)
     return normalize_passkey_json_value(dict(options.public_key))
 
 
@@ -3505,8 +3691,23 @@ def complete_passkey_login(
     )
     if matching_row is None:
         raise ValueError("That sign-in did not work.")
+    if (
+        passkey_user_verification(normalized_kind) == UserVerificationRequirement.REQUIRED
+        and not auth_response.response.authenticator_data.is_user_verified()
+    ):
+        session.pop(session_key, None)
+        raise ValueError("Use a passkey that asks for your PIN, fingerprint, or face to sign in.")
     current_sign_count = int(matching_row.get("sign_count") or 0)
     auth_counter = int(auth_response.response.authenticator_data.counter)
+    if auth_counter > 0 and current_sign_count > 0 and auth_counter <= current_sign_count:
+        # A counter that fails to advance suggests a cloned authenticator; 0 means counters are unsupported.
+        session.pop(session_key, None)
+        emit_application_log(
+            "passkey.sign_count_regressed",
+            actor_kind=normalized_kind,
+            credential_row_id=matching_row.get("id"),
+        )
+        raise ValueError("That sign-in did not work.")
     update_passkey_credential_use(
         normalized_kind,
         user_id,
@@ -3531,7 +3732,7 @@ def list_staff_users() -> list[dict[str, object]]:
             SELECT id, email, full_name, role, is_active, invite_token, invite_token_hash,
                    invite_expires_at, password_hash, auth_version, mfa_enabled_at, last_login_at
             FROM staff_users
-            ORDER BY CASE WHEN role = 'Commissioner' THEN 0 ELSE 1 END, full_name, email
+            ORDER BY CASE role WHEN 'Owner' THEN 0 WHEN 'Admin' THEN 1 WHEN 'Commissioner' THEN 2 ELSE 3 END, full_name, email
             """
         ).fetchall()
     staff: list[dict[str, object]] = []
@@ -3558,7 +3759,48 @@ def get_staff_user_by_id(staff_user_id: int | None) -> dict[str, object] | None:
     return serialize_staff_user_row(row)
 
 
-def create_first_staff_user(email: str, full_name: str, password: str, role: str = "Commissioner") -> dict[str, object]:
+def migrate_staff_roles(conn) -> None:
+    """One-time split of the old top "Commissioner" role into Owner and Admin.
+
+    Before Owner existed, internal staff with full control held the Commissioner
+    role. The owner sign-in (POWER_OWNER_EMAIL, default OWNER_EMAIL) becomes
+    Owner, created if needed; other internal Commissioners become Admins. Staff
+    tied to a commission organization stay Commissioners, which is review-only.
+    """
+    if conn.execute("SELECT 1 FROM staff_users WHERE role = 'Owner'").fetchone():
+        return
+    internal = conn.execute(
+        """
+        SELECT staff_users.id, staff_users.full_name FROM staff_users
+        WHERE staff_users.role = 'Commissioner'
+          AND NOT EXISTS (SELECT 1 FROM staff_commission_access a WHERE a.staff_user_id = staff_users.id)
+        ORDER BY staff_users.id
+        """
+    ).fetchall()
+    if not internal:
+        return  # A fresh install gets its Owner from create_first_staff_user.
+    owner_email = clean_email(os.getenv("POWER_OWNER_EMAIL") or OWNER_EMAIL)
+    for row in internal:
+        conn.execute("UPDATE staff_users SET role = 'Admin' WHERE id = ?", (int(row["id"]),))
+    timestamp = timestamp_now()
+    existing = conn.execute("SELECT id FROM staff_users WHERE email = ?", (owner_email,)).fetchone()
+    if existing is not None:
+        conn.execute(
+            "UPDATE staff_users SET role = 'Owner', is_active = 1, auth_version = auth_version + 1, updated_at = ? WHERE id = ?",
+            (timestamp, int(existing["id"])),
+        )
+        conn.execute("DELETE FROM staff_commission_access WHERE staff_user_id = ?", (int(existing["id"]),))
+    else:
+        conn.execute(
+            """
+            INSERT INTO staff_users (email, full_name, role, password_hash, is_active, auth_version, created_at, updated_at)
+            VALUES (?, ?, 'Owner', NULL, 1, 1, ?, ?)
+            """,
+            (owner_email, OWNER_FULL_NAME, timestamp, timestamp),
+        )
+
+
+def create_first_staff_user(email: str, full_name: str, password: str, role: str = "Owner") -> dict[str, object]:
     normalized_email = clean_email(email)
     normalized_name = (full_name or "").strip() or "Commission user"
     normalized_role = clean_role(role)
@@ -3637,9 +3879,17 @@ def invite_staff_user(email: str, full_name: str, role: str, invited_by_id: int)
     timestamp = timestamp_now()
     with get_db_connection() as conn:
         existing = conn.execute(
-            "SELECT id, password_hash FROM staff_users WHERE email = ?",
+            "SELECT id, password_hash, role FROM staff_users WHERE email = ?",
             (normalized_email,),
         ).fetchone()
+        inviter = conn.execute("SELECT role FROM staff_users WHERE id = ?", (int(invited_by_id),)).fetchone()
+        inviter_role = str(inviter["role"]) if inviter is not None else ""
+        if inviter_role not in STAFF_ADMIN_ROLES:
+            raise ValueError("Admin access is required for that action.")
+        if inviter_role != "Owner" and (
+            normalized_role == "Owner" or (existing is not None and existing["role"] == "Owner")
+        ):
+            raise ValueError("Only the owner can grant or change owner access.")
         if existing is None:
             conn.execute(
                 """
@@ -3698,7 +3948,7 @@ def update_staff_user_access(
     actor_id = int(acting_staff_user_id)
     normalized_role = clean_role(role)
     if target_id == actor_id:
-        raise ValueError("Ask another commissioner to change your access.")
+        raise ValueError("Ask another admin to change your access.")
     timestamp = timestamp_now()
     with get_db_connection() as conn:
         if conn.kind == "postgres":
@@ -3718,18 +3968,25 @@ def update_staff_user_access(
             conn.rollback()
             raise ValueError("That staff member is no longer available.")
         before = serialize_staff_user_row(target) or {}
-        removing_active_commissioner = (
+        actor = conn.execute("SELECT role, is_active FROM staff_users WHERE id = ?", (actor_id,)).fetchone()
+        if actor is None or not bool(actor["is_active"]) or actor["role"] not in STAFF_ADMIN_ROLES:
+            conn.rollback()
+            raise ValueError("Admin access is required for that action.")
+        if actor["role"] != "Owner" and "Owner" in {before["role"], normalized_role}:
+            conn.rollback()
+            raise ValueError("Only the owner can grant or change owner access.")
+        removing_active_owner = (
             bool(before["is_active"])
-            and before["role"] == "Commissioner"
-            and (not is_active or normalized_role != "Commissioner")
+            and before["role"] == "Owner"
+            and (not is_active or normalized_role != "Owner")
         )
-        if removing_active_commissioner:
-            commissioner_count = conn.execute(
-                "SELECT COUNT(*) AS count FROM staff_users WHERE role = 'Commissioner' AND is_active = 1"
+        if removing_active_owner:
+            owner_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM staff_users WHERE role = 'Owner' AND is_active = 1"
             ).fetchone()
-            if commissioner_count is None or int(commissioner_count["count"]) <= 1:
+            if owner_count is None or int(owner_count["count"]) <= 1:
                 conn.rollback()
-                raise ValueError("At least one active commissioner must remain.")
+                raise ValueError("At least one active owner must remain.")
         conn.execute(
             """
             UPDATE staff_users
@@ -4356,6 +4613,76 @@ def ensure_customer_user_for_email(email: str, full_name: str | None = None) -> 
     return get_customer_user_by_email(normalized_email)
 
 
+FIRST_SIGN_IN_TOKEN_PREFIX = "first_"
+FIRST_SIGN_IN_SALT = "home-energy-watch.first-sign-in"
+
+
+def first_sign_in_serializer():
+    from itsdangerous import URLSafeTimedSerializer
+
+    return URLSafeTimedSerializer(get_app_secret(), salt=FIRST_SIGN_IN_SALT)
+
+
+def create_first_sign_in_token(email: str, kind: str) -> str:
+    """A signed link for someone who has access but no sign-in record yet.
+
+    Nothing is written when the link is requested; the sign-in record is created
+    only when the emailed link is used, and the link stops working once it exists.
+    """
+    signed = first_sign_in_serializer().dumps({"email": clean_email(email), "kind": kind})
+    # Same character set as the stored one-time tokens, so links survive any mail client.
+    return FIRST_SIGN_IN_TOKEN_PREFIX + base64.urlsafe_b64encode(signed.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def read_first_sign_in_token(token: str | None) -> dict[str, str] | None:
+    from itsdangerous import BadSignature
+
+    value = str(token or "")
+    if not value.startswith(FIRST_SIGN_IN_TOKEN_PREFIX):
+        return None
+    encoded = value[len(FIRST_SIGN_IN_TOKEN_PREFIX):]
+    try:
+        signed = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+        payload = first_sign_in_serializer().loads(signed, max_age=LOGIN_TOKEN_EXPIRY_MINUTES * 60)
+    except (BadSignature, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("kind") not in {"customer", "commission"} or not payload.get("email"):
+        return None
+    email = clean_email(str(payload["email"]))
+    # Single use: once the sign-in record exists, this link is spent.
+    if get_staff_user_by_email(email) is not None or get_customer_user_by_email(email) is not None:
+        return None
+    if payload["kind"] == "commission" and get_commission_for_email(email) is None:
+        return None
+    if payload["kind"] == "customer" and not email_has_account_access(email):
+        return None
+    return {"email": email, "kind": str(payload["kind"])}
+
+
+def email_has_account_access(email: str) -> bool:
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT 1 FROM account_access_emails WHERE email = ? LIMIT 1",
+            (clean_email(email),),
+        ).fetchone() is not None
+
+
+def send_first_sign_in_email(email: str, kind: str, base_url: str) -> None:
+    token = create_first_sign_in_token(email, kind)
+    login_url = build_absolute_url(base_url, f"/login/token?{urlencode({'token': token})}")
+    send_transactional_email(
+        clean_email(email),
+        "Your Home Energy Watch sign-in link",
+        (
+            "Hello,\n\n"
+            "Use this one-time link to open Home Energy Watch.\n\n"
+            f"{login_url}\n\n"
+            f"This link expires in {LOGIN_TOKEN_EXPIRY_MINUTES} minutes and works once. "
+            "If you did not request it, you can ignore this message.\n"
+        ),
+    )
+
+
 def send_customer_login_link_email(customer_user: dict[str, object], base_url: str) -> None:
     token = create_customer_auth_token(
         int(customer_user["id"]),
@@ -4702,7 +5029,7 @@ def audit_csv_value(value: object | None) -> object:
         return ""
     if not isinstance(value, str):
         return value
-    if value.startswith(("=", "+", "-", "@")):
+    if value.startswith(("=", "+", "-", "@", "\t", "\r")):
         return f"'{value}"
     return value
 
@@ -4964,8 +5291,8 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
                         int(row["duration_s"]),
                         wh,
                         wh / 1000.0,
-                        Path(str(row["source_path"])).name,
-                        row["imported_at"],
+                        audit_csv_value(Path(str(row["source_path"])).name),
+                        audit_csv_value(row["imported_at"]),
                     )
                 )
             archive.writestr(f"{prefix}/interval-readings.csv", interval_output.getvalue())
@@ -5017,6 +5344,9 @@ def list_billing_plans() -> list[dict[str, object]]:
     plans: list[dict[str, object]] = []
     for plan in BILLING_PLAN_DEFINITIONS:
         plan_copy = dict(plan)
+        plan_copy["feature_labels"] = list(plan_copy.get("feature_labels") or ())
+        # Older templates and records read this name; it now carries any interval.
+        plan_copy["annual_price_label"] = plan_copy["price_label"]
         plan_copy["payment_ready"] = bool(
             plan_copy.get("checkout_supported")
             and billing_checkout_enabled()
@@ -5027,29 +5357,29 @@ def list_billing_plans() -> list[dict[str, object]]:
     return plans
 
 
+def list_offered_billing_plans() -> list[dict[str, object]]:
+    return [plan for plan in list_billing_plans() if plan.get("offered")]
+
+
 def list_energy_company_groups() -> list[dict[str, object]]:
     return [
         {"label": group["label"], "companies": list(group["companies"])}
         for group in ENERGY_COMPANY_GROUPS
-    ]
+    ] + [{
+        "label": "More electric companies",
+        "companies": [guide.provider for guide in UTILITY_DOWNLOAD_GUIDES if guide.slug != "duke"],
+    }]
 
 
 def list_energy_companies() -> list[str]:
     companies: list[str] = []
-    for group in ENERGY_COMPANY_GROUPS:
+    for group in list_energy_company_groups():
         companies.extend(str(company) for company in group["companies"])
     return companies
 
 
 def list_utility_access_guides() -> list[dict[str, str]]:
-    guides = [dict(guide) for guide in UTILITY_ACCESS_GUIDES]
-    for key, config in GREEN_BUTTON_CONFIG.items():
-        if green_button_provider_is_ready(key):
-            guides.append({"id": f"green_button_{key.lower()}", "name": f"{config['label']} Green Button connection",
-                           "status": "Available after utility approval", "summary": "Approve a secure connection through your utility to keep interval history updated. Manual download and upload remain available.",
-                           "action_label": "Read about Green Button Connect My Data", "action_url": GREEN_BUTTON_CONNECT_URL,
-                           "secondary_label": "", "secondary_url": ""})
-    return guides
+    return [dict(guide) for guide in UTILITY_ACCESS_GUIDES]
 
 
 def clean_energy_company(value: str | None) -> str:
@@ -5092,12 +5422,11 @@ def canonical_energy_company_name(raw_name: str, utility_id: object = None) -> s
 
 
 def get_billing_plan(plan_id: str | None) -> dict[str, object]:
-    normalized_plan_id = (plan_id or "home").strip().lower()
+    normalized_plan_id = (plan_id or DEFAULT_BILLING_PLAN_ID).strip().lower()
+    normalized_plan_id = LEGACY_BILLING_PLAN_ALIASES.get(normalized_plan_id, normalized_plan_id)
     for plan in list_billing_plans():
         if plan["id"] == normalized_plan_id:
             return plan
-    if normalized_plan_id in {"review", "agency"}:
-        return next(plan for plan in list_billing_plans() if plan["id"] == "home")
     raise ValueError("Choose a valid plan.")
 
 
@@ -5133,7 +5462,7 @@ def resolve_customer_account_id(customer_user_id: int, account_number: str | Non
 
 def serialize_customer_billing_row(row: sqlite3.Row | None, customer_user_id: int, account_id: int | None = None) -> dict[str, object]:
     if row is None:
-        plan = get_billing_plan("home")
+        plan = get_billing_plan(DEFAULT_BILLING_PLAN_ID)
         return {
             "customer_user_id": int(customer_user_id),
             "account_id": int(account_id or 0),
@@ -5348,18 +5677,16 @@ def is_app_host(host: str | None) -> bool:
 def current_request_host() -> str:
     if not has_request_context():
         return ""
-    forwarded_host = request.headers.get("X-Forwarded-Host")
-    if forwarded_host:
-        return normalize_host(forwarded_host.split(",", 1)[0])
+    # Forwarded headers are applied by ProxyFix only when POWER_TRUST_PROXY is on,
+    # so request.host is already the proxy-reported host when that is trusted and
+    # the real Host header otherwise. Reading X-Forwarded-Host directly here would
+    # let any client choose the host used in emailed links.
     return normalize_host(request.host)
 
 
 def infer_request_scheme() -> str:
     if not has_request_context():
         return "https"
-    forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip()
-    if forwarded_proto:
-        return forwarded_proto
     scheme = (request.scheme or "").strip()
     return scheme or "https"
 
@@ -5498,6 +5825,109 @@ def build_stripe_metadata(customer_user: dict[str, object], plan: dict[str, obje
     return metadata
 
 
+def validated_stripe_price_id(plan: dict[str, object]) -> str:
+    """Return the plan's Stripe price after checking it charges what the plan says."""
+    price_id = get_stripe_price_id(plan)
+    if not price_id:
+        raise ValueError("Payment is not connected for that plan yet.")
+    verify_configured_stripe_account()
+    price = stripe.Price.retrieve(price_id)
+    recurring = extract_mapping_value(price, "recurring")
+    if (
+        not extract_mapping_value(price, "active")
+        or extract_mapping_value(price, "unit_amount") != int(plan["unit_amount"])
+        or extract_mapping_value(price, "currency") != "usd"
+        or extract_mapping_value(recurring, "interval") != str(plan["billing_interval"])
+        or extract_mapping_value(recurring, "interval_count") != 1
+        or bool(extract_mapping_value(price, "livemode")) != get_stripe_secret_key().startswith("sk_live_")
+    ):
+        raise ValueError(f"The {plan['name']} price is not configured correctly. Payment cannot start.")
+    return price_id
+
+
+# New customers pay before anything they typed is written to the database.
+# Until payment completes, the sign-up form lives only in the encrypted
+# session cookie; Stripe sees the email and an opaque reference.
+SIGNUP_CHECKOUT_REFERENCE_PREFIX = "signup:"
+PENDING_SIGNUP_SESSION_KEY = "pending_signup"
+PENDING_SIGNUP_MAX_AGE_SECONDS = 24 * 3600
+PENDING_SIGNUP_MAX_SEALED_LENGTH = 3000
+SIGNUP_FORM_FIELDS = (
+    "full_name", "email", "account_number", "energy_company", "meter_value", "address", "zip_code",
+    "plan_id", "occupant_count", "year_built", "square_footage", "heating_system", "cooling_system",
+    "water_heater", "notes",
+)
+PAID_CHECKOUT_PAYMENT_STATUSES = {"paid", "no_payment_required"}
+
+
+def create_signup_checkout_session(
+    email: str,
+    plan_id: str | None,
+    reference: str,
+    base_url: str,
+    affiliate_slug: str | None = None,
+) -> dict[str, object]:
+    if not billing_checkout_enabled():
+        raise ValueError("Online payment is not open yet.")
+    configure_stripe()
+    plan = get_billing_plan(plan_id)
+    if not plan.get("offered"):
+        raise ValueError("That plan is no longer offered.")
+    price_id = validated_stripe_price_id(plan)
+    metadata = {
+        "project": "home-energy-watch",
+        "project_name": "Home Energy Watch",
+        "project_domain": "app.homeenergywatch.com",
+        "plan_id": str(plan["id"]),
+        "billing_interval": str(plan["billing_interval"]),
+        "signup_reference": reference,
+    }
+    if affiliate_slug and get_affiliate_by_slug(affiliate_slug):
+        metadata["affiliate_slug"] = affiliate_slug
+    session_obj = stripe.checkout.Session.create(
+        mode="subscription",
+        customer_email=clean_email(email),
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{base_url}/signup/complete?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{base_url}/signup?resume=1",
+        client_reference_id=SIGNUP_CHECKOUT_REFERENCE_PREFIX + reference,
+        metadata=metadata,
+        subscription_data={"metadata": metadata},
+        allow_promotion_codes=True,
+    )
+    session_id = normalize_stripe_id(session_obj)
+    session_url = str(extract_mapping_value(session_obj, "url") or "")
+    if not session_id or not session_url:
+        raise ValueError("Payment could not start. Please try again.")
+    return {"id": session_id, "url": session_url}
+
+
+def retrieve_paid_signup_checkout(session_id: str, reference: str) -> object:
+    """Load a sign-up checkout and confirm it is this browser's and is paid."""
+    configure_stripe()
+    session_obj = stripe.checkout.Session.retrieve(
+        session_id,
+        expand=["subscription", "payment_intent.charges", "invoice"],
+    )
+    owner = str(extract_mapping_value(session_obj, "client_reference_id") or "")
+    if not reference or not secrets.compare_digest(owner, SIGNUP_CHECKOUT_REFERENCE_PREFIX + reference):
+        raise PermissionError("That payment belongs to a different sign-up.")
+    payment_status = str(extract_mapping_value(session_obj, "payment_status") or "")
+    if payment_status not in PAID_CHECKOUT_PAYMENT_STATUSES:
+        raise ValueError("Payment has not finished yet. Please wait a moment and try again.")
+    return session_obj
+
+
+def link_signup_subscription(customer_user: dict[str, object], plan_id: str, account_id: int, session_obj: object) -> None:
+    """Tag the Stripe subscription so later webhooks find the new account."""
+    subscription_id = normalize_stripe_id(extract_mapping_value(session_obj, "subscription"))
+    if not subscription_id or not hasattr(stripe, "Subscription"):
+        return
+    metadata = build_stripe_metadata(customer_user, get_billing_plan(plan_id))
+    metadata["account_id"] = str(account_id)
+    stripe.Subscription.modify(subscription_id, metadata=metadata)
+
+
 def create_customer_checkout_session(
     customer_user: dict[str, object],
     plan_id: str | None,
@@ -5508,24 +5938,12 @@ def create_customer_checkout_session(
         raise ValueError("Online payment is not open yet.")
     configure_stripe()
     plan = get_billing_plan(plan_id)
+    if not plan.get("offered"):
+        raise ValueError("That plan is no longer offered.")
     account_id = resolve_customer_account_id(int(customer_user["id"]), account_number)
     if account_id is None:
         raise ValueError("Choose an electric account before starting billing.")
-    price_id = get_stripe_price_id(plan)
-    if not price_id:
-        raise ValueError("Payment is not connected for that plan yet.")
-    verify_configured_stripe_account()
-    price = stripe.Price.retrieve(price_id)
-    recurring = extract_mapping_value(price, "recurring")
-    if (
-        not extract_mapping_value(price, "active")
-        or extract_mapping_value(price, "unit_amount") != 23988
-        or extract_mapping_value(price, "currency") != "usd"
-        or extract_mapping_value(recurring, "interval") != "year"
-        or extract_mapping_value(recurring, "interval_count") != 1
-        or bool(extract_mapping_value(price, "livemode")) != get_stripe_secret_key().startswith("sk_live_")
-    ):
-        raise ValueError("The annual account price is not configured correctly. Payment cannot start.")
+    price_id = validated_stripe_price_id(plan)
     metadata = build_stripe_metadata(customer_user, plan)
     metadata["account_id"] = str(account_id)
     session_obj = stripe.checkout.Session.create(
@@ -5634,6 +6052,15 @@ def resolve_stripe_payment_reference(session_obj: object) -> str:
     return normalize_stripe_id(session_obj)
 
 
+def customer_can_reach_account_id(email: str, account_id: int) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM account_access_emails WHERE account_id = ? AND email = ?",
+            (int(account_id), clean_email(email)),
+        ).fetchone()
+    return row is not None
+
+
 def refresh_customer_billing_from_stripe(customer_user: dict[str, object], session_id: str | None = None) -> dict[str, object]:
     configure_stripe()
     billing = load_customer_billing(int(customer_user["id"]))
@@ -5645,8 +6072,26 @@ def refresh_customer_billing_from_stripe(customer_user: dict[str, object], sessi
         expand=["subscription", "payment_intent.charges", "invoice"],
     )
     metadata = read_checkout_metadata(session_obj)
+    # Only accept a checkout session this customer started, for an account they can reach.
+    session_owner = str(
+        extract_mapping_value(session_obj, "client_reference_id") or metadata.get("customer_user_id") or ""
+    ).strip()
+    if session_owner != str(customer_user["id"]):
+        raise PermissionError("That checkout session belongs to a different sign-in.")
     metadata_account_id = int(metadata["account_id"]) if str(metadata.get("account_id") or "").isdigit() else int(billing.get("account_id") or 0)
+    if metadata_account_id and not customer_can_reach_account_id(str(customer_user["email"]), metadata_account_id):
+        raise PermissionError("That checkout session is for an account this sign-in cannot reach.")
     plan_id = str(metadata.get("plan_id") or billing["plan_id"])
+    return apply_checkout_session_to_billing(customer_user, session_obj, metadata_account_id, plan_id)
+
+
+def apply_checkout_session_to_billing(
+    customer_user: dict[str, object],
+    session_obj: object,
+    account_id: int,
+    plan_id: str,
+) -> dict[str, object]:
+    target_session_id = normalize_stripe_id(session_obj)
     subscription_obj = extract_mapping_value(session_obj, "subscription")
     subscription_id = normalize_stripe_id(subscription_obj)
     subscription_status = str(extract_mapping_value(subscription_obj, "status") or "")
@@ -5659,7 +6104,7 @@ def refresh_customer_billing_from_stripe(customer_user: dict[str, object], sessi
         int(customer_user["id"]),
         plan_id,
         billing_status,
-        account_id=metadata_account_id,
+        account_id=account_id,
         checkout_session_id=target_session_id,
         stripe_customer_id=normalize_stripe_id(extract_mapping_value(session_obj, "customer")),
         stripe_subscription_id=subscription_id,
@@ -5683,6 +6128,14 @@ def handle_stripe_event(event: object) -> None:
         metadata = read_checkout_metadata(event_object)
         customer_user_id = metadata.get("customer_user_id")
         if not customer_user_id:
+            if str(extract_mapping_value(event_object, "client_reference_id") or "").startswith(SIGNUP_CHECKOUT_REFERENCE_PREFIX):
+                # The account is created when the customer returns from Stripe.
+                # Log only the Stripe id so an unfinished paid sign-up can be found.
+                emit_application_log(
+                    "billing.signup_checkout_completed",
+                    checkout_session_id=normalize_stripe_id(event_object),
+                    payment_status=str(extract_mapping_value(event_object, "payment_status") or ""),
+                )
             return
         plan_id = str(metadata.get("plan_id") or "home")
         account_id = int(metadata["account_id"]) if str(metadata.get("account_id") or "").isdigit() else None
@@ -5733,6 +6186,77 @@ def handle_stripe_event(event: object) -> None:
             stripe_subscription_id=normalize_stripe_id(event_object),
             current_period_end=normalize_stripe_timestamp(extract_mapping_value(event_object, "current_period_end")),
         )
+
+
+def stripe_event_created_epoch(event: object) -> int | None:
+    value = extract_mapping_value(event, "created")
+    try:
+        return int(value) if value is not None and str(value).strip() != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def stripe_event_subscription_id(event: object) -> str:
+    event_type = str(extract_mapping_value(event, "type") or "")
+    data = extract_mapping_value(event, "data") or {}
+    event_object = extract_mapping_value(data, "object") if not isinstance(data, dict) else data.get("object")
+    if event_object is None:
+        return ""
+    if event_type.startswith("customer.subscription."):
+        return normalize_stripe_id(event_object)
+    if event_type == "checkout.session.completed":
+        # A late checkout completion must not revive a subscription that was deleted since.
+        return normalize_stripe_id(extract_mapping_value(event_object, "subscription"))
+    return ""
+
+
+def process_stripe_event(event: object) -> str:
+    """Apply a verified Stripe event once and in order; returns processed, duplicate or stale."""
+    event_id = str(extract_mapping_value(event, "id") or "").strip()
+    event_type = str(extract_mapping_value(event, "type") or "")
+    created = stripe_event_created_epoch(event)
+    subscription_id = stripe_event_subscription_id(event)
+    last_created = None
+    if subscription_id and created is not None:
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT MAX(created) AS last_created FROM processed_stripe_events WHERE subscription_id = ?",
+                (subscription_id,),
+            ).fetchone()
+        last_created = row["last_created"] if row is not None else None
+    outcome = "stale" if last_created is not None and created < int(last_created) else "processed"
+    if event_id:
+        # Claim the event first so two concurrent deliveries cannot both apply it.
+        with get_db_connection() as conn:
+            claimed = conn.execute(
+                """
+                INSERT INTO processed_stripe_events (event_id, event_type, created, subscription_id, processed_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (event_id) DO NOTHING
+                """,
+                (
+                    event_id,
+                    event_type,
+                    created,
+                    # Stale events are recorded for idempotency but do not advance the watermark.
+                    subscription_id or None if outcome == "processed" else None,
+                    timestamp_now(),
+                ),
+            ).rowcount
+            conn.commit()
+        if not claimed:
+            return "duplicate"
+    if outcome == "processed":
+        try:
+            handle_stripe_event(event)
+        except Exception:
+            if event_id:
+                # Release the claim so Stripe's retry can apply the event.
+                with get_db_connection() as conn:
+                    conn.execute("DELETE FROM processed_stripe_events WHERE event_id = ?", (event_id,))
+                    conn.commit()
+            raise
+    return outcome
 
 
 def verify_configured_stripe_account() -> None:
@@ -5858,10 +6382,34 @@ def serialize_account_row(row: sqlite3.Row | tuple | None) -> dict[str, object] 
         "baseline_date": mapping["baseline_date"],
         "meter_value": mapping.get("meter_value") or "",
         "address": mapping.get("address") or "",
+        "disabled_at": mapping.get("disabled_at") or "",
     }
 
 
 ACCOUNT_FIELD_UNSET = object()
+
+
+def set_account_disabled(account_number: str | None, disabled: bool) -> dict[str, object]:
+    """Disabled accounts stay on file but customers cannot open them and they stop syncing."""
+    normalized = normalize_account_number(account_number)
+    with get_db_connection() as conn:
+        changed = conn.execute(
+            "UPDATE accounts SET disabled_at = ?, updated_at = ? WHERE account_number = ?",
+            (timestamp_now() if disabled else None, timestamp_now(), normalized),
+        ).rowcount
+        conn.commit()
+    if not changed:
+        raise ValueError("That account was not found.")
+    return find_account(normalized) or {}
+
+
+def account_is_disabled(account_number: str | None) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT disabled_at FROM accounts WHERE account_number = ?",
+            (normalize_account_number(account_number),),
+        ).fetchone()
+    return bool(row and row["disabled_at"])
 
 
 def get_or_create_account(
@@ -5879,7 +6427,7 @@ def get_or_create_account(
     normalized_meter_value = clean_meter_value(meter_value) if meter_value_supplied else None
     existing = conn.execute(
         """
-        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value, disabled_at
         FROM accounts
         WHERE account_number = ?
         """,
@@ -5912,7 +6460,7 @@ def get_or_create_account(
             )
             existing = conn.execute(
                 """
-                SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+                SELECT id, account_number, display_name, energy_company, baseline_date, meter_value, disabled_at
                 FROM accounts
                 WHERE account_number = ?
                 """,
@@ -5939,7 +6487,7 @@ def get_or_create_account(
     )
     created = conn.execute(
         """
-        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value, disabled_at
         FROM accounts
         WHERE account_number = ?
         """,
@@ -5957,7 +6505,7 @@ def rename_account_number(
     replacement_normalized = clean_account_number(replacement_account_number)
     current = conn.execute(
         """
-        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value, disabled_at
         FROM accounts
         WHERE account_number = ?
         """,
@@ -5979,7 +6527,7 @@ def rename_account_number(
     )
     updated = conn.execute(
         """
-        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value
+        SELECT id, account_number, display_name, energy_company, baseline_date, meter_value, disabled_at
         FROM accounts
         WHERE id = ?
         """,
@@ -5992,7 +6540,7 @@ def list_accounts() -> list[dict[str, object]]:
     with get_db_connection() as conn:
         rows = conn.execute(
             """
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value, accounts.disabled_at,
                    household_profiles.address
             FROM accounts
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
@@ -6044,7 +6592,7 @@ def list_account_page(search: str | None = None, page: int = 1, per_page: int = 
         offset = (safe_page - 1) * safe_per_page
         rows = conn.execute(
             f"""
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value, accounts.disabled_at,
                    household_profiles.address
             FROM accounts
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
@@ -6080,7 +6628,7 @@ def find_account(account_number: str | None) -> dict[str, object] | None:
     with get_db_connection() as conn:
         row = conn.execute(
             """
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value, accounts.disabled_at,
                    household_profiles.address
             FROM accounts
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
@@ -6122,7 +6670,7 @@ def list_customer_account_page(
             FROM account_access_emails
             JOIN accounts ON accounts.id = account_access_emails.account_id
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
-            WHERE account_access_emails.email = ?
+            WHERE accounts.disabled_at IS NULL AND account_access_emails.email = ?
             {search_clause}
             """,
             tuple(params),
@@ -6133,12 +6681,12 @@ def list_customer_account_page(
         offset = (safe_page - 1) * safe_per_page
         rows = conn.execute(
             f"""
-            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value,
+            SELECT accounts.id, accounts.account_number, accounts.display_name, accounts.energy_company, accounts.baseline_date, accounts.meter_value, accounts.disabled_at,
                    household_profiles.address
             FROM account_access_emails
             JOIN accounts ON accounts.id = account_access_emails.account_id
             LEFT JOIN household_profiles ON household_profiles.account_id = accounts.id
-            WHERE account_access_emails.email = ?
+            WHERE accounts.disabled_at IS NULL AND account_access_emails.email = ?
             {search_clause}
             ORDER BY accounts.display_name, accounts.account_number
             LIMIT ? OFFSET ?
@@ -6165,6 +6713,19 @@ def list_customer_account_page(
     }
 
 
+def customer_has_disabled_account(email: str) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM account_access_emails
+            JOIN accounts ON accounts.id = account_access_emails.account_id
+            WHERE account_access_emails.email = ? AND accounts.disabled_at IS NOT NULL
+            """,
+            (clean_email(email),),
+        ).fetchone()
+    return row is not None
+
+
 def customer_has_account_access(email: str, account_number: str | None) -> bool:
     return get_customer_account_access(email, account_number) is not None
 
@@ -6179,6 +6740,7 @@ def get_customer_account_access(email: str, account_number: str | None) -> dict[
             FROM account_access_emails
             JOIN accounts ON accounts.id = account_access_emails.account_id
             WHERE account_access_emails.email = ? AND accounts.account_number = ?
+              AND accounts.disabled_at IS NULL
             """,
             (normalized_email, normalized_account),
         ).fetchone()
@@ -6664,6 +7226,8 @@ def clear_utility_access_if_unauthorized(
     ).fetchone()
     if int(remaining["count"] if remaining is not None else 0) > 0:
         return False
+    conn.execute("DELETE FROM xcel_oauth_states WHERE account_number = (SELECT account_number FROM accounts WHERE id = ?)", (int(account_id),))
+    conn.execute("DELETE FROM coned_oru_oauth_states WHERE account_number = (SELECT account_number FROM accounts WHERE id = ?)", (int(account_id),))
     cursor = conn.execute(
         """
         UPDATE utility_connections
@@ -7157,7 +7721,10 @@ def execute_account_data_deletion(request_id: int, staff_user_id: int) -> dict[s
                 original_path.replace(quarantine_path)
                 quarantined_files.append((original_path, quarantine_path))
 
+            conn.execute("DELETE FROM xcel_oauth_states WHERE account_number = (SELECT account_number FROM accounts WHERE id = ?)", (account_id,))
+            conn.execute("DELETE FROM coned_oru_oauth_states WHERE account_number = (SELECT account_number FROM accounts WHERE id = ?)", (account_id,))
             tables = (
+                "xcel_meter_bindings",
                 "imported_files",
                 "interval_readings",
                 "account_load_items",
@@ -7166,6 +7733,10 @@ def execute_account_data_deletion(request_id: int, staff_user_id: int) -> dict[s
                 "account_access_emails",
                 "utility_connections",
                 "report_artifacts",
+                "household_assistant_interactions",
+                "account_notes",
+                "account_equipment_history",
+                "account_commission_access",
             )
             for table in tables:
                 cursor = conn.execute(f"DELETE FROM {table} WHERE account_id = ?", (account_id,))
@@ -7286,9 +7857,61 @@ def unseal_secret_value(value: str | None) -> str | None:
         sealed = base64.urlsafe_b64decode(token.encode("ascii"))
         key_stream = build_legacy_secret_key_stream(len(sealed))
         payload = bytes(byte ^ key_stream[index] for index, byte in enumerate(sealed))
-        return payload.decode("utf-8")
+        legacy_value = payload.decode("utf-8")
+        get_application_logger().warning(
+            json.dumps(
+                {"event": "secrets.legacy_unseal", "hint": "run --reseal-secrets to re-encrypt legacy values"},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return legacy_value
     except (InvalidToken, UnicodeDecodeError, ValueError, TypeError) as exc:
         raise ValueError("The saved access key could not be read. Save the connection again.") from exc
+
+
+SEALED_SECRET_COLUMNS = (
+    ("utility_connections", "secret_token"),
+    ("staff_users", "mfa_secret_token"),
+    ("staff_users", "mfa_pending_secret_token"),
+)
+
+
+def reseal_secret_value(value: str | None) -> str | None:
+    token = (value or "").strip()
+    if not token:
+        return None
+    if token.startswith("fernet:v1:"):
+        rotated = get_data_encryption_cipher().rotate(token.removeprefix("fernet:v1:").encode("ascii"))
+        return f"fernet:v1:{rotated.decode('ascii')}"
+    return seal_secret_value(unseal_secret_value(token))
+
+
+def reseal_all_secrets() -> dict[str, int]:
+    """Re-encrypt every sealed secret column with the current primary encryption key."""
+    summary = {"resealed": 0, "failed": 0}
+    with get_db_connection() as conn:
+        for table_name, column_name in SEALED_SECRET_COLUMNS:
+            if column_name not in table_columns(conn, table_name):
+                continue
+            rows = conn.execute(
+                f"SELECT id, {column_name} AS sealed_value FROM {table_name} "
+                f"WHERE {column_name} IS NOT NULL AND {column_name} != ''"
+            ).fetchall()
+            for row in rows:
+                try:
+                    resealed = reseal_secret_value(str(row["sealed_value"]))
+                except (InvalidToken, ValueError, TypeError) as exc:
+                    summary["failed"] += 1
+                    log_handled_exception(f"secrets.reseal_failed.{table_name}.{column_name}", exc)
+                    continue
+                conn.execute(
+                    f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
+                    (resealed, row["id"]),
+                )
+                summary["resealed"] += 1
+        conn.commit()
+    return summary
 
 
 def staff_mfa_required() -> bool:
@@ -7637,9 +8260,9 @@ def reset_staff_mfa_by_commissioner(
             """,
             (target_id,),
         ).fetchone()
-        if actor is None or not bool(actor["is_active"]) or actor["role"] != "Commissioner":
+        if actor is None or not bool(actor["is_active"]) or actor["role"] not in STAFF_ADMIN_ROLES:
             conn.rollback()
-            raise ValueError("Commissioner access is required for that action.")
+            raise ValueError("Admin access is required for that action.")
         if target is None:
             conn.rollback()
             raise ValueError("That staff member is no longer available.")
@@ -7690,135 +8313,6 @@ def duke_account_numbers_match(left: object, right: object) -> bool:
 def mask_duke_account_number(value: object) -> str:
     normalized = normalize_duke_account_number(value)
     return f"Duke account ending {normalized[-4:]}" if normalized else "Duke account"
-
-
-def green_button_provider_key(provider_name: object) -> str | None:
-    normalized = re.sub(r"\s+", " ", str(provider_name or "").strip().lower())
-    return GREEN_BUTTON_PROVIDERS.get(normalized)
-
-
-def green_button_config(provider_key: str) -> dict[str, str]:
-    if not GREEN_BUTTON_IMPLEMENTATION_READY:
-        raise ValueError("Automatic access for this utility is not available yet. Upload your usage file instead.")
-    config = GREEN_BUTTON_CONFIG.get(provider_key) or {}
-    required = ("authorize_url", "token_url", "client_id", "client_secret", "bulk_id")
-    if not config.get("approved") or not all(config.get(key) for key in required):
-        raise ValueError("This utility connection is waiting for utility approval and configuration.")
-    return config
-
-
-def green_button_provider_is_ready(provider_key: str) -> bool:
-    try:
-        green_button_config(provider_key)
-    except ValueError:
-        return False
-    return True
-
-
-def green_button_origin(url: str) -> tuple[str, str, int]:
-    try:
-        parts = urlsplit(url)
-        if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.fragment:
-            raise ValueError
-        return parts.scheme, parts.hostname.lower(), parts.port or 443
-    except ValueError as exc:
-        raise ValueError("The utility returned an unexpected resource address.") from exc
-
-
-def green_button_request(config: dict[str, Any], url: str, *, headers: dict[str, str],
-                         data: bytes | None = None, limit: int = 1024 * 1024) -> bytes:
-    if green_button_origin(url) != green_button_origin(str(config["token_url"])):
-        raise ValueError("The utility returned an unexpected resource address.")
-    request_obj = Request(url, data=data, headers=headers, method="POST" if data is not None else "GET")
-    with no_redirect_opener().open(request_obj, timeout=60) as response:
-        if response.status == 202:
-            raise ValueError("The utility is preparing a batch. Automatic batch delivery is not available yet.")
-        if response.status != 200:
-            raise ValueError("The utility did not return a completed response.")
-        content = response.read(limit + 1)
-    if len(content) > limit:
-        raise ValueError("The utility response exceeded the supported size.")
-    return content
-
-
-def serialize_green_button_secret(provider_key: str, token_data: dict[str, Any], resource_url: str | None = None,
-                                  *, binding: dict[str, str] | None = None) -> str:
-    access_token = token_data.get("access_token")
-    if not access_token:
-        raise ValueError("The utility did not provide an access token. Connect again.")
-    resource_url = resource_url or str(token_data.get("resourceURI") or token_data.get("resource_uri") or "")
-    if not resource_url:
-        raise ValueError("The utility did not provide a customer data resource. Connect again.")
-    expires_in = int(token_data.get("expires_in", 3600))
-    if expires_in < 0:
-        raise ValueError("The utility returned an invalid token expiry.")
-    token_data = dict(token_data)
-    token_data["expires_at"] = int(time.time()) + expires_in
-    return json.dumps({"version": 1, "provider_key": provider_key, "resource_url": resource_url,
-                       "binding": binding,
-                       "tokens": {key: token_data.get(key) for key in ("access_token", "refresh_token", "token_type", "expires_at", "scope")}},
-                      sort_keys=True, separators=(",", ":"))
-
-
-def parse_green_button_secret(value: str) -> dict[str, Any]:
-    try:
-        payload = json.loads(value)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ValueError("The saved utility connection could not be read. Connect again.") from exc
-    if not isinstance(payload, dict) or not payload.get("provider_key") or not payload.get("resource_url") or not isinstance(payload.get("tokens"), dict):
-        raise ValueError("The saved utility connection is incomplete. Connect again.")
-    return payload
-
-
-def validate_green_button_customer_resource(provider_key: str, token_data: dict[str, Any],
-                                            expected_account: str) -> dict[str, str]:
-    # Only accept the explicit AuthorizationModel described by the utility.
-    # Unknown wrappers/XML shapes must be verified in utility testing, not
-    # searched recursively for a coincidentally matching account identifier.
-    config = green_button_config(provider_key)
-    resource = str(token_data.get("resourceURI") or "")
-    customer_resource = str(token_data.get("customerResourceURI") or "")
-    authorization_uri = str(token_data.get("authorizationURI") or "")
-    access_token = str(token_data.get("access_token") or "")
-    origin = green_button_origin(str(config["token_url"]))
-    for url in (resource, customer_resource, authorization_uri):
-        if green_button_origin(url) != origin:
-            raise ValueError("The utility returned an unexpected customer resource.")
-    subscription = re.fullmatch(r"(.*/resource/)Subscription/([^/]+)", urlsplit(resource).path)
-    if (not subscription or not access_token
-            or urlsplit(customer_resource).path != f"{subscription[1]}Customer/{subscription[2]}"
-            or not re.fullmatch(re.escape(subscription[1]) + r"Authorization/[^/]+", urlsplit(authorization_uri).path)
-            or any(urlsplit(url).query for url in (resource, customer_resource, authorization_uri))):
-        raise ValueError("The utility account and subscription could not be matched.")
-    raw = green_button_request(config, authorization_uri,
-                               headers={"Accept": "application/json", "Authorization": f"Bearer {access_token}"})
-    try:
-        document = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("The utility account response could not be verified.") from exc
-    if not isinstance(document, dict):
-        raise ValueError("The utility account response could not be verified.")
-    subscriptions = document.get("subscriptions")
-    if (not isinstance(document.get("AccountNumber"), str)
-            or document["AccountNumber"].strip() != str(expected_account).strip()
-            or document.get("ResourceURI") != resource
-            or not document.get("RetailCustomerId")
-            or not isinstance(subscriptions, list) or len(subscriptions) != 1
-            or not isinstance(subscriptions[0], dict) or str(subscriptions[0].get("Id")) != subscription[2]
-            or (document.get("AuthorizationUri") and document["AuthorizationUri"] != authorization_uri)):
-        raise ValueError("The utility did not return an unambiguous match for the selected account.")
-    return {"account_number": str(expected_account).strip(), "subscription_id": subscription[2],
-            "retail_customer_id": str(document["RetailCustomerId"]), "resource_uri": resource,
-            "customer_resource_uri": customer_resource, "authorization_uri": authorization_uri}
-
-
-def require_green_button_binding(payload: dict[str, Any], account_number: str) -> dict[str, str]:
-    binding = payload.get("binding")
-    if (not isinstance(binding, dict) or binding.get("account_number") != account_number
-            or binding.get("resource_uri") != payload.get("resource_url")
-            or not all(binding.get(key) for key in ("subscription_id", "retail_customer_id", "customer_resource_uri", "authorization_uri"))):
-        raise ValueError("The saved utility account mapping must be verified again.")
-    return binding
 
 
 def select_duke_account(
@@ -8130,6 +8624,7 @@ def list_saved_utility_connections_for_sync(account_number: str | None = None) -
             FROM utility_connections
             JOIN accounts ON accounts.id = utility_connections.account_id
             {where_clause}
+            {"AND" if where_clause else "WHERE"} accounts.disabled_at IS NULL
             ORDER BY accounts.account_number, utility_connections.provider_name, utility_connections.connection_label
             """,
             params,
@@ -8150,9 +8645,15 @@ def save_utility_connection(account_number: str | None, form_like) -> dict[str, 
     access_method = clean_optional_text(form_like.get("access_method")) or "customer_api_key"
     if access_method == DUKE_OAUTH_ACCESS_METHOD:
         raise ValueError("Use the Duke sign-in steps to create an automatic Duke connection.")
-    if access_method == GREEN_BUTTON_ACCESS_METHOD:
+    if access_method == national_grid.METHOD:
+        raise ValueError("Use National Grid sign-in to create this connection.")
+    if access_method == xcel.METHOD:
+        raise ValueError("Use Xcel sign-in to create this connection.")
+    if access_method == coned_oru.METHOD:
         raise ValueError("Use the utility sign-in steps to create a Green Button connection.")
     access_identifier = clean_optional_text(form_like.get("access_identifier"))
+    if access_identifier and "://" in access_identifier:
+        access_identifier = validate_utility_export_url(access_identifier)
     access_secret = form_like.get("access_secret")
     secret_hash = build_secret_hash(access_secret)
     secret_token = seal_secret_value(access_secret)
@@ -8395,143 +8896,124 @@ def sync_duke_oauth_connection(connection: dict[str, object]) -> dict[str, objec
     )
 
 
+UTILITY_EXPORT_MAX_BYTES = int(os.environ.get("POWER_UTILITY_EXPORT_MAX_BYTES", str(50 * 1024 * 1024)))
+UTILITY_EXPORT_BLOCKED_HOSTNAMES = {"localhost", "localhost.localdomain", "metadata", "metadata.google.internal"}
+
+
+def utility_export_allowed_hosts() -> set[str]:
+    raw = os.environ.get("POWER_UTILITY_EXPORT_HOSTS", "")
+    return {item.strip().lower().rstrip(".") for item in raw.split(",") if item.strip()}
+
+
+def is_public_ip_address(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = address.ipv4_mapped
+        if embedded is None and (
+            address in ipaddress.ip_network("64:ff9b::/96")  # NAT64 well-known prefix
+            or address in ipaddress.ip_network("::/96")  # IPv4-compatible (deprecated)
+        ):
+            embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        if embedded is None and address in ipaddress.ip_network("64:ff9b:1::/48"):
+            return False  # local-use NAT64 prefix
+        if embedded is not None:
+            address = embedded
+    return address.is_global and not address.is_multicast
+
+
+def validate_utility_export_url(url: str) -> str:
+    """Check that a customer-supplied export URL is an https address on a public host.
+
+    This runs when the connection is saved and again right before every fetch. The
+    connected socket's peer address is also checked during the fetch, so a DNS answer
+    that changes between the check and the connection still cannot reach a private
+    network address such as the cloud metadata service.
+    """
+    candidate = str(url or "").strip()
+    parts = urlsplit(candidate)
+    if parts.scheme.lower() != "https":
+        raise ValueError("The utility export URL must start with https://.")
+    if parts.username or parts.password:
+        raise ValueError("Remove the user name and password from the utility export URL.")
+    hostname = (parts.hostname or "").lower().rstrip(".")
+    if not hostname:
+        raise ValueError("Add a valid utility export URL.")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("Add a valid utility export URL.") from exc
+    if port not in (None, 443):
+        raise ValueError("The utility export URL must use the standard https port.")
+    if hostname in UTILITY_EXPORT_BLOCKED_HOSTNAMES or hostname.endswith((".localhost", ".internal", ".local")):
+        raise ValueError("That utility export URL points to a private address.")
+    try:
+        ipaddress.ip_address(hostname.strip("[]"))
+        is_ip_literal = True
+    except ValueError:
+        is_ip_literal = False
+    if is_ip_literal and not is_public_ip_address(hostname.strip("[]")):
+        raise ValueError("That utility export URL points to a private address.")
+    allowed_hosts = utility_export_allowed_hosts()
+    if allowed_hosts and not any(hostname == host or hostname.endswith(f".{host}") for host in allowed_hosts):
+        raise ValueError("That utility export host is not on the approved list.")
+    return candidate
+
+
+def resolve_public_utility_host(hostname: str) -> None:
+    try:
+        records = socket.getaddrinfo(hostname, 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ValueError("The utility export host could not be found.") from exc
+    addresses = {record[4][0] for record in records}
+    if not addresses or not all(is_public_ip_address(address) for address in addresses):
+        raise ValueError("That utility export URL points to a private address.")
+
+
+class _PublicOnlyHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        super().connect()
+        peer_address = self.sock.getpeername()[0]
+        if not is_public_ip_address(peer_address):
+            self.sock.close()
+            raise ValueError("That utility export URL points to a private address.")
+
+
+class _PublicOnlyHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PublicOnlyHTTPSConnection, req, context=self._context)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("The utility export URL redirected to another address. Use the final export URL.")
+
+
+def build_utility_export_opener():
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler(), _PublicOnlyHTTPSHandler())
+
+
 def fetch_utility_connection_export(connection: dict[str, object]) -> dict[str, object]:
     access_identifier = str(connection.get("access_identifier") or "").strip()
     access_secret = str(connection.get("access_secret") or "").strip()
     if not access_identifier.lower().startswith(("http://", "https://")):
         raise ValueError("Add the utility export URL before syncing this connection.")
+    access_identifier = validate_utility_export_url(access_identifier)
+    resolve_public_utility_host((urlsplit(access_identifier).hostname or "").strip("[]"))
     request_headers = {
         "Accept": "application/xml,text/xml,text/csv,*/*",
         "Authorization": f"Bearer {access_secret}",
         "X-API-Key": access_secret,
     }
     request_obj = Request(access_identifier, headers=request_headers)
-    with urlopen(request_obj, timeout=30) as response:
-        content = response.read()
+    with build_utility_export_opener().open(request_obj, timeout=30) as response:
+        content = response.read(UTILITY_EXPORT_MAX_BYTES + 1)
+    if len(content) > UTILITY_EXPORT_MAX_BYTES:
+        raise ValueError("The utility export is larger than this connection allows.")
     filename = Path(unquote(urlsplit(access_identifier).path)).name or "utility-history.xml"
     return {"filename": filename, "content": content}
-
-
-def save_green_button_connection(account_number: str, provider_key: str, secret_payload: str, resource_url: str) -> dict[str, object]:
-    green_button_config(provider_key)
-    payload = parse_green_button_secret(secret_payload)
-    require_green_button_binding(payload, account_number)
-    if payload["provider_key"] != provider_key or payload["resource_url"] != resource_url:
-        raise ValueError("The utility connection does not match the verified account.")
-    provider_name = GREEN_BUTTON_CONFIG[provider_key]["label"]
-    timestamp = timestamp_now()
-    with get_db_connection() as conn:
-        lock_green_button_consent(conn, account_number)
-        account = get_or_create_account(conn, account_number)
-        existing = conn.execute("SELECT id FROM utility_connections WHERE account_id = ? AND provider_name = ? AND access_method = ?",
-                                (account["id"], provider_name, GREEN_BUTTON_ACCESS_METHOD)).fetchone()
-        values = (GREEN_BUTTON_ACCESS_METHOD, resource_url, build_secret_hash(secret_payload), seal_secret_value(secret_payload), timestamp, account["id"])
-        if existing is None:
-            conn.execute("""INSERT INTO utility_connections
-                (account_id, provider_name, connection_label, access_method, access_identifier, secret_hash, secret_token, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'Connected', ?, ?)""",
-                         (account["id"], provider_name, f"{provider_name} Green Button", *values[:5], timestamp))
-        else:
-            conn.execute("""UPDATE utility_connections SET access_identifier=?, secret_hash=?, secret_token=?, status='Connected', updated_at=?
-                WHERE account_id=? AND id=?""", (resource_url, values[2], values[3], timestamp, account["id"], int(existing["id"])))
-        saved = conn.execute("SELECT id FROM utility_connections WHERE account_id=? AND provider_name=? AND access_method=?",
-                             (account["id"], provider_name, GREEN_BUTTON_ACCESS_METHOD)).fetchone()
-        saved_id = int(saved["id"])
-        conn.commit()
-    return next(item for item in list_utility_connections(account_number) if item["id"] == saved_id)
-
-
-def lock_green_button_consent(conn: DatabaseConnection, account_number: str) -> None:
-    if conn.kind == "sqlite":
-        conn.execute("BEGIN IMMEDIATE")
-    rows = conn.execute("""SELECT account_data_authorizations.id FROM account_data_authorizations
-        JOIN accounts ON accounts.id = account_data_authorizations.account_id
-        WHERE accounts.account_number = ? AND account_data_authorizations.status = 'active'"""
-        + (" FOR SHARE OF account_data_authorizations" if conn.kind == "postgres" else ""),
-        (account_number,)).fetchall()
-    if not rows:
-        raise ValueError("Customer authorization was withdrawn.")
-
-
-def assert_green_button_connection_current(connection: dict[str, object], *,
-                                            db_conn: DatabaseConnection | None = None, lock: bool = False) -> None:
-    if db_conn is None:
-        with get_db_connection() as conn:
-            return assert_green_button_connection_current(connection, db_conn=conn)
-    if lock:
-        # Consent is locked before the connection, matching the revoke path.
-        lock_green_button_consent(db_conn, str(connection["account_number"]))
-    row = db_conn.execute("""SELECT utility_connections.secret_hash
-            FROM utility_connections JOIN accounts ON accounts.id = utility_connections.account_id
-            WHERE utility_connections.id = ? AND accounts.account_number = ? AND utility_connections.access_method = ?
-              AND EXISTS (SELECT 1 FROM account_data_authorizations
-                          WHERE account_id = accounts.id AND status = 'active')"""
-            + (" FOR UPDATE OF utility_connections" if lock and db_conn.kind == "postgres" else ""),
-            (int(connection["id"]), str(connection["account_number"]), GREEN_BUTTON_ACCESS_METHOD)).fetchone()
-    expected_hash = build_secret_hash(str(connection.get("access_secret") or ""))
-    if row is None or not expected_hash or not hmac.compare_digest(str(row["secret_hash"] or ""), expected_hash):
-        raise ValueError("Utility access changed or customer authorization was withdrawn. Start again.")
-
-
-def update_green_button_connection_secret(account_number: str, connection_id: int, secret_payload: str,
-                                          *, expected_secret: str) -> None:
-    parse_green_button_secret(secret_payload)
-    with get_db_connection() as conn:
-        lock_green_button_consent(conn, account_number)
-        account = get_or_create_account(conn, account_number)
-        cursor = conn.execute("""UPDATE utility_connections SET secret_hash=?, secret_token=?, updated_at=?
-            WHERE account_id=? AND id=? AND access_method=? AND secret_hash=? AND secret_token IS NOT NULL
-              AND EXISTS (SELECT 1 FROM account_data_authorizations WHERE account_id=? AND status='active')""",
-            (build_secret_hash(secret_payload), seal_secret_value(secret_payload), timestamp_now(), account["id"],
-             int(connection_id), GREEN_BUTTON_ACCESS_METHOD, build_secret_hash(expected_secret), account["id"]))
-        if cursor.rowcount != 1:
-            conn.rollback()
-            raise ValueError("Utility access changed or customer authorization was withdrawn. Start again.")
-        conn.commit()
-
-
-def fetch_green_button_export(connection: dict[str, object]) -> dict[str, object]:
-    payload = parse_green_button_secret(str(connection.get("access_secret") or ""))
-    provider_key = str(payload["provider_key"])
-    config = green_button_config(provider_key)
-    binding = require_green_button_binding(payload, str(connection["account_number"]))
-    assert_green_button_connection_current(connection)
-    tokens = dict(payload["tokens"])
-    token = str(tokens.get("access_token") or "")
-    if not token or float(tokens.get("expires_at") or 0) <= time.time() + 60:
-        refresh_token = str(tokens.get("refresh_token") or "")
-        if not refresh_token:
-            raise ValueError("The utility access has expired. Reconnect the utility account.")
-        form_values = {"grant_type": "refresh_token", "refresh_token": refresh_token}
-        if tokens.get("scope"):
-            form_values["scope"] = str(tokens["scope"])
-        form = urlencode(form_values).encode()
-        basic = base64.b64encode(f"{config['client_id']}:{config.get('client_secret', '')}".encode()).decode()
-        raw = green_button_request(config, config["token_url"], data=form,
-                                   headers={"Authorization": f"Basic {basic}", "Accept": "application/json",
-                                            "Content-Type": "application/x-www-form-urlencoded"})
-        refreshed = json.loads(raw.decode("utf-8"))
-        refreshed["refresh_token"] = refreshed.get("refresh_token") or refresh_token
-        if "scope" not in refreshed:
-            refreshed["scope"] = tokens.get("scope")
-        refreshed_payload = serialize_green_button_secret(provider_key, refreshed, str(payload["resource_url"]), binding=binding)
-        update_green_button_connection_secret(str(connection["account_number"]), int(connection["id"]), refreshed_payload,
-                                              expected_secret=str(connection["access_secret"]))
-        connection["access_secret"] = refreshed_payload
-        tokens = parse_green_button_secret(refreshed_payload)["tokens"]
-        token = str(tokens["access_token"])
-    assert_green_button_connection_current(connection)
-    current_binding = validate_green_button_customer_resource(provider_key,
-        {"access_token": token, "resourceURI": binding["resource_uri"],
-         "customerResourceURI": binding["customer_resource_uri"], "authorizationURI": binding["authorization_uri"]},
-        str(connection["account_number"]))
-    if current_binding != binding:
-        raise ValueError("The utility account mapping changed. Connect again.")
-    assert_green_button_connection_current(connection)
-    headers = {"Accept": "application/xml, text/xml", "Authorization": f"Bearer {token}"}
-    content = green_button_request(config, str(payload["resource_url"]), headers=headers, limit=200 * 1024 * 1024)
-    assert_green_button_connection_current(connection)
-    return {"filename": f"{provider_key.lower()}-green-button.xml", "content": content}
 
 
 def clean_sync_error(error: Exception | str, max_length: int = 240) -> str:
@@ -8584,21 +9066,19 @@ def sync_utility_connection(account_number: str | None, connection_id: int) -> d
     connection = load_utility_connection_for_sync(account_number, connection_id)
     if connection["access_method"] == DUKE_OAUTH_ACCESS_METHOD:
         imported = sync_duke_oauth_connection(connection)
-    elif connection["access_method"] == GREEN_BUTTON_ACCESS_METHOD:
-        exported = fetch_green_button_export(connection)
-        assert_green_button_connection_current(connection)
-        filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
-        destination = INPUT_DIR / f"utility-sync-{connection_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{filename}"
-        destination.write_bytes(exported.get("content") or b"")
-        imported = import_interval_file_to_db(destination, account_number=connection["account_number"],
-                                              utility_connection_guard=connection)
+    elif connection["access_method"] == national_grid.METHOD:
+        imported = national_grid.sync(sys.modules[__name__], connection)
+    elif connection["access_method"] == xcel.METHOD:
+        imported = xcel.sync(sys.modules[__name__], connection)
+    elif connection["access_method"] == coned_oru.METHOD:
+        imported = coned_oru.sync(sys.modules[__name__], connection)
     else:
         exported = fetch_utility_connection_export(connection)
         filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
         if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
             filename = f"{Path(filename).stem or 'utility-history'}.xml"
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        destination = INPUT_DIR / f"utility-sync-{connection_id}-{timestamp}-{filename}"
+        destination = INPUT_DIR / f"utility-sync-{connection_id}-{timestamp}-{uuid4().hex[:16]}-{filename}"
         content = exported.get("content") or b""
         if isinstance(content, str):
             content = content.encode("utf-8")
@@ -8613,6 +9093,10 @@ def sync_utility_connection(account_number: str | None, connection_id: int) -> d
 
 def run_scheduled_utility_sync(account_number: str | None = None) -> dict[str, object]:
     ensure_database()
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM xcel_oauth_states WHERE expires_at < ?", (int(time.time()),))
+        conn.execute("DELETE FROM coned_oru_oauth_states WHERE expires_at < ?", (int(time.time()),))
+        conn.commit()
     connections = list_saved_utility_connections_for_sync(account_number=account_number)
     results: list[dict[str, object]] = []
     for connection in connections:
@@ -8882,6 +9366,41 @@ def save_household_profile(account_number: str | None, form_like) -> dict[str, o
     return load_household_profile(account_number)
 
 
+def check_customer_signup(
+    *,
+    email: str,
+    account_number: str | None,
+    energy_company: str,
+    meter_value: str | None,
+    household_form,
+    plan_id: str | None,
+    authenticated_customer_user_id: int | None = None,
+) -> None:
+    """Run the sign-up checks without writing anything."""
+    normalized_email = clean_email(email)
+    normalized_account_number = clean_account_number(account_number)
+    if not clean_energy_company(energy_company):
+        raise ValueError("Enter the service address so we can identify the energy company.")
+    clean_meter_value(meter_value)
+    get_billing_plan(plan_id)
+    clean_household_profile_values(household_form, require_address=True, require_zip=True)
+    with get_db_connection() as conn:
+        existing_user = conn.execute(
+            "SELECT id, is_active FROM customer_users WHERE email = ?",
+            (normalized_email,),
+        ).fetchone()
+        if existing_user is not None and (
+            authenticated_customer_user_id != int(existing_user["id"])
+            or not bool(existing_user["is_active"])
+        ):
+            raise ValueError("Sign in with your email link before adding another electric account.")
+        if conn.execute(
+            "SELECT id FROM accounts WHERE account_number = ?",
+            (normalized_account_number,),
+        ).fetchone() is not None:
+            raise ValueError("That electric account is already registered. Sign in or contact support for access.")
+
+
 def create_customer_signup(
     *,
     email: str,
@@ -8897,6 +9416,7 @@ def create_customer_signup(
     evidence_user_agent_hash: str | None = None,
     meter_value: str | None = None,
     authenticated_customer_user_id: int | None = None,
+    accepted_at: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     normalized_email = clean_email(email)
     normalized_name = (full_name or "").strip() or normalized_email
@@ -9005,7 +9525,7 @@ def create_customer_signup(
         record_customer_policy_acceptance(
             conn,
             int(customer_user["id"]),
-            accepted_at=timestamp,
+            accepted_at=accepted_at or timestamp,
             remote_hash=evidence_remote_hash,
             user_agent_hash=evidence_user_agent_hash,
         )
@@ -9013,7 +9533,7 @@ def create_customer_signup(
             conn,
             account_id=int(account["id"]),
             customer_user_id=int(customer_user["id"]),
-            granted_at=timestamp,
+            granted_at=accepted_at or timestamp,
             remote_hash=evidence_remote_hash,
             user_agent_hash=evidence_user_agent_hash,
         )
@@ -10201,8 +10721,9 @@ def list_supported_utility_adapters() -> list[dict[str, object]]:
 
 
 def parse_interval_xml_tree(path: str | Path) -> etree._ElementTree:
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False, huge_tree=False)
     with open(path, "rb") as handle:
-        return etree.parse(handle)
+        return etree.parse(handle, parser)
 
 
 def load_interval_source(path: str | Path) -> Any:
@@ -10502,7 +11023,7 @@ def import_interval_frame_to_db(
     modified_time: float | None = None,
     adapter_id: str = "interval_frame",
     adapter_name: str = "Interval readings",
-    utility_connection_guard: dict[str, object] | None = None,
+    connection_guard: tuple[int, str] | None = None,
 ) -> dict[str, object]:
     if frame.empty:
         raise ValueError("No interval rows were found to import.")
@@ -10514,10 +11035,26 @@ def import_interval_frame_to_db(
     conflicts_skipped_count = 0
 
     with get_db_connection() as conn:
-        if utility_connection_guard is not None:
-            if normalize_account_number(account_number) != utility_connection_guard["account_number"]:
-                raise ValueError("The utility import does not match the authorized account.")
-            assert_green_button_connection_current(utility_connection_guard, db_conn=conn, lock=True)
+        if connection_guard is not None:
+            # Lock the connection through import so withdrawal or replacement cannot
+            # race a completed fetch into an account after access has been removed.
+            connection_id, expected_secret = connection_guard
+            lock_suffix = " FOR UPDATE" if conn.kind == "postgres" else ""
+            if conn.kind != "postgres":
+                conn.execute("BEGIN IMMEDIATE")
+            connection_row = conn.execute(
+                "SELECT account_id, secret_token FROM utility_connections WHERE id = ?" + lock_suffix,
+                (connection_id,),
+            ).fetchone()
+            if connection_row is None or unseal_secret_value(connection_row["secret_token"]) != expected_secret:
+                raise ValueError("The utility connection changed before import. Please sync again.")
+            permitted = conn.execute("""SELECT accounts.id FROM accounts
+                WHERE accounts.id = ? AND accounts.account_number = ? AND EXISTS (
+                    SELECT 1 FROM account_data_authorizations WHERE account_id = accounts.id AND status = 'active')""",
+                (connection_row["account_id"], normalize_account_number(account_number)),
+            ).fetchone()
+            if permitted is None:
+                raise ValueError("Customer authorization was withdrawn before import.")
         account = get_or_create_account(
             conn,
             account_number,
@@ -10584,10 +11121,7 @@ def import_interval_file_to_db(
     display_name: str | None = None,
     energy_company: str | None = None,
     baseline_date: str | None = None,
-    utility_connection_guard: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    if utility_connection_guard is not None:
-        assert_green_button_connection_current(utility_connection_guard)
     path = Path(path).resolve()
     stat = path.stat()
     modified_time = stat.st_mtime
@@ -10635,32 +11169,7 @@ def import_interval_file_to_db(
         modified_time=modified_time,
         adapter_id=parsed.adapter.adapter_id,
         adapter_name=parsed.adapter.display_name,
-        utility_connection_guard=utility_connection_guard,
     )
-
-
-def sync_input_files_to_db(
-    account_number: str | None = None,
-    display_name: str | None = None,
-    energy_company: str | None = None,
-    baseline_date: str | None = None,
-) -> dict[str, int]:
-    ensure_database()
-    xml_files = sorted(path for path in INPUT_DIR.rglob("*.xml") if path.is_file())
-    synced = 0
-    imported = 0
-    for path in xml_files:
-        result = import_interval_file_to_db(
-            path,
-            account_number=account_number,
-            display_name=display_name,
-            energy_company=energy_company,
-            baseline_date=baseline_date,
-        )
-        synced += 1
-        if result["imported"]:
-            imported += 1
-    return {"files_seen": synced, "files_imported": imported}
 
 
 def count_imported_files(account_number: str | None = None) -> int:
@@ -11190,14 +11699,6 @@ def build_key_findings(
         )
 
     return findings[:3]
-
-
-def find_latest_input_file() -> Path | None:
-    ensure_data_dirs()
-    files = [path for path in INPUT_DIR.rglob("*.xml") if path.is_file()]
-    if not files:
-        return None
-    return max(files, key=lambda path: path.stat().st_mtime)
 
 
 def analyze_interval_data(
@@ -12069,6 +12570,7 @@ def print_human_report(summary: pd.DataFrame, baseline: float | None) -> None:
         print("No valid overnight intervals were found, so there is no baseline yet.")
     else:
         print(f"Estimated overnight baseline: {baseline:.2f} kW")
+    print(FLAGGED_INTERVAL_CAVEAT)
     print("")
 
     suspicious_days = summary[summary["suspicious"]]
@@ -12093,7 +12595,8 @@ def print_human_report(summary: pd.DataFrame, baseline: float | None) -> None:
 def print_comparison_report(comparison: dict[str, object], report_path: Path) -> None:
     overview = comparison["overview"]
     print("")
-    print("=== DUKE EXPORT COMPARISON ===")
+    print("=== UTILITY EXPORT COMPARISON ===")
+    print(FLAGGED_INTERVAL_CAVEAT)
     print("")
     print(
         f"Aligned {overview['matched_periods']} month(s) using {comparison['alignment_label']} matching."
@@ -12151,7 +12654,7 @@ def list_report_files(limit: int = 20) -> list[str]:
 def resolve_input_file(relative_path: str) -> Path:
     candidate = (INPUT_DIR / relative_path).resolve()
     base = INPUT_DIR.resolve()
-    if not str(candidate).startswith(str(base)):
+    if candidate == base or not candidate.is_relative_to(base):
         raise ValueError("That file is outside the saved history folder.")
     if not candidate.exists():
         raise FileNotFoundError("That file could not be found.")
@@ -12170,9 +12673,10 @@ def save_uploaded_file(uploaded_file) -> Path:
     if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
         raise ValueError("That file format is not supported yet.")
 
-    destination = INPUT_DIR / filename
-    if destination.exists():
-        destination = INPUT_DIR / f"{destination.stem}-{uuid4().hex[:8]}{destination.suffix}"
+    # Every stored upload gets an unguessable suffix so one customer's file name
+    # can never be predicted or collide with another customer's upload.
+    stem = Path(filename).stem[:80] or "interval"
+    destination = INPUT_DIR / f"{stem}-{uuid4().hex}{Path(filename).suffix.lower()}"
     uploaded_file.save(destination)
     return destination
 
@@ -12489,6 +12993,10 @@ def create_web_app() -> Flask:
         "how_it_works_page",
         "for_homeowners_page",
         "for_commissions_page",
+        "features_page",
+        "for_professionals_page",
+        "about_page",
+        "contact_page",
         "terms_page",
         "privacy_page",
         "utility_data_authorization_page",
@@ -12508,6 +13016,19 @@ def create_web_app() -> Flask:
 
     def auth_request_identity(scope: str, email: str | None) -> str:
         return auth_rate_limit_identity(scope, email, request.remote_addr)
+
+    def account_limit_blocked(scope: str, identifier: object, max_attempts: int, window_seconds: int) -> bool:
+        """A second limit keyed only on the email, so rotating IP addresses cannot
+        get around the per-address limit for one account."""
+        normalized = str(identifier or "").strip().lower()
+        if not normalized:
+            return False
+        blocked = not consume_rate_limit(f"{scope}.account", normalized, max_attempts, window_seconds)["allowed"]
+        if blocked:
+            # Someone can trip this on purpose to block a person's sign-in, so log it
+            # for alerting. The email itself is not logged.
+            emit_application_log("auth.account_limit_reached", scope=scope)
+        return blocked
 
     def auth_limit_message(retry_after: int) -> str:
         minutes = max(1, (int(retry_after) + 59) // 60)
@@ -12534,7 +13055,7 @@ def create_web_app() -> Flask:
     def enforce_csrf_protection():
         if request.method in {"GET", "HEAD", "OPTIONS", "TRACE"}:
             return None
-        if request.endpoint == "stripe_webhook":
+        if request.endpoint in {"stripe_webhook", "xcel_notification"}:
             return None
         if app.config.get("TESTING") and not app.config.get("CSRF_ENFORCE_TESTS"):
             return None
@@ -12556,7 +13077,7 @@ def create_web_app() -> Flask:
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         form_action = "form-action 'self' https://app.homeenergywatch.com"
         if request.endpoint == "customer_utility_page":
-            form_action += " https://login.duke-energy.com"
+            form_action += " https://login.duke-energy.com https://greenbuttonconnect.nationalgrid.com https://xe.planetecosystems.com"
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data: https:; style-src 'self'; "
@@ -12652,7 +13173,7 @@ def create_web_app() -> Flask:
         session["pending_staff_user_id"] = int(staff_user["id"])
         session["pending_staff_auth_version"] = int(staff_user.get("auth_version") or 1)
         session["pending_staff_mfa_at"] = timestamp_now()
-        if next_url.startswith("/") and not next_url.startswith("//"):
+        if is_safe_local_path(next_url):
             session["pending_staff_next"] = next_url
 
     def pending_staff_mfa_user() -> dict[str, object] | None:
@@ -12684,9 +13205,33 @@ def create_web_app() -> Flask:
 
     def next_destination(default_endpoint: str = "index") -> str:
         next_url = request.args.get("next") or request.form.get("next")
-        if next_url and next_url.startswith("/") and not next_url.startswith("//"):
+        if next_url and is_safe_local_path(next_url):
             return next_url
         return url_for(default_endpoint)
+
+    # Commission access is read-only for customer records, but every staff member
+    # must still be able to protect their own sign-in.
+    STAFF_OWN_SECURITY_ENDPOINTS = {
+        "staff_mfa_start",
+        "staff_mfa_confirm",
+        "staff_mfa_cancel",
+        "staff_mfa_recovery_codes",
+        "staff_mfa_disable",
+        "staff_passkey_enrollment_start",
+        "staff_passkey_enrollment_finish",
+        "staff_passkey_delete",
+        "stop_commission_preview",
+    }
+
+    def is_commission_staff(staff_user: dict[str, object] | None) -> bool:
+        return bool(staff_user) and get_staff_commission_access(int(staff_user["id"])) is not None
+
+    def visible_staff_team(staff_user: dict[str, object] | None) -> list[dict[str, object]]:
+        """Commission reviewers see only their own entry, not the whole internal team."""
+        team = list_staff_users()
+        if is_commission_staff(staff_user):
+            return [member for member in team if int(member["id"]) == int(staff_user["id"])]
+        return team
 
     def require_staff_user(api: bool = False):
         if staff_bootstrap_needed():
@@ -12699,7 +13244,11 @@ def create_web_app() -> Flask:
             if api:
                 return jsonify({"error": "Sign in to continue."}), 401
             return redirect(url_for("login", next=request.full_path if request.query_string else request.path))
-        if get_staff_commission_access(int(staff_user["id"])) is not None and request.method == "POST":
+        if (
+            get_staff_commission_access(int(staff_user["id"])) is not None
+            and request.method == "POST"
+            and request.endpoint not in STAFF_OWN_SECURITY_ENDPOINTS
+        ):
             message = "Commission access is read-only."
             if api:
                 return jsonify({"error": message}), 403
@@ -12752,6 +13301,11 @@ def create_web_app() -> Flask:
                         return jsonify({"error": message}), 403
                     return message, 403
                 return {"kind": "commission", "user": staff_user, "commission": commission_access}
+            if write and staff_user["role"] == "Commissioner":
+                message = "Commissioner access is review-only."
+                if api:
+                    return jsonify({"error": message}), 403
+                return message, 403
             return {"kind": "staff", "user": staff_user}
 
         customer_user = current_customer_user()
@@ -12811,7 +13365,7 @@ def create_web_app() -> Flask:
 
     def redirect_back_or_account(account_number: str | None = None):
         return_to = (request.form.get("return_to") or "").strip()
-        if return_to.startswith("/") and not return_to.startswith("//"):
+        if is_safe_local_path(return_to):
             return redirect(return_to)
         return actor_redirect(account_number)
 
@@ -12819,10 +13373,15 @@ def create_web_app() -> Flask:
         staff_user = require_staff_user(api=api)
         if not isinstance(staff_user, dict):
             return staff_user
-        if staff_user["role"] != "Commissioner":
+        if staff_user["role"] not in STAFF_ADMIN_ROLES or is_commission_staff(staff_user):
+            message = (
+                "Exit the commission preview to use admin tools."
+                if staff_user["role"] in STAFF_ADMIN_ROLES
+                else "Admin access is required for that action."
+            )
             if api:
-                return jsonify({"error": "Commissioner access is required for that action."}), 403
-            flash("Commissioner access is required for that action.")
+                return jsonify({"error": message}), 403
+            flash(message)
             return redirect(url_for("index"))
         return staff_user
 
@@ -12851,6 +13410,15 @@ def create_web_app() -> Flask:
             "how_it_works_url": build_absolute_url(marketing_base_url, "/how-it-works"),
             "for_homeowners_url": build_absolute_url(marketing_base_url, "/for-homeowners"),
             "for_commissions_url": build_absolute_url(marketing_base_url, "/for-commissions"),
+            "features_url": build_absolute_url(marketing_base_url, "/features"),
+            "for_professionals_url": build_absolute_url(marketing_base_url, "/for-professionals"),
+            "about_url": build_absolute_url(marketing_base_url, "/about"),
+            "contact_url": build_absolute_url(marketing_base_url, "/contact"),
+            "support_email": SUPPORT_EMAIL,
+            "public_plans": list_offered_billing_plans(),
+            # Licensed photographs are optional; pages fall back to drawn artwork.
+            "hero_photo_available": (STATIC_DIR / "img" / "hero-home.jpg").is_file(),
+            "professional_photo_available": (STATIC_DIR / "img" / "professional.jpg").is_file(),
             "terms_url": build_absolute_url(marketing_base_url, "/terms"),
             "privacy_url": build_absolute_url(marketing_base_url, "/privacy"),
             "utility_authorization_url": build_absolute_url(marketing_base_url, "/utility-data-authorization"),
@@ -12888,7 +13456,7 @@ def create_web_app() -> Flask:
             affiliate = create_affiliate_account(name, email, slug, "10", payout_method, payout_destination)
             flash(f"Your referral link is ready: {build_absolute_url(build_public_base_url(request.url_root), '/r/' + str(affiliate['slug']))}")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect(url_for("affiliate_page"))
 
     @app.get("/r/<slug>")
@@ -12904,14 +13472,20 @@ def create_web_app() -> Flask:
         account_number = request.args.get("account_number")
         account_search = request.args.get("account_search")
         account_page_number = parse_positive_int(request.args.get("account_page"), default=1)
-        scaffold = build_account_scaffold(account_number, account_search, account_page_number)
         staff_user = current_staff_user()
         commission_read_only = bool(staff_user and get_staff_commission_access(int(staff_user["id"])))
+        commission_accounts: list[dict[str, object]] = []
         if commission_read_only:
+            # Decide which account a commission user may see before anything is loaded,
+            # so an unassigned account is never read (or created) on their behalf.
             commission_accounts = list_commission_accounts(int(staff_user["id"]))
             allowed_numbers = {str(item["account_number"]) for item in commission_accounts}
-            if scaffold["account"]["account_number"] not in allowed_numbers and commission_accounts:
-                scaffold = build_account_scaffold(str(commission_accounts[0]["account_number"]), account_search, account_page_number)
+            if not commission_accounts:
+                abort(make_response(render_template("customer_empty.html", page_title="Commission records"), 200))
+            if account_number is None or normalize_account_number(account_number) not in allowed_numbers:
+                account_number = str(commission_accounts[0]["account_number"])
+        scaffold = build_account_scaffold(account_number, account_search, account_page_number)
+        if commission_read_only:
             scaffold["accounts"] = commission_accounts
         return {
             "defaults": defaults,
@@ -12980,7 +13554,7 @@ def create_web_app() -> Flask:
     def render_customer_setup_page(customer_user: dict[str, object], page_title: str, setup_section: str):
         context = build_customer_account_context(customer_user, page_title, setup_section)
         if context is None:
-            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True)
+            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True, has_disabled_account=customer_has_disabled_account(str(customer_user["email"])))
         return render_template("setup_section.html", **context)
 
     def build_customer_signup_form_state(form_like=None) -> dict[str, str]:
@@ -12992,7 +13566,7 @@ def create_web_app() -> Flask:
                 return default
             return str(raw)
 
-        selected_plan_id = value("plan_id", "home").strip().lower() or "home"
+        selected_plan_id = value("plan_id", DEFAULT_BILLING_PLAN_ID).strip().lower() or DEFAULT_BILLING_PLAN_ID
         return {
             "full_name": value("full_name"),
             "email": value("email"),
@@ -13045,7 +13619,8 @@ def create_web_app() -> Flask:
         start_customer_session(customer_user)
         billing = load_customer_billing(int(customer_user["id"]), account_number=account_number)
         selected_plan = get_billing_plan(str(billing["plan_id"]))
-        if selected_plan["payment_ready"]:
+        already_paid = str(billing.get("status") or "") in {"active", "trialing"}
+        if selected_plan["payment_ready"] and not already_paid:
             try:
                 session_obj = create_customer_checkout_session(
                     customer_user,
@@ -13055,22 +13630,42 @@ def create_web_app() -> Flask:
                 )
                 return redirect(str(session_obj["url"]))
             except Exception as exc:
-                flash(str(exc))
+                flash(user_facing_error_message(exc))
         return redirect(url_for("customer_dashboard"))
 
     @app.context_processor
     def inject_layout_context():
+        layout_staff_user = current_staff_user()
+        layout_commission = (
+            get_staff_commission_access(int(layout_staff_user["id"])) if layout_staff_user is not None else None
+        )
         return {
-            "staff_user": current_staff_user(),
+            "staff_user": layout_staff_user,
+            "commission_read_only": layout_commission is not None
+            or (layout_staff_user is not None and layout_staff_user.get("role") == "Commissioner"),
+            "staff_admin_roles": STAFF_ADMIN_ROLES,
+            "commission_preview": layout_commission if layout_commission and layout_commission.get("preview") else None,
+            "commission_organizations": (
+                list_commission_organizations()
+                if layout_staff_user is not None and layout_staff_user.get("role") in STAFF_ADMIN_ROLES and layout_commission is None
+                else []
+            ),
             "customer_user": current_customer_user(),
             "staff_roles": STAFF_ROLES,
             "customer_access_levels": CUSTOMER_ACCESS_LEVELS,
-            "billing_plans": list_billing_plans(),
+            "billing_plans": list_offered_billing_plans(),
             "supported_feeds": list_supported_utility_adapters(),
             "utility_access_guides": list_utility_access_guides(),
-            "configured_green_button_providers": [key.lower() for key in GREEN_BUTTON_CONFIG
-                                                   if green_button_provider_is_ready(key)],
+            "utility_download_guides": UTILITY_DOWNLOAD_GUIDES,
+            "get_utility_download_guide": get_utility_download_guide,
+            "energy_company_choices": list_energy_companies(),
             "duke_oauth_helper_download_url": DUKE_OAUTH_HELPER_DOWNLOAD_URL,
+            "national_grid_available": national_grid.available(),
+            "national_grid_provider_matches": national_grid.provider_matches,
+            "xcel_available": xcel.available(),
+            "xcel_provider_matches": xcel.provider_matches,
+            "coned_oru_provider_key": coned_oru.provider_key,
+            "coned_oru_available": coned_oru.available,
             "csrf_token": get_csrf_token,
             "today_iso": ddate.today().isoformat(),
             "app_base_url": build_public_base_url(),
@@ -13100,7 +13695,7 @@ def create_web_app() -> Flask:
         account_page_number = parse_positive_int(request.args.get("account_page"), default=1)
         scaffold = build_customer_account_scaffold(customer_user, account_number, account_search, account_page_number)
         if scaffold["account"] is None:
-            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True)
+            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True, has_disabled_account=customer_has_disabled_account(str(customer_user["email"])))
 
         latest_analysis = None
         account = scaffold["account"]
@@ -13169,12 +13764,26 @@ def create_web_app() -> Flask:
             if current_staff_user() is not None:
                 return redirect(url_for("index"))
             return redirect(url_for("login"))
-        return render_template("first_run.html", page_title="Commission Setup")
+        return render_template(
+            "first_run.html",
+            page_title="Commission Setup",
+            setup_token_required=bool((os.getenv("POWER_FIRST_RUN_TOKEN") or "").strip()) or is_production_environment(),
+        )
 
     @app.post("/first-run")
     def create_first_run_user():
         if not staff_bootstrap_needed():
             return redirect(url_for("login"))
+        expected_setup_token = (os.getenv("POWER_FIRST_RUN_TOKEN") or "").strip()
+        if is_production_environment() and not expected_setup_token:
+            flash("Set POWER_FIRST_RUN_TOKEN on the server before creating the first commissioner.")
+            return redirect(url_for("first_run"))
+        if expected_setup_token and not secrets.compare_digest(
+            expected_setup_token.encode("utf-8"),
+            (request.form.get("setup_token") or "").strip().encode("utf-8"),
+        ):
+            flash("That setup code is not correct.")
+            return redirect(url_for("first_run"))
         try:
             staff_user = create_first_staff_user(
                 request.form.get("email", ""),
@@ -13182,7 +13791,7 @@ def create_web_app() -> Flask:
                 request.form.get("password", ""),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("first_run"))
 
         session.clear()
@@ -13199,44 +13808,29 @@ def create_web_app() -> Flask:
         )
         return redirect(url_for("index"))
 
-    @app.get("/signup")
-    def customer_signup():
-        if current_customer_user() is not None and current_staff_user() is None:
-            return redirect(url_for("customer_dashboard"))
-        return render_customer_signup_page(request.args)
-
-    @app.post("/signup")
-    def customer_signup_post():
-        selected_plan_id = request.form.get("plan_id") or "home"
+    def load_pending_signup() -> dict[str, object] | None:
+        sealed = session.get(PENDING_SIGNUP_SESSION_KEY)
+        if not sealed:
+            return None
         try:
-            accept_policies = form_checkbox_checked(request.form.get("accept_policies"))
-            confirm_account_authority = form_checkbox_checked(
-                request.form.get("confirm_account_authority")
-            )
-            if not accept_policies:
-                raise ValueError("Agree to the Terms and Privacy Notice to create an account.")
-            if not confirm_account_authority:
-                raise ValueError("Confirm that you are allowed to manage this electric account.")
-            energy_company = resolve_energy_company_for_form(request.form, require_zip=True)
-            customer_user, account, billing = create_customer_signup(
-                email=request.form.get("email", ""),
-                full_name=request.form.get("full_name", ""),
-                password=request.form.get("password", ""),
-                account_number=request.form.get("account_number"),
-                energy_company=energy_company,
-                meter_value=request.form.get("meter_value"),
-                plan_id=selected_plan_id,
-                household_form=request.form,
-                accept_policies=accept_policies,
-                confirm_account_authority=confirm_account_authority,
-                evidence_remote_hash=request_remote_hash(),
-                evidence_user_agent_hash=request_user_agent_hash(),
-                authenticated_customer_user_id=(current_customer_user() or {}).get("id"),
-            )
-        except Exception as exc:
-            flash(str(exc))
-            return render_customer_signup_page(request.form)
+            pending = json.loads(unseal_secret_value(str(sealed)) or "")
+            if not isinstance(pending, dict) or not isinstance(pending.get("fields"), dict):
+                raise ValueError("pending sign-up is malformed")
+            if time.time() - float(pending.get("created_at") or 0) > PENDING_SIGNUP_MAX_AGE_SECONDS:
+                raise ValueError("pending sign-up expired")
+        except Exception:
+            session.pop(PENDING_SIGNUP_SESSION_KEY, None)
+            return None
+        return pending
 
+    def save_pending_signup(pending: dict[str, object]) -> None:
+        sealed = seal_secret_value(json.dumps(pending, sort_keys=True, separators=(",", ":")))
+        if not sealed or len(sealed) > PENDING_SIGNUP_MAX_SEALED_LENGTH:
+            raise ValueError("Some details are too long to hold during payment. Shorten the house notes and try again.")
+        session.permanent = True
+        session[PENDING_SIGNUP_SESSION_KEY] = sealed
+
+    def record_signup_events(customer_user: dict[str, object], account: dict[str, object], billing: dict[str, object]) -> None:
         record_audit_event(
             "customer.signup",
             actor_type="customer",
@@ -13281,6 +13875,8 @@ def create_web_app() -> Flask:
                 "authorization_scope": UTILITY_AUTHORIZATION_SCOPE,
             },
         )
+
+    def finish_signup_response(customer_user: dict[str, object], account: dict[str, object]):
         if not customer_user.get("email_verified"):
             session.clear()
             session.permanent = True
@@ -13310,8 +13906,180 @@ def create_web_app() -> Flask:
                     metadata={"error_type": type(exc).__name__},
                 )
             return render_verification_notice(str(customer_user["email"]))
-
         return continue_customer_after_verification(customer_user, str(account["account_number"]))
+
+    @app.get("/signup")
+    def customer_signup():
+        if current_customer_user() is not None and current_staff_user() is None:
+            return redirect(url_for("customer_dashboard"))
+        pending = load_pending_signup()
+        if pending is None:
+            return render_customer_signup_page(request.args)
+        if request.args.get("resume") != "1" and pending.get("checkout_session_id"):
+            # A customer who paid but never got back from Stripe can finish here.
+            try:
+                retrieve_paid_signup_checkout(str(pending["checkout_session_id"]), str(pending["reference"]))
+                return redirect(url_for("customer_signup_complete", session_id=pending["checkout_session_id"]))
+            except Exception:
+                pass
+        return render_customer_signup_page(pending["fields"])
+
+    def start_paid_signup(energy_company: str, plan_id: str):
+        authenticated_customer_user_id = (current_customer_user() or {}).get("id")
+        check_customer_signup(
+            email=request.form.get("email", ""),
+            account_number=request.form.get("account_number"),
+            energy_company=energy_company,
+            meter_value=request.form.get("meter_value"),
+            household_form=request.form,
+            plan_id=plan_id,
+            authenticated_customer_user_id=authenticated_customer_user_id,
+        )
+        reference = secrets.token_urlsafe(24)
+        pending = {
+            "version": 1,
+            "reference": reference,
+            "created_at": int(time.time()),
+            "accepted_at": timestamp_now(),
+            "fields": {name: str(request.form.get(name) or "")[:1000] for name in SIGNUP_FORM_FIELDS},
+            "energy_company": energy_company,
+            "plan_id": plan_id,
+            "evidence_remote_hash": request_remote_hash(),
+            "evidence_user_agent_hash": request_user_agent_hash(),
+            "authenticated_customer_user_id": authenticated_customer_user_id,
+            "affiliate_slug": str(session.get("affiliate_slug") or ""),
+            "checkout_session_id": "cs_" + "x" * 64,
+        }
+        save_pending_signup(pending)  # Size check before anything reaches Stripe.
+        try:
+            checkout = create_signup_checkout_session(
+                str(pending["fields"]["email"]),
+                plan_id,
+                reference,
+                build_public_base_url(request.url_root),
+                affiliate_slug=str(pending["affiliate_slug"]) or None,
+            )
+        except Exception:
+            session.pop(PENDING_SIGNUP_SESSION_KEY, None)
+            raise
+        pending["checkout_session_id"] = str(checkout["id"])
+        save_pending_signup(pending)
+        return redirect(str(checkout["url"]))
+
+    @app.post("/signup")
+    def customer_signup_post():
+        selected_plan_id = request.form.get("plan_id") or DEFAULT_BILLING_PLAN_ID
+        try:
+            accept_policies = form_checkbox_checked(request.form.get("accept_policies"))
+            confirm_account_authority = form_checkbox_checked(
+                request.form.get("confirm_account_authority")
+            )
+            if not accept_policies:
+                raise ValueError("Agree to the Terms and Privacy Notice to create an account.")
+            if not confirm_account_authority:
+                raise ValueError("Confirm that you are allowed to manage this electric account.")
+            energy_company = resolve_energy_company_for_form(request.form, require_zip=True)
+            if get_billing_plan(selected_plan_id).get("payment_ready"):
+                return start_paid_signup(energy_company, selected_plan_id)
+            customer_user, account, billing = create_customer_signup(
+                email=request.form.get("email", ""),
+                full_name=request.form.get("full_name", ""),
+                password=request.form.get("password", ""),
+                account_number=request.form.get("account_number"),
+                energy_company=energy_company,
+                meter_value=request.form.get("meter_value"),
+                plan_id=selected_plan_id,
+                household_form=request.form,
+                accept_policies=accept_policies,
+                confirm_account_authority=confirm_account_authority,
+                evidence_remote_hash=request_remote_hash(),
+                evidence_user_agent_hash=request_user_agent_hash(),
+                authenticated_customer_user_id=(current_customer_user() or {}).get("id"),
+            )
+        except Exception as exc:
+            flash(user_facing_error_message(exc))
+            return render_customer_signup_page(request.form)
+
+        record_signup_events(customer_user, account, billing)
+        return finish_signup_response(customer_user, account)
+
+    @app.get("/signup/complete")
+    def customer_signup_complete():
+        pending = load_pending_signup()
+        session_id = (request.args.get("session_id") or "").strip()
+        if pending is None:
+            if current_customer_user() is not None:
+                return redirect(url_for("customer_dashboard"))
+            flash(
+                "Your payment went through, but this browser no longer has your sign-up details. "
+                f"Contact {SUPPORT_EMAIL} and we will finish setting up your account."
+            )
+            return redirect(url_for("login"))
+        if not session_id or not secrets.compare_digest(session_id, str(pending.get("checkout_session_id") or "")):
+            flash("That payment link does not match this sign-up. Please start again.")
+            return redirect(url_for("customer_signup", resume=1))
+        authenticated_customer_user_id = pending.get("authenticated_customer_user_id")
+        if authenticated_customer_user_id and (current_customer_user() or {}).get("id") != authenticated_customer_user_id:
+            flash("Sign in with the same account that started this payment.")
+            return redirect(url_for("login"))
+        try:
+            session_obj = retrieve_paid_signup_checkout(session_id, str(pending["reference"]))
+        except Exception as exc:
+            flash(user_facing_error_message(exc))
+            return redirect(url_for("customer_signup", resume=1))
+        fields = pending["fields"]
+        try:
+            customer_user, account, billing = create_customer_signup(
+                email=str(fields.get("email") or ""),
+                full_name=str(fields.get("full_name") or ""),
+                account_number=str(fields.get("account_number") or ""),
+                energy_company=str(pending["energy_company"]),
+                meter_value=str(fields.get("meter_value") or ""),
+                plan_id=str(pending["plan_id"]),
+                household_form=fields,
+                accept_policies=True,
+                confirm_account_authority=True,
+                evidence_remote_hash=pending.get("evidence_remote_hash"),
+                evidence_user_agent_hash=pending.get("evidence_user_agent_hash"),
+                authenticated_customer_user_id=authenticated_customer_user_id,
+                accepted_at=str(pending["accepted_at"]),
+            )
+        except Exception as exc:
+            log_handled_exception("billing.signup_finalize_failed", exc)
+            emit_application_log("billing.signup_finalize_failed", checkout_session_id=session_id)
+            flash(
+                f"Your payment went through, but we could not finish setting up the account ({user_facing_error_message(exc)}). "
+                f"Contact {SUPPORT_EMAIL} and we will sort it out."
+            )
+            return redirect(url_for("login"))
+        session.pop(PENDING_SIGNUP_SESSION_KEY, None)
+        billing = apply_checkout_session_to_billing(customer_user, session_obj, int(account["id"]), str(pending["plan_id"]))
+        try:
+            link_signup_subscription(customer_user, str(pending["plan_id"]), int(account["id"]), session_obj)
+        except Exception as exc:
+            log_handled_exception("billing.signup_subscription_link_failed", exc)
+        affiliate = get_affiliate_by_slug(str(pending.get("affiliate_slug") or ""))
+        amount = extract_stripe_amount_total(session_obj)
+        if affiliate is not None and amount is not None:
+            record_affiliate_commission(
+                affiliate,
+                session_id,
+                int(customer_user["id"]),
+                amount,
+                extract_stripe_currency(session_obj) or "usd",
+                resolve_stripe_payment_reference(session_obj),
+            )
+        record_signup_events(customer_user, account, billing)
+        record_audit_event(
+            "billing.signup_paid",
+            actor_type="customer",
+            actor_id=int(customer_user["id"]),
+            account_number=str(account["account_number"]),
+            target_type="stripe_checkout_session",
+            target_id=session_id,
+            metadata={"plan_id": str(pending["plan_id"])},
+        )
+        return finish_signup_response(customer_user, account)
 
     @app.get("/customer/verification-sent")
     def customer_verification_sent():
@@ -13322,7 +14090,7 @@ def create_web_app() -> Flask:
         email = request.form.get("email") or session.get("pending_verification_email") or ""
         identity_hash = auth_request_identity("customer_verification_resend", str(email))
         limit_status = auth_rate_limit_status("customer_verification_resend", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("customer_verification_resend", str(email), 10, 3600):
             flash("Please wait before asking for another confirmation message.")
             return render_verification_notice(str(email)), 429
         record_auth_failure("customer_verification_resend", identity_hash)
@@ -13399,7 +14167,7 @@ def create_web_app() -> Flask:
         email = request.form.get("email", "")
         identity_hash = auth_request_identity("customer_password_reset", email)
         limit_status = auth_rate_limit_status("customer_password_reset", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("customer_password_reset", email, 10, 3600):
             return (
                 render_template(
                     "customer_forgot_password.html",
@@ -13492,7 +14260,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         record_audit_event(
             "customer.passkey_challenge_started",
             actor_type="anonymous",
@@ -13511,7 +14279,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         start_customer_session(customer_user)
         record_audit_event(
             "customer.login_succeeded",
@@ -13522,7 +14290,7 @@ def create_web_app() -> Flask:
             target_id=customer_user["id"],
             metadata={"method": "passkey"},
         )
-        safe_next = next_url if next_url.startswith("/") and not next_url.startswith("//") else url_for("customer_dashboard")
+        safe_next = next_url if is_safe_local_path(next_url) else url_for("customer_dashboard")
         return jsonify({"redirect": safe_next})
 
     @app.get("/pricing")
@@ -13558,6 +14326,50 @@ def create_web_app() -> Flask:
                 page_title="For Homeowners",
                 page_description="Use Home Energy Watch to compare your overnight baseline, flagged nights, and utility export history without giving up your own records.",
                 active_page="for-homeowners",
+            ),
+        )
+
+    @app.get("/features")
+    def features_page():
+        return render_template(
+            "marketing_features.html",
+            **build_marketing_page_context(
+                page_title="Features",
+                page_description="Usage analytics, overnight baselines, flagged-night detection, appliance and weather context, reports and multi-account tools.",
+                active_page="features",
+            ),
+        )
+
+    @app.get("/for-professionals")
+    def for_professionals_page():
+        return render_template(
+            "marketing_professionals.html",
+            **build_marketing_page_context(
+                page_title="For Professionals",
+                page_description="Review many electric accounts in one workspace, with case notes, shared access and evidence-ready exports.",
+                active_page="for-professionals",
+            ),
+        )
+
+    @app.get("/about")
+    def about_page():
+        return render_template(
+            "marketing_about.html",
+            **build_marketing_page_context(
+                page_title="About Us",
+                page_description="Home Energy Watch turns the electricity readings your utility provides into a clear, organized record.",
+                active_page="about",
+            ),
+        )
+
+    @app.get("/contact")
+    def contact_page():
+        return render_template(
+            "marketing_contact.html",
+            **build_marketing_page_context(
+                page_title="Contact",
+                page_description="Questions about your account, your reports or Home Energy Watch? Get in touch with our team.",
+                active_page="contact",
             ),
         )
 
@@ -13614,21 +14426,28 @@ def create_web_app() -> Flask:
         customer_user = require_customer_user()
         if not isinstance(customer_user, dict):
             return customer_user
+        billing_account_number = resolve_billing_manager_account(
+            customer_user,
+            request.form.get("account_number") or request.args.get("account_number"),
+        )
+        if billing_account_number is None:
+            flash("Manager access is required to manage billing for this account.")
+            return redirect(url_for("pricing_page"))
         try:
             session_obj = create_customer_checkout_session(
                 customer_user,
                 request.form.get("plan_id"),
                 build_public_base_url(request.url_root),
-                request.form.get("account_number") or request.args.get("account_number"),
+                billing_account_number,
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("pricing_page"))
         record_audit_event(
             "billing.checkout_started",
             actor_type="customer",
             actor_id=int(customer_user["id"]),
-            account_number=request.form.get("account_number") or choose_customer_account_number(str(customer_user["email"])),
+            account_number=billing_account_number,
             target_type="stripe_checkout_session",
             target_id=session_obj.get("id"),
             metadata={"plan_id": str(request.form.get("plan_id") or "")},
@@ -13651,8 +14470,8 @@ def create_web_app() -> Flask:
                 target_id=customer_user["id"],
                 metadata={"status": str(billing.get("status") or "")},
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_handled_exception("billing.status_refresh_failed", exc)
         flash("Billing is being confirmed.")
         return redirect(url_for("customer_dashboard"))
 
@@ -13663,25 +14482,42 @@ def create_web_app() -> Flask:
             return redirect(url_for("customer_dashboard"))
         return redirect(url_for("pricing_page"))
 
+    def resolve_billing_manager_account(customer_user: dict[str, object], requested_account_number: str | None) -> str | None:
+        """Billing changes payment details for the whole account, so only Managers may open it."""
+        account_number = choose_customer_account_number(str(customer_user["email"]), requested_account_number)
+        if account_number is None:
+            return None
+        access = get_customer_account_access(str(customer_user["email"]), account_number)
+        if access is None or access.get("access_level") != "Manager":
+            return None
+        return account_number
+
     @app.post("/billing/portal")
     def billing_portal():
         customer_user = require_customer_user()
         if not isinstance(customer_user, dict):
             return customer_user
+        billing_account_number = resolve_billing_manager_account(
+            customer_user,
+            request.form.get("account_number") or request.args.get("account_number"),
+        )
+        if billing_account_number is None:
+            flash("Manager access is required to manage billing for this account.")
+            return redirect(url_for("customer_dashboard"))
         try:
             session_obj = create_customer_portal_session(
                 customer_user,
                 build_public_base_url(request.url_root),
-                request.args.get("account_number"),
+                billing_account_number,
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("customer_dashboard"))
         record_audit_event(
             "billing.portal_opened",
             actor_type="customer",
             actor_id=int(customer_user["id"]),
-            account_number=choose_customer_account_number(str(customer_user["email"])),
+            account_number=billing_account_number,
             target_type="customer_billing",
             target_id=customer_user["id"],
         )
@@ -13698,7 +14534,9 @@ def create_web_app() -> Flask:
             payload = request.get_data()
             signature = request.headers.get("Stripe-Signature", "")
             event = stripe.Webhook.construct_event(payload, signature, webhook_secret)
-            handle_stripe_event(event)
+            outcome = process_stripe_event(event)
+            if outcome != "processed":
+                return jsonify({"received": True, "status": outcome})
             event_type = str(event.get("type") or "unknown")
             record_audit_event(
                 "billing.webhook_processed",
@@ -13708,7 +14546,8 @@ def create_web_app() -> Flask:
                 metadata={"event_type": event_type},
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            log_handled_exception("billing.webhook_failed", exc)
+            return jsonify({"error": "Webhook could not be processed."}), 400
         return jsonify({"received": True})
 
     @app.get("/customer")
@@ -13745,7 +14584,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         record_audit_event(
             "customer.passkey_enrollment_started",
             actor_type="customer",
@@ -13770,7 +14609,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         updated_user = get_customer_user_by_id(int(customer_user["id"])) or customer_user
         session["customer_auth_version"] = int(updated_user.get("auth_version") or 1)
         record_audit_event(
@@ -13791,7 +14630,7 @@ def create_web_app() -> Flask:
         try:
             removed = remove_passkey_credential("customer", int(customer_user["id"]), credential_id)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("customer_account_page"))
         updated_user = get_customer_user_by_id(int(customer_user["id"])) or customer_user
         session["customer_auth_version"] = int(updated_user.get("auth_version") or 1)
@@ -13919,7 +14758,7 @@ def create_web_app() -> Flask:
             return customer_user
         context = build_customer_account_context(customer_user, "History")
         if context is None:
-            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True)
+            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True, has_disabled_account=customer_has_disabled_account(str(customer_user["email"])))
         return render_template("history_page.html", **context)
 
     @app.get("/customer/billing")
@@ -13947,7 +14786,74 @@ def create_web_app() -> Flask:
 
     @app.get("/login/token")
     def login_token():
+        # Opening the emailed link only shows a confirmation button. The token is used
+        # on the POST, so mail-security scanners that prefetch links cannot spend it,
+        # and a forwarded link does not silently sign someone into another account.
+        next_url = request.args.get("next") or ""
         token = request.args.get("token", "")
+        # Look the token up without using it, so the page can name the account. A
+        # person sent someone else's link sees whose account it would open.
+        first = read_first_sign_in_token(token)
+        record = None if first else load_valid_customer_auth_token(token, "login")
+        account_email = first["email"] if first else (str(record["customer_user"]["email"]) if record else "")
+        if not first and not record:
+            staff_record = load_valid_staff_auth_token(token, "login")
+            account_email = str(staff_record["staff_user"]["email"]) if staff_record else ""
+        if not account_email:
+            flash("That sign-in link is no longer available.")
+            return redirect(url_for("login"))
+        return render_template(
+            "login_token_confirm.html",
+            page_title="Finish Signing In",
+            token=token,
+            account_email=account_email,
+            next_url=next_url if is_safe_local_path(next_url) else "",
+        )
+
+    @app.post("/login/token")
+    def login_token_post():
+        token = request.form.get("token", "")
+        first = read_first_sign_in_token(token)
+        if first is not None:
+            # The first time someone with access signs in, their record is created here.
+            if first["kind"] == "commission":
+                staff_user = ensure_commission_staff_user(first["email"])
+                if staff_user is None:
+                    flash("That sign-in link is no longer available.")
+                    return redirect(url_for("login"))
+                establish_staff_session(staff_user)
+                mark_staff_login_succeeded(int(staff_user["id"]))
+                record_audit_event(
+                    "staff.login_succeeded",
+                    actor_type="staff",
+                    actor_id=int(staff_user["id"]),
+                    target_type="staff_user",
+                    target_id=staff_user["id"],
+                    metadata={"method": "first_email_link"},
+                )
+                return redirect(url_for("index"))
+            customer_user = ensure_customer_user_for_email(first["email"])
+            if customer_user is None:
+                flash("That sign-in link is no longer available.")
+                return redirect(url_for("login"))
+            with get_db_connection() as conn:
+                conn.execute(
+                    "UPDATE customer_users SET email_verified_at = COALESCE(email_verified_at, ?) WHERE id = ?",
+                    (timestamp_now(), int(customer_user["id"])),
+                )
+                conn.commit()
+            customer_user = get_customer_user_by_id(int(customer_user["id"])) or customer_user
+            start_customer_session(customer_user)
+            record_audit_event(
+                "customer.login_succeeded",
+                actor_type="customer",
+                actor_id=int(customer_user["id"]),
+                account_number=choose_customer_account_number(str(customer_user["email"])),
+                target_type="customer_user",
+                target_id=customer_user["id"],
+                metadata={"method": "first_email_link"},
+            )
+            return redirect(url_for("customer_dashboard"))
         try:
             customer_user = consume_customer_login_token(token)
         except ValueError:
@@ -14003,7 +14909,7 @@ def create_web_app() -> Flask:
         email = request.form.get("email", "")
         identity_hash = auth_request_identity("password_reset", email)
         limit_status = auth_rate_limit_status("password_reset", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("password_reset", email, 10, 3600):
             return (
                 render_template(
                     "customer_forgot_password.html",
@@ -14038,18 +14944,19 @@ def create_web_app() -> Flask:
             except Exception as exc:
                 delivery_error = type(exc).__name__
 
-        record_audit_event(
-            "password_reset_requested",
-            actor_type=user_kind or "anonymous",
-            actor_id=None if user is None else int(user["id"]),
-            target_type=None if user_kind is None else f"{user_kind}_user",
-            target_id=None if user is None else user["id"],
-            metadata={
-                "delivery_attempted": delivered,
-                "delivery_error": delivery_error,
-                "user_kind": user_kind,
-            },
-        )
+        if user is not None:  # Nothing is recorded for an email that has no sign-in.
+            record_audit_event(
+                "password_reset_requested",
+                actor_type=user_kind,
+                actor_id=int(user["id"]),
+                target_type=f"{user_kind}_user",
+                target_id=user["id"],
+                metadata={
+                    "delivery_attempted": delivered,
+                    "delivery_error": delivery_error,
+                    "user_kind": user_kind,
+                },
+            )
         return render_template(
             "customer_forgot_password.html",
             page_title="Reset Your Password",
@@ -14074,7 +14981,7 @@ def create_web_app() -> Flask:
         email = request.form.get("email", "")
         identity_hash = auth_request_identity("staff_password_reset", email)
         limit_status = auth_rate_limit_status("staff_password_reset", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("staff_password_reset", email, 10, 3600):
             return (
                 render_template(
                     "staff_forgot_password.html",
@@ -14154,29 +15061,39 @@ def create_web_app() -> Flask:
         email = request.form.get("email", "")
         identity_hash = auth_request_identity("sign_in", email)
         limit_status = auth_rate_limit_status("sign_in", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("sign_in", email, 20, 3600):
             return render_template("login_link_notice.html", page_title="Check Your Email"), 429
         record_auth_failure("sign_in", identity_hash)
-        customer_user = ensure_customer_user_for_email(email)
-        staff_user = None if customer_user is not None else get_staff_user_by_email(email)
-        if staff_user is None:
-            staff_user = ensure_commission_staff_user(email)
+        # The sign-in form never creates anything. Unknown emails get the same
+        # notice and no message; people with access but no sign-in record yet get
+        # a signed link, and their record is created only when they use it.
+        # Staff identities win: a customer must never be able to turn a staff
+        # member's sign-in into a customer session by listing their email.
+        staff_user = get_staff_user_by_email(email)
+        customer_user = None if staff_user is not None else get_customer_user_by_email(email)
+        base_url = build_public_base_url(request.url_root)
         delivered = False
         try:
             if customer_user is not None and customer_user.get("is_active"):
-                send_customer_login_link_email(customer_user, build_public_base_url(request.url_root))
+                send_customer_login_link_email(customer_user, base_url)
                 delivered = True
             elif staff_user is not None and staff_user.get("is_active"):
-                send_staff_login_link_email(staff_user, build_public_base_url(request.url_root))
+                send_staff_login_link_email(staff_user, base_url)
                 delivered = True
+            elif staff_user is None and customer_user is None:
+                if get_commission_for_email(email) is not None:
+                    send_first_sign_in_email(email, "commission", base_url)
+                elif email_has_account_access(email):
+                    send_first_sign_in_email(email, "customer", base_url)
         except Exception:
             delivered = False
-        record_audit_event(
-            "auth.login_link_requested",
-            actor_type="customer" if customer_user is not None else ("staff" if staff_user is not None else "anonymous"),
-            actor_id=None if customer_user is None and staff_user is None else int((customer_user or staff_user)["id"]),
-            metadata={"delivery_attempted": delivered},
-        )
+        if customer_user is not None or staff_user is not None:
+            record_audit_event(
+                "auth.login_link_requested",
+                actor_type="customer" if customer_user is not None else "staff",
+                actor_id=int((customer_user or staff_user)["id"]),
+                metadata={"delivery_attempted": delivered},
+            )
         return render_template("login_link_notice.html", page_title="Check Your Email")
 
     @app.post("/login/passkey/start")
@@ -14185,7 +15102,9 @@ def create_web_app() -> Flask:
         email = request.form.get("email", "")
         resolved = resolve_passkey_login(email)
         if resolved is None:
-            return jsonify({"error": "That passkey sign in did not work."}), 400
+            # Answer exactly like a real challenge so this endpoint cannot be used to
+            # learn which emails have accounts. The decoy can never be completed.
+            return jsonify({"publicKey": start_decoy_passkey_login(email, build_public_base_url(request.url_root))})
         kind, user = resolved
         try:
             options = start_passkey_login(
@@ -14195,7 +15114,8 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            log_handled_exception("passkey.login_start_failed", exc)
+            return jsonify({"publicKey": start_decoy_passkey_login(email, build_public_base_url(request.url_root))})
         record_audit_event(
             f"{kind}.passkey_challenge_started",
             actor_type="anonymous",
@@ -14214,7 +15134,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         if kind == "customer":
             start_customer_session(signed_in_user)
             record_audit_event(
@@ -14226,7 +15146,7 @@ def create_web_app() -> Flask:
                 target_id=signed_in_user["id"],
                 metadata={"mfa": "passkey", "entrypoint": "unified"},
             )
-            safe_next = next_url if next_url.startswith("/") and not next_url.startswith("//") else url_for("customer_dashboard")
+            safe_next = next_url if is_safe_local_path(next_url) else url_for("customer_dashboard")
             return jsonify({"redirect": safe_next})
 
         staff_user = signed_in_user
@@ -14240,7 +15160,7 @@ def create_web_app() -> Flask:
             target_id=staff_user["id"],
             metadata={"mfa": "passkey", "entrypoint": "unified"},
         )
-        safe_next = next_url if next_url.startswith("/") and not next_url.startswith("//") else url_for("index")
+        safe_next = next_url if is_safe_local_path(next_url) else url_for("index")
         return jsonify({"redirect": safe_next})
 
     @app.get("/staff/mfa/challenge")
@@ -14263,7 +15183,7 @@ def create_web_app() -> Flask:
             return redirect(url_for("login"))
         identity_hash = auth_request_identity("staff_mfa", str(staff_user["email"]))
         limit_status = auth_rate_limit_status("staff_mfa", identity_hash)
-        if limit_status["blocked"]:
+        if limit_status["blocked"] or account_limit_blocked("staff_mfa", str(staff_user["email"]), 10, 900):
             flash(auth_limit_message(int(limit_status["retry_after"])))
             return (
                 render_template(
@@ -14448,6 +15368,11 @@ def create_web_app() -> Flask:
         staff_user = require_staff_user()
         if not isinstance(staff_user, dict):
             return staff_user
+        if staff_user.get("mfa_enabled"):
+            if account_limit_blocked("staff_passkey_code", str(staff_user["email"]), 5, 900):
+                return jsonify({"error": "Too many code attempts. Try again in 15 minutes."}), 429
+            if verify_staff_mfa_code(int(staff_user["id"]), request.form.get("code")) is None:
+                return jsonify({"error": "Enter a current authenticator code to add a passkey."}), 400
         try:
             options = start_passkey_enrollment(
                 "staff",
@@ -14456,7 +15381,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         record_audit_event(
             "staff.passkey_enrollment_started",
             actor_type="staff",
@@ -14480,7 +15405,7 @@ def create_web_app() -> Flask:
                 origin=build_public_base_url(request.url_root),
             )
         except Exception as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": user_facing_error_message(exc)}), 400
         updated_user = get_staff_user_by_id(int(staff_user["id"])) or staff_user
         session["staff_auth_version"] = int(updated_user.get("auth_version") or 1)
         record_audit_event(
@@ -14500,7 +15425,7 @@ def create_web_app() -> Flask:
         try:
             removed = remove_passkey_credential("staff", int(staff_user["id"]), credential_id)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("staff_security"))
         updated_user = get_staff_user_by_id(int(staff_user["id"])) or staff_user
         session["staff_auth_version"] = int(updated_user.get("auth_version") or 1)
@@ -14513,6 +15438,51 @@ def create_web_app() -> Flask:
         )
         flash("Passkey removed.")
         return redirect(url_for("staff_security"))
+
+    @app.post("/staff/commission-preview")
+    def start_commission_preview():
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        try:
+            commission_id = int(request.form.get("commission_id") or 0)
+        except ValueError:
+            commission_id = 0
+        commission = get_commission_organization(commission_id)
+        if commission is None:
+            flash("Choose a commission to preview.")
+            return redirect(url_for("staff_page"))
+        session[COMMISSION_PREVIEW_SESSION_KEY] = {
+            "staff_user_id": int(staff_user["id"]),
+            "commission_id": int(commission["id"]),
+        }
+        record_audit_event(
+            "staff.commission_preview_started",
+            actor_type="staff",
+            actor_id=int(staff_user["id"]),
+            target_type="commission_organization",
+            target_id=commission["id"],
+            metadata={"commission": str(commission["name"])},
+        )
+        flash(f"You are now seeing Home Energy Watch the way {commission['name']} sees it. Everything is read-only.")
+        return redirect(url_for("index"))
+
+    @app.post("/staff/commission-preview/stop")
+    def stop_commission_preview():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        preview = session.pop(COMMISSION_PREVIEW_SESSION_KEY, None)
+        if preview:
+            record_audit_event(
+                "staff.commission_preview_ended",
+                actor_type="staff",
+                actor_id=int(staff_user["id"]),
+                target_type="commission_organization",
+                target_id=preview.get("commission_id") if isinstance(preview, dict) else None,
+            )
+            flash("Commission preview ended.")
+        return redirect(url_for("staff_page"))
 
     @app.post("/logout")
     def logout():
@@ -14561,7 +15531,7 @@ def create_web_app() -> Flask:
                 full_name=request.form.get("full_name"),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("accept_staff_invite_route", token=token))
 
         session.clear()
@@ -14591,7 +15561,7 @@ def create_web_app() -> Flask:
                 invited_by_id=int(staff_user["id"]),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("index"))
 
         delivery = "manual"
@@ -14618,7 +15588,7 @@ def create_web_app() -> Flask:
         else:
             flash(f"{invite['full_name']} is ready for setup.")
         return_to = (request.form.get("return_to") or "").strip()
-        if return_to.startswith("/") and not return_to.startswith("//"):
+        if is_safe_local_path(return_to):
             return redirect(return_to)
         return redirect(url_for("staff_page"))
 
@@ -14751,12 +15721,62 @@ def create_web_app() -> Flask:
             utility_connections=scaffold["utility_connections"],
             data_authorizations=scaffold["data_authorizations"],
             has_active_data_authorization=scaffold["has_active_data_authorization"],
-            staff_team=list_staff_users(),
-            latest_invite_url=consume_latest_invite_url(),
+            staff_team=visible_staff_team(staff_user),
+            latest_invite_url=None if is_commission_staff(staff_user) else consume_latest_invite_url(),
             active_account_number=scaffold["account"]["account_number"],
             page_title="Commission Review",
             commission_read_only=commission_read_only,
         )
+
+    @app.post("/accounts/manage")
+    def manage_accounts():
+        staff_user = require_commissioner()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        return_to = request.form.get("return_to") or ""
+        if not is_safe_local_path(return_to):
+            return_to = url_for("account_page")
+        action = (request.form.get("action") or "").strip()
+        numbers = list(dict.fromkeys(n.strip() for n in request.form.getlist("account_numbers") if n.strip()))
+        try:
+            if not numbers:
+                raise ValueError("Choose at least one account first.")
+            if action in {"disable", "enable"}:
+                if staff_user["role"] != "Owner":
+                    raise PermissionError("Only the owner can disable or enable accounts.")
+                for number in numbers:
+                    set_account_disabled(number, action == "disable")
+                    record_audit_event(
+                        f"account.{action}d",
+                        actor_type="staff",
+                        actor_id=int(staff_user["id"]),
+                        account_number=number,
+                        target_type="account",
+                        target_id=number,
+                    )
+                flash(f"{'Disabled' if action == 'disable' else 'Enabled'} {len(numbers)} account{'' if len(numbers) == 1 else 's'}.")
+            elif action == "delete":
+                if (request.form.get("confirm_delete") or "").strip().upper() != "DELETE":
+                    raise ValueError("Type DELETE in the box to confirm. Nothing was deleted.")
+                summary = account_cleanup.purge_accounts(sys.modules[__name__], numbers, confirm=True)
+                record_audit_event(
+                    "account.deleted",
+                    actor_type="staff",
+                    actor_id=int(staff_user["id"]),
+                    target_type="account",
+                    metadata={"accounts": len(summary["accounts"]), "customers": len(summary["customers_removed"])},
+                )
+                flash(
+                    f"Deleted {len(summary['accounts'])} account{'' if len(summary['accounts']) == 1 else 's'}"
+                    f" and {len(summary['customers_removed'])} sign-in{'' if len(summary['customers_removed']) == 1 else 's'}."
+                )
+                if any(f"account_number={n}" in return_to for n in numbers):
+                    return_to = url_for("account_page")
+            else:
+                raise ValueError("Choose Disable, Enable or Delete.")
+        except Exception as exc:
+            flash(user_facing_error_message(exc))
+        return redirect(return_to)
 
     @app.get("/account")
     def account_page():
@@ -14810,7 +15830,7 @@ def create_web_app() -> Flask:
                 request.form.get("body"),
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(account_number)
         actor = {"kind": "customer", "user": customer_user}
         record_actor_event(
@@ -14839,7 +15859,7 @@ def create_web_app() -> Flask:
             flash(str(exc))
             return redirect_back_or_account(account_number)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(account_number)
         actor = {"kind": "customer", "user": customer_user}
         record_actor_event(
@@ -14861,9 +15881,9 @@ def create_web_app() -> Flask:
         return render_template(
             "staff_page.html",
             staff_user=staff_user,
-            staff_team=list_staff_users(),
-            affiliates=list_affiliate_accounts(),
-            latest_invite_url=consume_latest_invite_url(),
+            staff_team=visible_staff_team(staff_user),
+            affiliates=[] if is_commission_staff(staff_user) else list_affiliate_accounts(),
+            latest_invite_url=None if is_commission_staff(staff_user) else consume_latest_invite_url(),
             page_title="Staff",
         )
 
@@ -14880,7 +15900,7 @@ def create_web_app() -> Flask:
             record_audit_event("affiliate.created", actor_type="staff", actor_id=int(staff_user["id"]), target_type="affiliate_account", target_id=affiliate["id"], metadata={"slug": affiliate["slug"]})
             flash("Referral partner created.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect(url_for("staff_page"))
 
     @app.get("/audit")
@@ -15083,6 +16103,10 @@ def create_web_app() -> Flask:
             build_absolute_url(marketing_base_url, "/how-it-works"),
             build_absolute_url(marketing_base_url, "/for-homeowners"),
             build_absolute_url(marketing_base_url, "/for-commissions"),
+            build_absolute_url(marketing_base_url, "/features"),
+            build_absolute_url(marketing_base_url, "/for-professionals"),
+            build_absolute_url(marketing_base_url, "/about"),
+            build_absolute_url(marketing_base_url, "/contact"),
             build_absolute_url(marketing_base_url, "/terms"),
             build_absolute_url(marketing_base_url, "/privacy"),
             build_absolute_url(marketing_base_url, "/utility-data-authorization"),
@@ -15099,6 +16123,16 @@ def create_web_app() -> Flask:
     def download_report(filename: str):
         staff_user = current_staff_user()
         if staff_user is not None:
+            if get_staff_commission_access(int(staff_user["id"])) is not None:
+                try:
+                    artifact_account_number = get_report_artifact_account_number(filename)
+                except ValueError:
+                    artifact_account_number = None
+                if artifact_account_number is None or not commission_can_view_account(
+                    int(staff_user["id"]),
+                    artifact_account_number,
+                ):
+                    return "Report not found.", 404
             return send_from_directory(OUTPUT_DIR, normalize_report_filename(filename), as_attachment=True)
 
         customer_user = current_customer_user()
@@ -15131,13 +16165,21 @@ def create_web_app() -> Flask:
             ):
                 raise ValueError("Customer data permission is required before exports can be compared.")
             if request.files.get("left_file") and request.files.get("right_file"):
-                left_path = save_uploaded_file(request.files.get("left_file"))
-                right_path = save_uploaded_file(request.files.get("right_file"))
-                comparison, report_path = analyze_interval_file_comparison(
-                    left_path, right_path, tz_name=settings["tz"], night_start_str=settings["night_start"],
-                    night_end_str=settings["night_end"], min_night_kw=settings["min_night_kw"],
-                    night_multiplier=settings["night_multiplier"],
-                )
+                compare_upload_paths: list[Path] = []
+                try:
+                    left_path = save_uploaded_file(request.files.get("left_file"))
+                    compare_upload_paths.append(left_path)
+                    right_path = save_uploaded_file(request.files.get("right_file"))
+                    compare_upload_paths.append(right_path)
+                    comparison, report_path = analyze_interval_file_comparison(
+                        left_path, right_path, tz_name=settings["tz"], night_start_str=settings["night_start"],
+                        night_end_str=settings["night_end"], min_night_kw=settings["min_night_kw"],
+                        night_multiplier=settings["night_multiplier"],
+                    )
+                finally:
+                    # Compare uploads are never recorded against the account, so remove them once analyzed.
+                    for compare_upload_path in compare_upload_paths:
+                        compare_upload_path.unlink(missing_ok=True)
             else:
                 comparison = analyze_history_range_comparison(
                     account_number=account_number,
@@ -15158,7 +16200,7 @@ def create_web_app() -> Flask:
                 target_id=report_path.name,
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             endpoint = "customer_history_page" if actor["kind"] == "customer" else "history_page"
             return redirect(url_for(endpoint, account_number=normalize_account_number(account_number)))
 
@@ -15176,6 +16218,8 @@ def create_web_app() -> Flask:
         staff_user = require_staff_user(api=True)
         if not isinstance(staff_user, dict):
             return staff_user
+        if get_staff_commission_access(int(staff_user["id"])) is not None:
+            return jsonify({"error": "The shared file list is not available to commission access."}), 403
         return jsonify({"input_files": list_input_files(), "report_files": list_report_files()})
 
     @app.get("/api/supported-feeds")
@@ -15352,6 +16396,20 @@ def create_web_app() -> Flask:
         question = str(payload.get("question") or "").strip()
         if not question:
             return jsonify({"error": "Ask a question about the household or its usage history."}), 400
+        if len(question) > HOUSEHOLD_ASSISTANT_MAX_QUESTION_CHARS:
+            return jsonify(
+                {"error": f"Please keep your question under {HOUSEHOLD_ASSISTANT_MAX_QUESTION_CHARS} characters."}
+            ), 400
+        assistant_limit = consume_rate_limit(
+            "household_assistant",
+            f"{actor.get('kind')}:{actor['user']['id']}",
+            HOUSEHOLD_ASSISTANT_RATE_LIMIT,
+            HOUSEHOLD_ASSISTANT_RATE_WINDOW_SECONDS,
+        )
+        if not assistant_limit["allowed"]:
+            response = jsonify({"error": "You have asked a lot of questions recently. Please try again later."})
+            response.headers["Retry-After"] = str(assistant_limit["retry_after"])
+            return response, 429
         target_date = str(payload.get("date") or "").strip() or None
         context = build_household_question_context(str(account_number), question, target_date)
         used_bedrock = False
@@ -15414,6 +16472,8 @@ def create_web_app() -> Flask:
 
         if request.is_json:
             mounted_name = payload.get("input_file")
+            if mounted_name and actor.get("kind") != "staff":
+                return jsonify({"error": "Upload the usage history file to add it to this account."}), 403
             if mounted_name:
                 input_path = resolve_input_file(mounted_name)
                 import_result = import_interval_file_to_db(
@@ -15527,7 +16587,7 @@ def create_web_app() -> Flask:
                 metadata={"energy_company": str(account.get("energy_company") or "")},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(current_account_number)
 
         if normalize_account_number(requested_account_number) != normalize_account_number(current_account_number):
@@ -15556,7 +16616,7 @@ def create_web_app() -> Flask:
                 metadata={"access_level": str(access["access_level"])},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/customer/account-access")
@@ -15586,7 +16646,7 @@ def create_web_app() -> Flask:
             )
             flash("Account access was added.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/account-access/<int:access_id>/delete")
@@ -15652,7 +16712,7 @@ def create_web_app() -> Flask:
             )
             flash("Account access was removed.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/account/data-authorization")
@@ -15684,7 +16744,7 @@ def create_web_app() -> Flask:
             )
             flash("Permission to use this account's utility data is active.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/account/data-authorization/revoke")
@@ -15712,69 +16772,8 @@ def create_web_app() -> Flask:
             )
             flash("Permission was withdrawn. Saved utility access details were removed.")
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
-
-    @app.post("/utility-connection/green-button/<provider_key>/start")
-    def start_green_button_connection(provider_key):
-        account_number = request.form.get("account_number")
-        actor = require_account_actor(account_number, write=True)
-        if not isinstance(actor, dict):
-            return actor
-        try:
-            account = find_account(account_number)
-            provider_key = provider_key.upper()
-            config = green_button_config(provider_key)
-            if not account or green_button_provider_key(account.get("energy_company")) != provider_key:
-                raise ValueError("Choose the matching utility on the Account page first.")
-            if not account_has_active_data_authorization(account_number):
-                raise ValueError("Customer authorization is required before connecting a utility.")
-            state = secrets.token_urlsafe(32)
-            callback = url_for("green_button_callback", provider_key=provider_key, _external=True)
-            scope = str(config.get("scope") or GREEN_BUTTON_DEFAULT_SCOPE)
-            if ";BR=" not in scope:
-                scope = f"{scope};BR={config['bulk_id']}"
-            params = {"response_type": "code", "client_id": config["client_id"], "redirect_uri": callback,
-                      "state": state, "scope": scope}
-            session[GREEN_BUTTON_PENDING_SESSION_KEY] = {"provider_key": provider_key, "account_number": str(account["account_number"]),
-                                                         "state": state, "started_at": timestamp_now()}
-            return redirect(f"{config['authorize_url']}?{urlencode(params)}")
-        except Exception as exc:
-            flash(str(exc))
-            return redirect_back_or_account(account_number)
-
-    @app.get("/utility-connection/green-button/<provider_key>/callback")
-    def green_button_callback(provider_key):
-        pending = session.get(GREEN_BUTTON_PENDING_SESSION_KEY)
-        try:
-            if not isinstance(pending, dict) or pending.get("provider_key") != provider_key.upper() or request.args.get("state") != pending.get("state"):
-                raise ValueError("The utility authorization could not be matched to this account. Start again.")
-            started_at = datetime.fromisoformat(str(pending.get("started_at") or ""))
-            if started_at + timedelta(minutes=GREEN_BUTTON_EXPIRY_MINUTES) <= datetime.now():
-                raise ValueError("The utility authorization session expired. Start again.")
-            actor = require_account_actor(str(pending.get("account_number") or ""), write=True)
-            if not isinstance(actor, dict) or not account_has_active_data_authorization(str(pending["account_number"])):
-                raise ValueError("Customer authorization is required before connecting a utility.")
-            if request.args.get("error"):
-                raise ValueError("The utility authorization was declined or cancelled.")
-            config = green_button_config(provider_key.upper())
-            callback = url_for("green_button_callback", provider_key=provider_key.upper(), _external=True)
-            body = urlencode({"grant_type": "authorization_code", "code": request.args.get("code", ""), "redirect_uri": callback}).encode()
-            auth = base64.b64encode(f"{config['client_id']}:{config['client_secret']}".encode()).decode()
-            headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
-            headers["Authorization"] = f"Basic {auth}"
-            tokens = json.loads(green_button_request(config, config["token_url"], data=body, headers=headers).decode("utf-8"))
-            binding = validate_green_button_customer_resource(provider_key.upper(), tokens, str(pending["account_number"]))
-            secret_payload = serialize_green_button_secret(provider_key.upper(), tokens, binding=binding)
-            parsed_secret = parse_green_button_secret(secret_payload)
-            save_green_button_connection(str(pending["account_number"]), provider_key.upper(), secret_payload, str(parsed_secret["resource_url"]))
-            session.pop(GREEN_BUTTON_PENDING_SESSION_KEY, None)
-            flash(f"{config['label']} is connected. Use Sync now for an immediate refresh.")
-            return redirect(url_for("customer_utility_page", account_number=pending["account_number"]))
-        except Exception as exc:
-            session.pop(GREEN_BUTTON_PENDING_SESSION_KEY, None)
-            flash(str(exc) if isinstance(exc, ValueError) else "The utility connection could not be completed. Start again.")
-            return redirect(url_for("customer_utility_page", account_number=(pending or {}).get("account_number")))
 
     @app.post("/utility-connection/duke/start")
     def start_duke_connection():
@@ -15793,7 +16792,7 @@ def create_web_app() -> Flask:
                 return redirect(existing_url)
             flow = build_duke_authorization_flow()
             return_to = (request.form.get("return_to") or "").strip()
-            if not return_to.startswith("/") or return_to.startswith("//"):
+            if not is_safe_local_path(return_to):
                 return_to = ""
             session[DUKE_OAUTH_PENDING_SESSION_KEY] = {
                 "account_number": str(account["account_number"]),
@@ -15812,7 +16811,7 @@ def create_web_app() -> Flask:
             )
             return redirect(flow["authorization_url"])
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection/duke/complete")
@@ -15879,7 +16878,7 @@ def create_web_app() -> Flask:
                 error_type=type(exc).__name__,
             )
             if isinstance(exc, ValueError):
-                flash(str(exc))
+                flash(user_facing_error_message(exc))
             elif stage == "duke_exchange":
                 flash("Duke could not complete this connection. Start Duke sign-in again and use the newest one-time code.")
             else:
@@ -15910,7 +16909,7 @@ def create_web_app() -> Flask:
                 metadata={"access_method": str(connection["access_method"])},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/utility-connection/<int:connection_id>/delete")
@@ -15948,8 +16947,8 @@ def create_web_app() -> Flask:
         except Exception as exc:
             try:
                 record_utility_connection_sync_failure(account_number, connection_id, exc)
-            except Exception:
-                pass
+            except Exception as record_exc:
+                log_handled_exception("utility.connection_sync_failure_record_failed", record_exc)
             record_actor_event(
                 actor,
                 "utility.connection_sync_failed",
@@ -15958,7 +16957,7 @@ def create_web_app() -> Flask:
                 target_id=connection_id,
                 metadata={"error_type": type(exc).__name__},
             )
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/load-items")
@@ -15985,7 +16984,7 @@ def create_web_app() -> Flask:
                 metadata={"quantity": int(item["quantity"]), "watts_each": float(item["watts_each"])},
             )
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
         return redirect_back_or_account(account_number)
 
     @app.post("/load-items/<int:item_id>/delete")
@@ -16070,7 +17069,7 @@ def create_web_app() -> Flask:
             report_summary = attach_weather_context_to_summary(summary, weather_contexts)
             report_summary.to_csv(report_path, index=True)
         except Exception as exc:
-            flash(str(exc))
+            flash(user_facing_error_message(exc))
             return redirect(url_for("index", account_number=normalize_account_number(account_number)))
 
         analysis = build_report_context(
@@ -16125,12 +17124,16 @@ def create_web_app() -> Flask:
             utility_connections=list_utility_connections(account["account_number"]),
             data_authorizations=list_account_data_authorizations(account["account_number"]),
             has_active_data_authorization=account_has_active_data_authorization(account["account_number"]),
-            staff_team=[] if actor["kind"] == "customer" else list_staff_users(),
-            latest_invite_url=None if actor["kind"] == "customer" else consume_latest_invite_url(),
+            staff_team=[] if actor["kind"] == "customer" else visible_staff_team(actor["user"]),
+            latest_invite_url=None if actor["kind"] in {"customer", "commission"} else consume_latest_invite_url(),
             customer_mode=actor["kind"] == "customer",
             page_title="Your energy history" if actor["kind"] == "customer" else "Commission Review",
         )
 
+    national_grid.register_routes(app, sys.modules[__name__], current_customer_user)
+    xcel.register_routes(app, sys.modules[__name__], current_customer_user)
+    coned_oru.register_routes(app, sys.modules[__name__], current_customer_user)
+    utility_onboarding.register_routes(app, sys.modules[__name__], require_staff_user)
     return app
 
 
@@ -16183,6 +17186,41 @@ def main() -> None:
             sys.exit(1)
         return
 
+    if args.reseal_secrets:
+        try:
+            reseal_summary = reseal_all_secrets()
+        except Exception as exc:
+            print(f"Error resealing secrets: {type(exc).__name__}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Resealed secrets: {reseal_summary['resealed']}")
+        print(f"Unreadable secrets: {reseal_summary['failed']}")
+        if reseal_summary["failed"]:
+            sys.exit(1)
+        return
+
+    if args.list_accounts:
+        for item in account_cleanup.list_accounts_for_review(sys.modules[__name__]):
+            print(json.dumps(item, sort_keys=True))
+        return
+
+    if args.purge_accounts or args.purge_all_except:
+        try:
+            if args.purge_all_except:
+                purge_summary = account_cleanup.purge_all_except(
+                    sys.modules[__name__], args.purge_all_except, confirm=args.confirm_purge
+                )
+            else:
+                purge_summary = account_cleanup.purge_accounts(
+                    sys.modules[__name__], args.purge_accounts, confirm=args.confirm_purge
+                )
+        except Exception as exc:
+            print(f"Error purging accounts: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(purge_summary, sort_keys=True))
+        if not args.confirm_purge:
+            print("Dry run only. Nothing was deleted. Add --confirm-purge to delete.")
+        return
+
     if args.ensure_owner_free_play_code:
         try:
             promotion_summary = ensure_owner_free_play_promotion_code(
@@ -16197,7 +17235,7 @@ def main() -> None:
         return
 
     if not args.input:
-        parser.error("--input is required unless --serve, --sync-utilities, or --ensure-owner-free-play-code is used")
+        parser.error("--input is required unless --serve, --sync-utilities, --reseal-secrets, or --ensure-owner-free-play-code is used")
 
     try:
         if args.compare_to:

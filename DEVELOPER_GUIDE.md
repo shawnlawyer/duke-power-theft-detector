@@ -35,15 +35,15 @@ Tests use temporary paths. Never point tests at the production database.
 | Shared shell | `templates/base.html`, `static/styles.css`, `static/app.js` | signed-in layout, navigation, shared behavior |
 | Customer pages | `templates/customer_*.html`, `templates/history_page.html`, `templates/_account_panel.html` | homeowner account, history, notes, household setup, billing |
 | Review pages | `templates/index.html`, `templates/_analysis_surface.html`, `templates/_staff_panel.html` | commission/reviewer dashboard and drilldowns |
-| Public pages | `templates/marketing_*.html`, `templates/marketing_base.html`, `static/marketing.css` | public website and product copy |
+| Public pages | `templates/marketing_*.html`, `templates/marketing_base.html`, `static/hew-design.css`, `templates/_hew_ui.html` | public website and product copy |
 | Database setup | `migrate_database_postgres()` and `migrate_database()` in `app.py` | Postgres and SQLite schema creation/migrations |
-| Utility adapters | parser classes near `parse_interval_file()` | Green Button ESPI XML, Duke-style XML, and interval CSV |
+| Utility adapters | parser classes near `parse_interval_file()`; `national_grid.py`, `xcel.py`, `coned_oru.py` | Green Button ESPI XML, Duke-style XML, and interval CSV |
 | Tests | `tests/test_app.py`, `tests/test_omen_deploy_contract.py`, `tests/test_release_security_contract.py` | behavior, import, security, and deployment contracts |
 | Production | `deploy/ec2/README.md`, `deploy/ec2/home-energy-watch.service`, `deploy/ec2/home-energy-watch-direct.sh` | EC2 Docker launch and operations |
 
 ## Runtime and data flow
 
-`web_app = create_app()` builds Flask. `ensure_database()` selects the backend from `POWER_DATABASE_URL`:
+`web_app = create_web_app()` builds Flask. `ensure_database()` selects the backend from `POWER_DATABASE_URL`:
 
 - without a Postgres URL: SQLite at `POWER_DB_PATH` or the default output path;
 - with `postgresql://...`: RDS/Postgres through `psycopg`.
@@ -75,7 +75,7 @@ Keep measurement separate from interpretation. A flagged interval is a review pr
 
 Customer and commission identities use separate database records, but the public `/login` flow resolves both through shared, one-time email-link sign-in. Legacy password-reset endpoints remain available only for migration and older platform-operator records; new customer and commission records do not store passwords.
 
-Use the existing helpers inside `create_app()`:
+Use the existing helpers inside `create_web_app()`:
 
 - `current_customer_user()` and `current_staff_user()` validate sessions;
 - `require_customer_user()` and `require_staff_user()` protect page/API access;
@@ -113,6 +113,14 @@ Adapters are selected by `select_utility_feed_adapter()` and return a common int
 
 Keep utility-specific parsing out of route handlers and analysis functions.
 
+### Customer download instructions
+
+`utility_guides.py` holds account-matched download instructions, exact provider aliases, official source links, and the date each source was checked. `_utility_download_guides.html` renders the same instructions on Utility and History, keeping links tied to the selected account. The provider field offers suggestions without restricting manual entry or replacing the existing ZIP lookup.
+
+These guides are not feed adapters, vendor approvals, or automatic connections. They cover Duke, Xcel, SDG&E, Southern California Edison, Pacific Gas & Electric, Central Hudson, Delmarva Power, Central Maine Power, NYSEG, RG&E, PSEG Long Island, and United Illuminating. Do not match PSE&G in New Jersey to PSEG Long Island, or ambiguous "PGE" to California's PG&E instead of Portland General Electric. United Illuminating and Central Hudson hourly export availability, and Delmarva export format/resolution, remain unconfirmed; daily totals do not support overnight analysis. Custom paid data services are outside the free-only launch. SCE customers complete any utility verification on SCE's own site; the download guide does not capture credentials or implement an automatic SCE connection.
+
+Tests cover alias matching, account switching, page rendering, and the existing upload workflow using synthetic supported-format fixtures. A provider's real export must still be checked for timestamps, duration, units, account identity, and quality flags before claiming provider-specific compatibility. Add a guide only with verified official instructions; add or change an adapter separately when a real export requires it.
+
 ### Duke automatic connection
 
 `POST /utility-connection/duke/start` creates a short-lived PKCE flow for an account manager. `POST /utility-connection/duke/complete` exchanges the one-time code, confirms that Duke returned the selected account and an electric meter, and stores only encrypted OAuth material. Never log the authorization code, verifier, access token, refresh token, or ID token.
@@ -121,51 +129,22 @@ Connections use `access_method=duke_oauth`. `sync_utility_connection()` dispatch
 
 Production must run `python app.py --sync-utilities` daily. A failed or expired Duke token should mark the connection failed and tell the customer to connect again; it must not remove existing readings. Keep the manual Duke Usage Details link and History upload UI available even when a Duke automatic connection exists.
 
-### Con Edison and Orange & Rockland connector draft
+### Con Edison and Orange & Rockland connection (switched off)
 
-This connector is **unfinished and disabled**. `GREEN_BUTTON_IMPLEMENTATION_READY`
-is deliberately false in source, independent of deployment settings or utility
-approval. The same check gates the displayed connection controls, authorization
-start/callback, connection save, and manual/scheduled fetch. Do not remove it to
-make a registration or demonstration appear complete. Customer uploads remain
-the supported launch path.
+`coned_oru.py` holds a Green Button Connect My Data connector for Con Edison (`CONED`) and Orange & Rockland (`ORU`), in the same shape as `national_grid.py` and `xcel.py`: `config()`, `available()`, `sync(app_module, connection)`, and `register_routes()`, with `access_method=coned_oru_green_button`.
 
-The draft uses provider-returned resource URIs, encrypted token storage, bounded
-HTTPS requests with no redirects, preserved customer-granted refresh scope, and
-a stored account/subscription binding. Consent and credential checks guard
-refresh and import; conditional credential updates cannot restore a connection
-that was revoked or replaced. Imports acquire consent and connection locks in
-the same transaction as the interval writes. SQLite regression tests exercise
-revocation before import and during refresh/download; PostgreSQL concurrency
-behavior still needs integration testing.
+It is **disabled in source**. `coned_oru.IMPLEMENTATION_READY` is `False` and is deliberately not an environment flag. The same check gates the account-page button, the start and return routes, saving, and manual and scheduled sync. Setting the `POWER_CONED_GREEN_BUTTON_*` / `POWER_ORU_GREEN_BUTTON_*` variables (including `..._APPROVED=true`) is necessary but not sufficient. Customer uploads remain the supported path until it is turned on.
 
-The account check currently accepts only the explicit `AuthorizationModel`
-shape in the published utility Swagger: the selected account, returned resource,
-retail customer, and one matching subscription must agree. Unknown wrappers or
-XML identity responses fail closed. Fixtures are synthetic and do **not** prove
-compatibility with the utility's actual responses. The existing configured
-`resource_url` value is not used to override the customer-specific token response.
+What it already does: provider-returned resource addresses only (the configured scope is sent once at sign-in and never re-requested on refresh), HTTPS-only same-origin requests that never follow redirects and are size-bounded, encrypted token storage, a stored account/subscription binding checked against the utility's `AuthorizationModel` at sign-in and on every sync, one-time sign-in state tied to the browser, a cross-worker sync lease, conditional token replacement that cannot restore a withdrawn or replaced connection, and `connection_guard` on import. HTTP 202 (batch still being prepared) is an error, never an empty import.
 
-Before activation, finish and verify with utility-issued test credentials:
+Before turning it on, verify with utility-issued test credentials and finish:
 
-1. Exact authorization/customer/usage-point relationships, scopes, expiry,
-   revocation responses, and the supported JSON/XML response shapes.
-2. The documented asynchronous batch lifecycle: persist pending requests,
-   authenticate and correlate notifications, fetch every authorized chunk,
-   validate each file's account identity, retry idempotently without duplicate
-   pending requests, and handle expiry. HTTP 202 currently raises an error; it
-   is never recorded as a completed empty export.
-3. Any separately hosted batch-download origins and their credential rules.
-   The draft currently allows only the token endpoint's full HTTPS origin.
-4. Real PostgreSQL concurrent revocation/reconnect/import tests, utility
-   acceptance, documented no-cost access, and explicit approval to activate.
+1. The real authorization/customer/usage-point shapes, scopes, expiry and revocation responses. Fixtures in `tests/test_green_button.py` are synthetic.
+2. The asynchronous batch lifecycle: persisted pending requests, authenticated notifications, fetching every chunk, per-file account checks, idempotent retries.
+3. Any separately hosted download origins (only the token endpoint's origin is allowed today).
+4. PostgreSQL concurrency tests against real reconnect/withdrawal timing, utility acceptance, confirmed no-cost access, and explicit approval.
 
-The current unit/SQLite tests are in `tests/test_green_button.py`. They do not
-replace the utility's acceptance tests or establish provider certification.
-
-Source: [Con Edison Share My Data onboarding guide](https://www.coned.com/-/media/files/coned/documents/accountandbilling/share-my-data/onboarding-doc.pdf),
-including the Swagger and Postman downloads linked on pages 22–23. Do not commit
-signed download URLs, utility credentials, or customer response payloads.
+Source: Con Edison's Share My Data onboarding guide, including the Swagger and Postman downloads it links. Never commit signed download URLs, utility credentials, or customer response payloads.
 
 ## Weather, inventory, and baselines
 
@@ -192,6 +171,10 @@ Billing calls belong in the backend. Plans are defined by `BILLING_PLAN_DEFINITI
 
 Subscribers can create unlimited reports while active. Commission access is free and read-only. Required production variables include `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_HOME`, and `POWER_BILLING_ENABLED`. Keep billing closed until the annual Price ID is installed and verified. Do not create live charges, subscriptions, refunds, or provider configuration changes without explicit approval.
 
+**Paid sign-up writes nothing until payment.** When billing is open, `POST /signup` only runs read-only checks (`check_customer_signup`). It then holds the form in the session, encrypted with `seal_secret_value`, for at most 24 hours. Stripe receives the email, plus an opaque `client_reference_id` of `signup:<random>` and no other form data. The account, profile, access record, policy acceptance, data permission, billing row and audit events are created only in `GET /signup/complete`, after Stripe confirms the checkout is paid and belongs to that browser's reference. That step then tags the Stripe subscription with `customer_user_id`/`account_id`, so later webhooks find the account.
+
+A `checkout.session.completed` webhook for an unfinished sign-up writes no customer data. It logs `billing.signup_checkout_completed` with the Stripe session id only. If a customer paid but lost the browser session, that log line and the Stripe dashboard are how support finds the payment. When billing is closed, sign-up still creates the account right away, because there is no payment step.
+
 ## Route map
 
 | Surface | Main routes |
@@ -201,10 +184,10 @@ Subscribers can create unlimited reports while active. Commission access is free
 | Staff | `/staff`, `/people`, `/utility`, `/inventory`, `/history`, `/audit`, `/data-requests` |
 | Imports/reports | `POST /analyze`, `POST /compare`, `GET /reports/<filename>` |
 | API | `/api/files`, `/api/supported-feeds`, `/api/utility-by-zip`, `/api/day-detail`, `POST /api/analyze` |
-| Billing | `POST /billing/checkout`, `/billing/success`, `/billing/cancel`, `POST /billing/portal`, `POST /stripe/webhook` |
+| Billing | `GET /signup/complete`, `POST /billing/checkout`, `/billing/success`, `/billing/cancel`, `POST /billing/portal`, `POST /stripe/webhook` |
 | Operations | `/health`, `/robots.txt`, `/sitemap.xml` |
 
-Routes are declared inside `create_app()`. Use the route-level authorization helper before loading account data or changing state.
+Routes are declared inside `create_web_app()`. Use the route-level authorization helper before loading account data or changing state.
 
 ## Safe change recipes
 

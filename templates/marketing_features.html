@@ -1,0 +1,115 @@
+{% extends "marketing_base.html" %}
+{% from "_hew_ui.html" import icon, bar_chart %}
+
+{% block content %}
+  <section class="hew-page-hero">
+    <div class="hew-wrap">
+      <span class="hew-eyebrow">Features</span>
+      <h1>Powerful insights. A clearer understanding.</h1>
+      <p class="hew-lead">Explore your electricity use through detailed charts, overnight baselines, weather context, appliance profiles and historical reports.</p>
+    </div>
+  </section>
+
+  <section class="hew-section">
+    <div class="hew-wrap">
+      <div class="hew-detail">
+        <div class="hew-detail-copy">
+          <span class="hew-icon-tile">{{ icon("bars") }}</span>
+          <h2>Usage analytics</h2>
+          <p class="hew-lead">Every reading your utility provides, organized into one timeline you can explore by day, month and period.</p>
+          <ul class="hew-checklist">
+            <li>15-minute, 30-minute or hourly readings kept exactly as recorded</li>
+            <li>A day inspector that shows every interval in a single day</li>
+            <li>Daily and monthly totals in kWh</li>
+          </ul>
+        </div>
+        <div class="hew-card">
+          <div class="hew-dash-top"><h3>Daily Electricity Use</h3><span class="hew-sample-tag">Sample data</span></div>
+          {{ bar_chart([55, 48, 61, 52, 47, 50, 58, 63, 49, 46, 57, 60, 66, 54, 51, 49, 62, 71, 58, 53, 50, 64, 69, 75], width=440, height=150, label="Sample daily electricity use") }}
+        </div>
+      </div>
+
+      <div class="hew-detail is-flipped">
+        <div class="hew-detail-copy">
+          <span class="hew-icon-tile is-blue">{{ icon("moon") }}</span>
+          <h2>Overnight baseline and anomaly detection</h2>
+          <p class="hew-lead">The quiet hours are where a home should be most predictable. Home Energy Watch measures that baseline every night and flags the nights that break from it.</p>
+          <ul class="hew-checklist">
+            <li>Overnight window and thresholds you can adjust</li>
+            <li>Each flag names the rule that produced it</li>
+            <li>Sharp jumps pinpointed to the interval where they began</li>
+          </ul>
+        </div>
+        <div class="hew-card">
+          <div class="hew-dash-top"><h3>Overnight use</h3><span class="hew-sample-tag">Sample data</span></div>
+          {{ bar_chart([30, 32, 29, 31, 33, 30, 28, 31, 32, 30, 74, 78, 76, 80, 77, 79], flagged=(10, 11, 12, 13, 14, 15), width=440, height=150, label="Sample overnight use stepping up after day ten") }}
+        </div>
+      </div>
+
+      <div class="hew-detail">
+        <div class="hew-detail-copy">
+          <span class="hew-icon-tile">{{ icon("fan") }}</span>
+          <h2>Appliance and weather insights</h2>
+          <p class="hew-lead">Put the readings in context. Record the equipment in your home, then compare what it can draw with what the meter recorded. Flagged days include the weather that day.</p>
+          <ul class="hew-checklist">
+            <li>An equipment inventory for heating, cooling, water heating and more</li>
+            <li>High, low, feels-like, rain and wind for flagged days</li>
+            <li>A history of equipment changes alongside your usage</li>
+          </ul>
+        </div>
+        <div class="hew-card">
+          <div class="hew-dash-top"><h3>Appliance inventory</h3><span class="hew-sample-tag">Example</span></div>
+          <ul class="hew-checklist">
+            <li>HVAC system · heat pump, 3.5 ton</li>
+            <li>Water heater · electric, 50 gallon</li>
+            <li>Refrigerator · standard, 22 cu ft</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="hew-detail is-flipped">
+        <div class="hew-detail-copy">
+          <span class="hew-icon-tile is-mint">{{ icon("document") }}</span>
+          <h2>Reports, exports and comparisons</h2>
+          <p class="hew-lead">Line up any two periods, such as this year against last or before and after a repair, and keep the result.</p>
+          <ul class="hew-checklist">
+            <li>Period comparisons that match equivalent dates</li>
+            <li>CSV, JSON and written reports for every analysis</li>
+            <li>Everything on file in one ZIP download</li>
+          </ul>
+        </div>
+        <div class="hew-card">
+          <ul class="hew-checklist">
+            <li>Monthly summary · CSV</li>
+            <li>Overnight usage review · Markdown</li>
+            <li>Period comparison · JSON</li>
+            <li>Complete account archive · ZIP</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="hew-detail">
+        <div class="hew-detail-copy">
+          <span class="hew-icon-tile is-blue">{{ icon("houses") }}</span>
+          <h2>Multi-property tools</h2>
+          <p class="hew-lead">Follow several electric accounts in one workspace, keep notes on each and share access with the people you work with.</p>
+          <p><a href="{{ for_professionals_url }}">See tools for professionals {{ icon("arrow") }}</a></p>
+        </div>
+        <div class="hew-card">
+          <ul class="hew-checklist">
+            <li>Switch between accounts in one click</li>
+            <li>Viewer and manager access for each account</li>
+            <li>A complete activity history for every change</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="hew-cta">
+    <div class="hew-wrap hew-cta-inner">
+      <div><h2>See your own energy story.</h2><p>Start with the file your utility already provides.</p></div>
+      <a class="hew-btn hew-btn-primary" href="{{ start_home_url }}">Explore Your Dashboard</a>
+    </div>
+  </section>
+{% endblock %}

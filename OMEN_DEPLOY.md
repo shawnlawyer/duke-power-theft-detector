@@ -31,7 +31,11 @@ Useful commands:
 
 Runtime data persists on Omen under `runtime/input` and `runtime/output`. The sync step preserves `runtime/`, and the Docker build context ignores it.
 
-Omen runs with `POWER_ENV=staging`. Set a unique `POWER_APP_SECRET` and, when saved utility connections are being tested, a dedicated Fernet key in `POWER_DATA_ENCRYPTION_KEY`. Keep both values only in the ignored `.env.omen` file.
+SSH host keys are pinned on first use (`StrictHostKeyChecking=accept-new`) in `.tmp-deploy/omen_known_hosts` (override with `OMEN_KNOWN_HOSTS`). If Omen is rebuilt and its host key changes, the deploy stops; verify the new key, then remove the old entry from that file.
+
+Container settings and secrets are written to a private temporary env file (mode `600`), copied to `runtime/.omen-deploy.env`, passed with `docker run --env-file`, and deleted after the container starts, so they never appear on the ssh or docker command line. The image runs as a non-root user; on Omen the container runs as the SSH user's uid/gid, and each deploy first hands `runtime/input` and `runtime/output` to that user (fixing files left by older root-run containers).
+
+Omen runs with `POWER_ENV=staging`. `scripts/omen-deploy.sh deploy`, `all`, and `takeover` refuse to run unless `POWER_APP_SECRET` is set, is not the public default `local-power-data-only`, and is at least 32 characters. Set a unique `POWER_APP_SECRET` and, when saved utility connections are being tested, a dedicated Fernet key in `POWER_DATA_ENCRYPTION_KEY`. Keep both values only in the ignored `.env.omen` file.
 
 Omen defaults to `POWER_EMAIL_BACKEND=disabled`, so staging accounts are immediately usable and no email is sent. Set `POWER_EMAIL_BACKEND=memory` only when testing confirmation or password-reset flows inside the app test suite.
 

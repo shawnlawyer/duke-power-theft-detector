@@ -1,0 +1,28 @@
+{% from "_hew_ui.html" import icon %}
+{% macro plan_cards(plans, signup_base, billing=None) -%}
+<div class="hew-plans{% if plans|length == 1 %} is-single{% endif %}">
+  {% for plan in plans %}
+    <article class="hew-card hew-plan{% if plan.featured %} is-featured{% endif %}">
+      {% if plan.featured %}<span class="hew-chip hew-chip-mint">Most Popular</span>{% endif %}
+      <div>
+        <h3>{{ plan.name }}</h3>
+        <p class="hew-plan-summary">{{ plan.summary }}</p>
+      </div>
+      {% set amount, interval = plan.price_label.split(" / ") %}
+      <p class="hew-plan-price">{{ amount }}<small> /{{ interval }}</small></p>
+      <ul class="hew-checklist">
+        {% for label in plan.feature_labels %}<li>{{ label }}</li>{% endfor %}
+        <li>{% if plan.account_limit == 1 %}One electric account{% else %}Up to {{ plan.account_limit }} electric accounts{% endif %}</li>
+      </ul>
+      <div>
+        {% if billing and billing.plan_id == plan.id and billing.status in ["active", "trialing"] %}
+          <span class="hew-btn hew-btn-outline hew-btn-block" aria-disabled="true">Current plan</span>
+        {% else %}
+          <a class="hew-btn {% if plan.featured %}hew-btn-primary{% else %}hew-btn-dark{% endif %} hew-btn-block"
+             href="{{ signup_base }}/signup?plan_id={{ plan.id|urlencode }}">Choose Plan</a>
+        {% endif %}
+      </div>
+    </article>
+  {% endfor %}
+</div>
+{%- endmacro %}

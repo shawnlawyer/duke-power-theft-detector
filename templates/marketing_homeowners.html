@@ -1,36 +1,33 @@
 {% extends "marketing_base.html" %}
+{% from "_hew_ui.html" import icon %}
 
 {% block content %}
-  <main class="marketing-main compact-main">
-    <section class="page-intro">
-      <h1>For homeowners trying to make sense of the meter story.</h1>
-      <p>When the overnight load feels wrong, you need something more useful than a bill total and a guess.</p>
-    </section>
+  <section class="hew-page-hero">
+    <div class="hew-wrap">
+      <span class="hew-eyebrow">For homeowners</span>
+      <h1>Feel more connected to your home.</h1>
+      <p class="hew-lead">Your home is where life happens. Understanding its electricity use helps you make thoughtful decisions about comfort, efficiency and everyday living.</p>
+    </div>
+  </section>
 
-    <section class="feature-grid single-column-grid">
-      <article class="feature-card">
-        <h2>Keep your own record</h2>
-        <p>Bring in the export, store the history, and compare periods without starting from scratch every time a new file arrives.</p>
-      </article>
-      <article class="feature-card">
-        <h2>See whether the overnight pattern really changed</h2>
-        <p>Look at the baseline, the flagged nights, and the months where total use moved enough to deserve a second look.</p>
-      </article>
-      <article class="feature-card">
-        <h2>Bring something concrete into the next call</h2>
-        <p>The point is not to flood the utility with charts. The point is to carry a clean comparison into the next conversation.</p>
-      </article>
-    </section>
+  <section class="hew-section">
+    <div class="hew-wrap">
+      <div class="hew-feature-grid">
+        <article class="hew-card hew-feature"><span class="hew-icon-tile">{{ icon("bars") }}</span><h3>Discover your patterns</h3><p>Explore daily and monthly use, and see how your home behaves overnight.</p></article>
+        <article class="hew-card hew-feature"><span class="hew-icon-tile is-amber">{{ icon("alert") }}</span><h3>Notice what changed</h3><p>See whether your overnight load really moved, and when it started.</p></article>
+        <article class="hew-card hew-feature"><span class="hew-icon-tile is-mint">{{ icon("fan") }}</span><h3>Know your equipment</h3><p>Record your appliances so the readings make sense alongside them.</p></article>
+        <article class="hew-card hew-feature"><span class="hew-icon-tile is-blue">{{ icon("document") }}</span><h3>Keep your own record</h3><p>Bring something concrete to your next conversation with your utility.</p></article>
+      </div>
+    </div>
+  </section>
 
-    <section class="marketing-section final-call">
-      <div>
-        <h2>Start with one account and your latest export.</h2>
-        <p>The setup is meant to be practical, not technical.</p>
+  <section class="hew-cta">
+    <div class="hew-wrap hew-cta-inner">
+      <div><h2>Start with one account and your latest utility file.</h2><p>Setup takes a few minutes.</p></div>
+      <div class="hew-hero-actions">
+        <a class="hew-btn hew-btn-primary" href="{{ start_home_url }}">Create Your Account</a>
+        <a class="hew-btn hew-btn-ghost-light" href="{{ home_login_url }}">Sign In</a>
       </div>
-      <div class="hero-actions">
-        <a class="button button-primary" href="{{ start_home_url }}">Create a homeowner account</a>
-        <a class="button button-secondary" href="{{ home_login_url }}">Sign in</a>
-      </div>
-    </section>
-  </main>
+    </div>
+  </section>
 {% endblock %}

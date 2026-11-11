@@ -1,40 +1,45 @@
 {% extends "marketing_base.html" %}
 
 {% block content %}
-  <main class="marketing-main compact-main legal-page">
-    <section class="page-intro">
-      <p class="mini-label">Effective {{ effective_date }}</p>
+  <section class="hew-page-hero">
+    <div class="hew-wrap">
+      <span class="hew-eyebrow">Effective {{ effective_date }}</span>
       <h1>Terms for using Home Energy Watch</h1>
-      <p>These terms explain what the service does, what it does not do, and what we ask of each account holder and reviewer.</p>
-    </section>
+      <p class="hew-lead">These terms explain what the service does, what it does not do, and what we ask of each account holder and reviewer.</p>
+    </div>
+  </section>
 
-    <section class="legal-section">
+  <section class="hew-section">
+    <div class="hew-wrap hew-prose">
+
+    <section>
       <h2>What the service provides</h2>
       <p>Home Energy Watch stores electricity usage history, compares periods, highlights unusual patterns, and prepares reports for the people who are allowed to review an account.</p>
       <p>A flag is a reason to look more closely. It is not proof of theft, meter tampering, a billing error, or unsafe wiring.</p>
     </section>
 
-    <section class="legal-section">
+    <section>
       <h2>Your account and information</h2>
       <p>You must provide accurate information, protect access to the email address you use to sign in, and use only electric accounts and usage records that you own or are authorized to manage.</p>
       <p>People connected to an account can see the records available to them. A public utility commission with jurisdiction over the account may also review the record for regulatory work, as described when the account is created.</p>
     </section>
 
-    <section class="legal-section">
+    <section>
       <h2>Utility data permission</h2>
       <p>A utility connection cannot be saved until an account manager gives permission. That permission can be withdrawn from the account at any time.</p>
       <p>Home Energy Watch cannot change your utility service, alter your meter, contact emergency services, or act as your electric company.</p>
     </section>
 
-    <section class="legal-section">
+    <section>
       <h2>Subscriptions and availability</h2>
       <p>Each account plan is billed annually. Billing details, cancellation options, and available receipts are provided through your billing page and Stripe checkout.</p>
       <p>We work to keep the service available and accurate, but no software or external utility feed is available without interruption. Keep your original utility records.</p>
     </section>
 
-    <section class="legal-section">
+    <section>
       <h2>Questions</h2>
       <p>Contact <a href="mailto:support@homeenergywatch.com">support@homeenergywatch.com</a> with questions about these terms or your account.</p>
     </section>
-  </main>
+    </div>
+  </section>
 {% endblock %}

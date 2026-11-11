@@ -30,25 +30,7 @@
     {% endfor %}
   </div>
 
-  <div class="compatibility-list" aria-labelledby="get-history-heading">
-    <h3 id="get-history-heading">Get your utility history</h3>
-    {% for guide in utility_access_guides %}
-      {% if guide.id == "duke_download" %}
-        <div class="compatibility-row guide-row">
-          <div>
-            <strong>{{ guide.name }}</strong>
-            <span>{{ guide.summary }}</span>
-          </div>
-          <div class="guide-actions">
-            <a class="button-link" href="{{ guide.action_url }}" target="_blank" rel="noopener">{{ guide.action_label }}</a>
-            {% if guide.secondary_url %}
-              <a class="inline-link" href="{{ guide.secondary_url }}" target="_blank" rel="noopener">{{ guide.secondary_label }}</a>
-            {% endif %}
-          </div>
-        </div>
-      {% endif %}
-    {% endfor %}
-  </div>
+  {% include "_utility_download_guides.html" %}
 
   {% if can_manage_history %}
     <form class="upload-form" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data">

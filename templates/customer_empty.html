@@ -6,8 +6,13 @@
       <div class="section-header">
         <div>
           <p class="section-kicker">Home account</p>
-          <h2>No electric accounts are connected yet.</h2>
-          <p class="plain-note">Ask the account owner or review team to add this email to the electric account you need to review.</p>
+          {% if has_disabled_account %}
+            <h2>This account has been disabled.</h2>
+            <p class="plain-note">Contact support@homeenergywatch.com if you think this is a mistake.</p>
+          {% else %}
+            <h2>No electric accounts are connected yet.</h2>
+            <p class="plain-note">Ask the account owner or review team to add this email to the electric account you need to review.</p>
+          {% endif %}
         </div>
       </div>
     </section>

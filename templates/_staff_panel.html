@@ -7,7 +7,7 @@
     </div>
   </div>
 
-  {% if staff_user.role == "Commissioner" %}
+  {% if staff_user.role in staff_admin_roles and not commission_read_only|default(false) %}
     <form class="account-form" action="{{ url_for('invite_staff') }}" method="post">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
       <input type="hidden" name="return_to" value="{{ request.full_path if request.query_string else request.path }}">
@@ -23,7 +23,7 @@
         <label>
           <span>Access</span>
           <select name="role">
-            {% for role in staff_roles %}
+            {% for role in staff_roles if role != "Owner" or staff_user.role == "Owner" %}
               <option value="{{ role }}" {% if role == "Analyst" %}selected{% endif %}>{{ role }}</option>
             {% endfor %}
           </select>
@@ -50,7 +50,7 @@
           <th>Status</th>
           <th>Authenticator</th>
           <th>Last sign-in</th>
-          {% if staff_user.role == "Commissioner" %}<th>Manage</th>{% endif %}
+          {% if staff_user.role in staff_admin_roles and not commission_read_only|default(false) %}<th>Manage</th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -70,16 +70,16 @@
             </td>
             <td><span class="pill{% if not member.mfa_enabled %} danger{% endif %}">{{ "On" if member.mfa_enabled else "Off" }}</span></td>
             <td>{{ member.last_login_at or "Not yet" }}</td>
-            {% if staff_user.role == "Commissioner" %}
+            {% if staff_user.role in staff_admin_roles and not commission_read_only|default(false) %}
               <td>
-                {% if member.id != staff_user.id %}
+                {% if member.id != staff_user.id and (member.role != "Owner" or staff_user.role == "Owner") %}
                   <div class="staff-manage-stack">
                     <form class="staff-access-form" action="{{ url_for('update_staff_access', staff_user_id=member.id) }}" method="post">
                       <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                       <label>
                         <span class="visually-hidden">Access for {{ member.full_name }}</span>
                         <select name="role" aria-label="Access for {{ member.full_name }}">
-                          {% for role in staff_roles %}
+                          {% for role in staff_roles if role != "Owner" or staff_user.role == "Owner" %}
                             <option value="{{ role }}" {% if member.role == role %}selected{% endif %}>{{ role }}</option>
                           {% endfor %}
                         </select>

@@ -10,3 +10,9 @@ runtime/
 .env.omen
 deploy/ec2/.env.production
 .tmp-*
+.context
+.DS_Store
+**/.DS_Store
+_to_delete/
+.tmp-deploy/
+.claude/

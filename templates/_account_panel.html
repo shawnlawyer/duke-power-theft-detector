@@ -45,9 +45,16 @@
     <button type="submit" class="button-secondary">Search</button>
   </form>
 
+  {% set can_admin_accounts = staff_user and staff_user.role in staff_admin_roles and not commission_read_only and not is_customer %}
+  {% set can_toggle_accounts = can_admin_accounts and staff_user.role == 'Owner' %}
   {% if known_accounts %}
-    <div class="account-chip-list">
+    <div class="account-chip-list{% if can_admin_accounts %} is-selectable{% endif %}">
       {% for known in known_accounts %}
+        {% if can_admin_accounts %}
+          <label class="account-select">
+            <input type="checkbox" name="account_numbers" value="{{ known.account_number }}" form="account-bulk-actions" aria-label="Select account {{ known.account_number }}">
+          </label>
+        {% endif %}
         <a
           class="account-chip {% if known.account_number == current_account.account_number %}active{% endif %}"
           href="{{ url_for(account_list_endpoint, account_number=known.account_number, account_search=current_account_page.search if current_account_page else '', account_page=current_account_page.page if current_account_page else 1) }}"
@@ -58,9 +65,26 @@
           {% else %}
             <span>Account {{ known.account_number }}</span>
           {% endif %}
+          {% if known.disabled_at %}<em class="account-status-badge">Disabled</em>{% endif %}
         </a>
       {% endfor %}
     </div>
+    {% if can_admin_accounts %}
+      <form id="account-bulk-actions" class="account-admin-bar" action="{{ url_for('manage_accounts') }}" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="return_to" value="{{ return_path }}">
+        <span class="account-admin-label">Selected accounts</span>
+        {% if can_toggle_accounts %}
+          <button type="submit" name="action" value="disable" class="button-secondary button-small">Disable</button>
+          <button type="submit" name="action" value="enable" class="button-secondary button-small">Enable</button>
+        {% endif %}
+        <label class="account-delete-confirm">
+          <span>Type DELETE to delete</span>
+          <input type="text" name="confirm_delete" autocomplete="off" placeholder="DELETE">
+        </label>
+        <button type="submit" name="action" value="delete" class="button-small danger">Delete</button>
+      </form>
+    {% endif %}
     {% if current_account_page %}
       <div class="pagination-row">
         <span>{{ current_account_page.total }} customer{{ '' if current_account_page.total == 1 else 's' }}</span>
@@ -75,6 +99,38 @@
         </div>
       </div>
     {% endif %}
+  {% endif %}
+
+  {% if can_admin_accounts and current_account %}
+    <div class="account-admin-panel">
+      <div>
+        <strong>Account status: {{ "Disabled" if current_account.disabled_at else "Active" }}</strong>
+        <p class="plain-note">
+          {% if current_account.disabled_at %}
+            Disabled {{ current_account.disabled_at[:10] }}. Customers can't open it and automatic updates are paused.
+          {% else %}
+            Disabling keeps the record but blocks customer access and automatic updates.
+          {% endif %}
+        </p>
+      </div>
+      <form class="account-admin-bar" action="{{ url_for('manage_accounts') }}" method="post">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="return_to" value="{{ return_path }}">
+        <input type="hidden" name="account_numbers" value="{{ current_account.account_number }}">
+        {% if can_toggle_accounts %}
+          {% if current_account.disabled_at %}
+            <button type="submit" name="action" value="enable" class="button-secondary button-small">Enable account</button>
+          {% else %}
+            <button type="submit" name="action" value="disable" class="button-secondary button-small">Disable account</button>
+          {% endif %}
+        {% endif %}
+        <label class="account-delete-confirm">
+          <span>Type DELETE to delete this account</span>
+          <input type="text" name="confirm_delete" autocomplete="off" placeholder="DELETE">
+        </label>
+        <button type="submit" name="action" value="delete" class="button-small danger">Delete account</button>
+      </form>
+    </div>
   {% endif %}
 
   <form
@@ -98,7 +154,8 @@
       </label>
       <label>
         <span>Utility / provider name</span>
-        <input type="text" name="energy_company" value="{{ current_account.energy_company }}" maxlength="100" placeholder="Duke Energy, Xcel Energy, or your local utility">
+        <input type="text" name="energy_company" value="{{ current_account.energy_company }}" list="utility-provider-options" maxlength="100" placeholder="Duke Energy, Xcel Energy, or your local utility">
+        {% include "_utility_provider_options.html" %}
         <small>Leave this blank if you want the ZIP code to suggest the provider.</small>
       </label>
       <label>
@@ -380,7 +437,7 @@
     <div>
       <p class="section-kicker">Utility connection</p>
       <h2>Keep the data source clear.</h2>
-      <p class="plain-note">Connect Duke for daily updates, or download and upload a utility file whenever you prefer. Both paths stay available.</p>
+      <p class="plain-note">Download your electricity history from your utility, then upload it here. The instructions below follow the utility saved on this account.</p>
     </div>
   </div>
 
@@ -429,24 +486,64 @@
     {% endif %}
   </div>
 
-  <div class="access-guide-grid" aria-label="Ways to bring in utility history">
-    {% for guide in utility_access_guides %}
-      <article class="access-guide-card">
-        <p class="section-kicker">{{ guide.status }}</p>
-        <h3>{{ guide.name }}</h3>
-        <p class="plain-note">{{ guide.summary }}</p>
-        <div class="guide-actions">
-          <a class="button-link" href="{{ guide.action_url }}" target="_blank" rel="noopener">{{ guide.action_label }}</a>
-          {% if guide.secondary_url %}
-            <a class="inline-link" href="{{ guide.secondary_url }}" target="_blank" rel="noopener">{{ guide.secondary_label }}</a>
-          {% endif %}
-        </div>
-      </article>
-    {% endfor %}
-  </div>
+  {% include "_utility_download_guides.html" %}
 
   {% set provider_is_duke = 'duke' in ((selected_connection_provider or '')|lower) %}
-  {% set provider_is_xcel = 'xcel' in ((selected_connection_provider or '')|lower) %}
+  {% if xcel_provider_matches(selected_connection_provider) %}
+    <div class="connection-workflow">
+      <h3>Connect your Xcel account</h3>
+      {% if xcel_available %}
+        <p class="plain-note">Sign in with Xcel in a new tab and choose what to share. Then confirm which electric meters belong to this account. Your password and verification codes stay with Xcel.</p>
+        {% if is_customer and can_manage_account %}
+          <form action="{{ url_for('xcel_start') }}" method="post" target="_blank" rel="noopener">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+            <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Connect Xcel</button>
+          </form>
+        {% endif %}
+        <p class="plain-note">Choose Sync now after connecting. Daily updates use completed electric-meter readings; estimates remain gaps. Remove the connection to stop updates here, and manage sharing with Xcel to withdraw permission there too.</p>
+      {% else %}
+        <p class="plain-note">Automatic updates are being prepared. You can still download your Xcel history and upload it here.</p>
+      {% endif %}
+    </div>
+  {% endif %}
+  {% if national_grid_provider_matches(selected_connection_provider) %}
+    <div class="connection-workflow">
+      <h3>Connect your National Grid account</h3>
+      {% if national_grid_available %}
+        <p class="plain-note">Sign in with National Grid in a new tab and choose what to share. Your password and verification codes stay with National Grid. We'll match your electric account before importing any readings.</p>
+        {% if is_customer and can_manage_account %}
+          <form action="{{ url_for('national_grid_start') }}" method="post" target="_blank" rel="noopener">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+            <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Connect National Grid</button>
+          </form>
+        {% endif %}
+        <p class="plain-note">Once connected, choose Sync now to bring in your history. Daily updates use completed electric-meter readings. Estimated readings stay out of your measured history. You can stop future updates by removing the connection below; manage sharing with National Grid to withdraw permission there too.</p>
+      {% else %}
+        <p class="plain-note">Automatic updates are being prepared. You can still download your National Grid history and upload it here.</p>
+      {% endif %}
+    </div>
+  {% endif %}
+  {% set green_button_key = coned_oru_provider_key(selected_connection_provider) %}
+  {% if green_button_key %}
+    <div class="connection-workflow">
+      <h3>Connect your {{ selected_connection_provider }} account</h3>
+      {% if coned_oru_available(green_button_key) %}
+        <p class="plain-note">Sign in with {{ selected_connection_provider }} in a new tab and choose what to share. Your password stays with the utility. We'll match your account before importing any readings.</p>
+        {% if is_customer and can_manage_account %}
+          <form action="{{ url_for('coned_oru_start', key=green_button_key|lower) }}" method="post" target="_blank" rel="noopener">
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
+            <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Connect {{ selected_connection_provider }}</button>
+          </form>
+        {% endif %}
+        <p class="plain-note">Choose Sync now after connecting. Estimated readings stay out of your measured history. Remove the connection to stop updates here, and manage sharing with the utility to withdraw permission there too.</p>
+      {% else %}
+        <p class="plain-note">Automatic updates are being prepared. You can still download your Green Button history from {{ selected_connection_provider }} and upload it here.</p>
+      {% endif %}
+    </div>
+  {% endif %}
   {% if provider_is_duke %}
     <div class="connection-workflow">
       <div class="section-header">
@@ -502,45 +599,6 @@
           <a class="inline-link" href="{{ url_for('history_page', account_number=current_account.account_number) }}">Upload it from History</a>.
         {% endif %}
       </p>
-    </div>
-  {% endif %}
-
-  {% if provider_is_xcel %}
-    <div class="connection-workflow">
-      <div class="section-header">
-        <div>
-          <p class="section-kicker">Xcel Energy file connection</p>
-          <h3>Download your Xcel history, then upload it here.</h3>
-          <p class="plain-note">Xcel's customer download is available now. Home Energy Watch reads the Green Button XML file and adds it to this account's existing history. A live Xcel connection is not available until Xcel approves the provider registration and supplies the technical onboarding details.</p>
-        </div>
-      </div>
-      <ol class="workflow-steps">
-        <li><strong>Open Xcel My Account.</strong><span>Sign in to Xcel Energy and open the usage or Green Button Download My Data area.</span><a class="inline-link" href="https://myenergy.xcelenergy.com/" target="_blank" rel="noopener">Open Xcel My Account</a></li>
-        <li><strong>Download the Green Button file.</strong><span>Choose the account and date range, then save the XML file to your computer.</span></li>
-        <li><strong>Upload it from History.</strong><span>Use the History page for this account. New readings are added without overwriting older readings when files overlap.</span>
-          {% if is_customer %}<a class="inline-link" href="{{ url_for('customer_history_page', account_number=current_account.account_number) }}">Open History</a>{% else %}<a class="inline-link" href="{{ url_for('history_page', account_number=current_account.account_number) }}">Open History</a>{% endif %}
-        </li>
-      </ol>
-    </div>
-  {% endif %}
-
-  {% set green_button_provider = (selected_connection_provider or '')|lower %}
-  {% set green_button_key = 'CONED' if 'con edison' in green_button_provider else ('ORU' if ('orange & rockland' in green_button_provider or 'orange and rockland' in green_button_provider) else '') %}
-  {% if green_button_key and green_button_key|lower in (configured_green_button_providers|default([])) %}
-    <div class="connection-workflow">
-      <div class="section-header"><div>
-        <p class="section-kicker">Green Button Connect My Data</p>
-        <h3>Keep {{ selected_connection_provider }} history updated.</h3>
-        <p class="plain-note">You approve access through your utility. Home Energy Watch stores the resulting connection securely and keeps file upload available.</p>
-      </div></div>
-      {% if can_manage_account %}
-        <form action="{{ url_for('start_green_button_connection', provider_key=green_button_key) }}" method="post">
-          <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
-          <input type="hidden" name="account_number" value="{{ current_account.account_number }}">
-          <button type="submit" {% if not data_permission_active %}disabled{% endif %}>Connect through {{ selected_connection_provider }}</button>
-        </form>
-      {% endif %}
-      {% if not data_permission_active %}<p class="plain-note">Give account permission above before starting the utility connection.</p>{% endif %}
     </div>
   {% endif %}
 
@@ -635,7 +693,7 @@
                 {% endif %}
               </td>
               <td>
-                {% if connection.access_method == 'duke_oauth' %}
+                {% if connection.access_method in ['duke_oauth', 'national_grid_oauth', 'xcel_oauth'] %}
                   Encrypted connection
                 {% elif connection.secret_last4 %}
                   Ending {{ connection.secret_last4 }}
