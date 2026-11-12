@@ -748,7 +748,7 @@ body.hew {
   gap: 8px;
   align-content: start;
   padding: 22px;
-  border-left: 4px solid var(--hew-amber-500);
+  border-left: 4px solid var(--hew-mint-500);
 }
 .hew-limit strong {
   font-family: var(--hew-font-display);
