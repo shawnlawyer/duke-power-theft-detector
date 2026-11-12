@@ -3360,11 +3360,11 @@ def test_marketing_host_renders_public_homepage(tmp_path, monkeypatch):
     # Sample figures are labelled, and no cost estimate is claimed.
     assert b"Sample data" in response.data
     assert b"Est. cost" not in response.data
-    # The public page must keep stating the limits the product is honest about.
-    assert b"Duke automatic updates require a one-time setup." in response.data
-    assert b"It never receives your Duke password." in response.data
-    assert b"It is not live monitoring." in response.data
-    assert b"not proof of theft" in response.data
+    # The public page still states how the product works, framed by what it does.
+    assert b"Duke automatic updates take one quick setup." in response.data
+    assert b"Your password and verification stay with Duke." in response.data
+    assert b"New readings appear as your utility makes them available" in response.data
+    assert b"What a change means is for you to decide." in response.data
     assert b">Features</a>" in response.data
     assert b">For Professionals</a>" in response.data
     assert b">Get Started</a>" in response.data
@@ -3476,7 +3476,7 @@ def test_marketing_pricing_page_uses_public_copy(tmp_path, monkeypatch):
     assert b"signup?plan_id=home" in response.data
     for name in (b"Essential", b"<h3>Plus</h3>", b"<h3>Professional</h3>", b"/month"):
         assert name not in response.data
-    assert b"commission access remains free and read-only" in response.data
+    assert b"commission access is free, with read-only review" in response.data
     assert b"Pricing being finalized" not in response.data
 
 
