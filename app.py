@@ -674,6 +674,16 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Sync saved utility connections once and exit",
     )
     parser.add_argument(
+        "--xcel-check-service",
+        action="store_true",
+        help="Validate Xcel client credentials (ApplicationInformation, ReadServiceStatus) without customer data",
+    )
+    parser.add_argument(
+        "--xcel-process-queue",
+        action="store_true",
+        help="Fetch data for queued Xcel notifications and exit",
+    )
+    parser.add_argument(
         "--ensure-owner-free-play-code",
         action="store_true",
         help="Find or create the bounded owner promotion code for Stripe Checkout testing",
@@ -12989,6 +12999,7 @@ def create_web_app() -> Flask:
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     marketing_endpoints = {
         "index",
+        "xcel_notification",  # Registered with Xcel on the public domain; POSTs cannot be redirected.
         "pricing_page",
         "how_it_works_page",
         "for_homeowners_page",
@@ -17175,8 +17186,22 @@ def main() -> None:
         web_app.run(host=args.host, port=args.port, debug=False)
         return
 
+    if args.xcel_check_service:
+        try:
+            print(json.dumps(xcel.check_service(), indent=2, sort_keys=True))
+        except Exception as exc:
+            print(f"Xcel service check failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        return
+
+    if args.xcel_process_queue:
+        print(json.dumps(xcel.process_fetch_queue(sys.modules[__name__])))
+        return
+
     if args.sync_utilities:
         try:
+            if not args.account_number:
+                xcel.process_fetch_queue(sys.modules[__name__])  # Notification fetches first.
             sync_summary = run_scheduled_utility_sync(account_number=args.account_number)
         except Exception as exc:
             print(f"Error syncing utilities: {exc}", file=sys.stderr)

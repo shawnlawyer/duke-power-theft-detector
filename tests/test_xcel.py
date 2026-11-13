@@ -64,6 +64,7 @@ def setup(tmp_path, monkeypatch):
         raise AssertionError("Unexpected URL: " + url)
 
     monkeypatch.setattr(xc, "transport", transport)
+    monkeypatch.setattr(xc, "start_queue_worker", lambda api: None)  # Tests run the queue directly.
     client = app.web_app.test_client()
     customer_sign_in(client)
     return client, calls, user
@@ -172,7 +173,7 @@ def test_csrf_and_notification_has_no_network_or_connection_effect(setup, monkey
         anonymous = app.web_app.test_client()
         response = anonymous.post(xc.NOTIFICATION, data=body, content_type="application/atom+xml")
         assert response.status_code == 202
-        assert response.json == {"status": "accepted", "collection": "scheduled" if enabled == "true" else "disabled"}
+        assert response.json == {"status": "accepted"}
         assert anonymous.post(xc.NOTIFICATION, data=body, content_type="application/atom+xml").json == response.json
         assert client.post(xc.NOTIFICATION, data="<broken", content_type="application/xml").status_code == 400
         assert client.post(xc.NOTIFICATION, data='<!DOCTYPE foo [<!ENTITY e SYSTEM "file:///etc/passwd">]><foo>&e;</foo>', content_type="application/xml").status_code == 400
@@ -308,3 +309,136 @@ def test_transport_revocation_redirects_and_disabled_guard(setup, monkeypatch):
     with pytest.raises(xc.ConnectionError):
         REAL_TRANSPORT(METER, token="access")
     assert len(calls) == 1
+
+
+
+# --- Registered URLs, notification queue and service check ---------------------
+
+def notify(client, sub="sub1", query="", content_type="application/atom+xml"):
+    body = f'<BatchList xmlns="http://naesb.org/espi"><resources>{xc.RESOURCE}Batch/Subscription/{sub}{query}</resources></BatchList>'
+    return client.post(xc.NOTIFICATION, data=body, content_type=content_type)
+
+
+def queued():
+    with app.get_db_connection() as conn:
+        return [r["connection_id"] for r in conn.execute("SELECT connection_id FROM xcel_fetch_queue")]
+
+
+def test_registered_paths():
+    assert xc.CALLBACK == "/api/integrations/xcel/callback"
+    assert xc.NOTIFICATION == "/api/integrations/xcel/notifications"
+
+
+@pytest.mark.parametrize("uri,ok", [
+    ("https://homeenergywatch.com/api/integrations/xcel/callback", True),
+    ("https://app.homeenergywatch.com/api/integrations/xcel/callback", True),
+    ("https://evil.example/api/integrations/xcel/callback", False),
+    ("https://homeenergywatch.com/utility-connection/xcel/callback", False),
+    ("http://homeenergywatch.com/api/integrations/xcel/callback", False),
+])
+def test_redirect_uri_must_be_registered_path_on_our_domain(setup, monkeypatch, uri, ok):
+    monkeypatch.setenv("POWER_PUBLIC_BASE_URL", "https://app.homeenergywatch.com")
+    monkeypatch.setenv("POWER_XCEL_REDIRECT_URI", uri)
+    assert xc.available() is ok
+
+
+def test_public_domain_serves_notifications_and_forwards_callback(setup, monkeypatch):
+    monkeypatch.setenv("POWER_MARKETING_HOSTS", "homeenergywatch.com")
+    monkeypatch.setenv("POWER_PUBLIC_BASE_URL", "https://app.homeenergywatch.com")
+    apex = app.web_app.test_client()
+    body = f'<BatchList xmlns="http://naesb.org/espi"><resources>{xc.RESOURCE}Batch/Subscription/unknown</resources></BatchList>'
+    response = apex.post(xc.NOTIFICATION, data=body, content_type="application/atom+xml", base_url="https://homeenergywatch.com")
+    assert response.status_code == 202  # Served on the apex, not redirected.
+    callback = apex.get(xc.CALLBACK + "?state=abc&code=xyz", base_url="https://homeenergywatch.com")
+    assert callback.status_code == 302
+    assert callback.location == "https://app.homeenergywatch.com" + xc.CALLBACK + "?state=abc&code=xyz"
+
+
+def test_notification_queues_fetch_built_from_our_own_bindings(setup):
+    client, calls, _ = setup
+    connection = complete(client)
+    calls.clear()
+    response = notify(app.web_app.test_client(), query="?published-min=2026-01-01T00:00:00Z&amp;published-max=2026-01-02T00:00:00Z")
+    assert response.status_code == 202 and response.json == {"status": "accepted"}
+    assert queued() == [connection["id"]]
+    assert not calls  # Nothing is fetched while answering Xcel.
+    result = xc.process_fetch_queue(app)
+    assert result == {"processed": 1, "failed": 0}
+    assert queued() == []
+    fetched = [url for url, _ in calls if not _.get("form")]
+    assert xc.RESOURCE + "Batch/" + METER[len(xc.RESOURCE):] in fetched
+    assert all("published-" not in url and "evil" not in url for url in fetched)
+    assert all(kw.get("token") == "secret-access" for url, kw in calls if not kw.get("form"))
+    assert len(app.load_intervals_from_db("123456")) == 1
+
+
+def test_unknown_or_disabled_notifications_queue_nothing(setup, monkeypatch):
+    client, calls, _ = setup
+    complete(client)
+    notify(app.web_app.test_client(), sub="someone-else")
+    assert queued() == []
+    monkeypatch.setenv("POWER_XCEL_ENABLED", "false")
+    notify(app.web_app.test_client())
+    assert queued() == []
+    assert xc.process_fetch_queue(app) == {"processed": 0, "failed": 0}
+
+
+def test_repeated_notifications_collapse_to_one_fetch(setup):
+    client, calls, _ = setup
+    connection = complete(client)
+    for _ in range(5):
+        notify(app.web_app.test_client())
+    assert queued() == [connection["id"]]
+
+
+def test_revoked_connection_is_not_queued(setup):
+    client, _, user = setup
+    complete(client)
+    app.revoke_account_data_authorization("123456", int(user["id"]))
+    notify(app.web_app.test_client())
+    assert queued() == []
+
+
+def test_service_check_uses_client_credentials_only(setup, monkeypatch):
+    monkeypatch.setenv("POWER_XCEL_ENABLED", "false")  # Works before customer collection is switched on.
+    seen = []
+    app_info = xc.RESOURCE + "ApplicationInformation/app42"
+
+    def transport(url, **kwargs):
+        seen.append((url, kwargs))
+        if kwargs.get("form"):
+            return json.dumps({"access_token": "client-token", "token_type": "Bearer", "expires_in": 86400,
+                               "scope": "FB=34 35", "resourceURI": app_info}).encode()
+        if url == app_info:
+            return (b'<entry xmlns="http://www.w3.org/2005/Atom"><content><ApplicationInformation xmlns="http://naesb.org/espi">'
+                    b'<dataCustodianApplicationStatus>2</dataCustodianApplicationStatus>'
+                    b'<redirect_uri>https://homeenergywatch.com/api/integrations/xcel/callback</redirect_uri>'
+                    b'<thirdPartyNotifyUri>https://homeenergywatch.com/api/integrations/xcel/notifications</thirdPartyNotifyUri>'
+                    b'</ApplicationInformation></content></entry>')
+        if url == xc.RESOURCE + "ReadServiceStatus":
+            return b'<ServiceStatus xmlns="http://naesb.org/espi"><currentStatus>1</currentStatus></ServiceStatus>'
+        raise AssertionError(url)
+    monkeypatch.setattr(xc, "transport", transport)
+    result = xc.check_service()
+    assert seen[0][1]["form"] == {"grant_type": "client_credentials", "scope": "FB=34 35"}
+    assert all(kw.get("service_check") for _, kw in seen)
+    assert result["service_status"] == "1"
+    assert result["application_information"] == "app42"
+    assert result["registered_notification_uri"].endswith(xc.NOTIFICATION)
+
+
+def test_service_check_rejects_foreign_application_address(setup, monkeypatch):
+    monkeypatch.setattr(xc, "transport", lambda url, **kw: json.dumps({
+        "access_token": "t", "token_type": "Bearer", "resourceURI": "https://evil.example/ApplicationInformation/1"}).encode())
+    with pytest.raises(xc.ConnectionError):
+        xc.check_service()
+
+
+def test_real_transport_allows_service_check_without_collection_switch(monkeypatch):
+    monkeypatch.setenv("POWER_XCEL_ENABLED", "false")
+    for key in ("CLIENT_ID", "CLIENT_SECRET", "REDIRECT_URI"):
+        monkeypatch.delenv("POWER_XCEL_" + key, raising=False)
+    with pytest.raises(xc.ConnectionError):
+        REAL_TRANSPORT(xc.RESOURCE + "ReadServiceStatus", token="t", service_check=True)
+    with pytest.raises(xc.ConnectionError):
+        REAL_TRANSPORT(xc.RESOURCE + "ReadServiceStatus", token="t")
