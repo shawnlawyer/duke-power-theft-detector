@@ -1,7 +1,15 @@
 """Xcel Green Button connection; disabled until explicitly configured and approved.
 
-Notifications are untrusted hints, never retrieval instructions. Customer-selected
-electric UsagePoints are bound to one account; Xcel supplies no account number.
+Registered with Xcel:
+  Redirect URL      https://homeenergywatch.com/api/integrations/xcel/callback
+  Notification URL  https://homeenergywatch.com/api/integrations/xcel/notifications
+
+Notifications are untrusted hints, never retrieval instructions: a known
+subscription only queues a fetch that is built from our own stored bindings
+against the configured Xcel host. Customer-selected electric UsagePoints
+(ServiceCategory kind=0) are bound to one account; Xcel supplies no account
+number, and file_id is ignored. Batch/Bulk and RetailCustomerInfo are not
+used (Xcel returns 501 and 405 for them).
 """
 from __future__ import annotations
 
@@ -22,11 +30,12 @@ from lxml import etree
 import pandas as pd
 
 METHOD = "xcel_oauth"
-CALLBACK = "/utility-connection/xcel/callback"
-NOTIFICATION = "/utility-connection/xcel/notifications"
+CALLBACK = "/api/integrations/xcel/callback"
+NOTIFICATION = "/api/integrations/xcel/notifications"
 BASE = "https://xe.planetecosystems.com/greenbutton-connect/gbc/espi/1_1/"
 RESOURCE = BASE + "resource/"
 SCOPE = "FB=1 3 4 5 10 13 15 31 37 39"
+CLIENT_SCOPE = "FB=34 35"  # Client-credentials tokens: ApplicationInformation, ReadServiceStatus.
 NS = {"a": "http://www.w3.org/2005/Atom", "e": "http://naesb.org/espi"}
 LIMIT = 25 * 1024 * 1024
 ID = r"[A-Za-z0-9_-]{1,128}"
@@ -40,17 +49,29 @@ class AuthorizationExpired(ConnectionError):
     pass
 
 
-def config():
+def allowed_redirect_hosts():
+    hosts = {urlsplit(os.getenv("POWER_PUBLIC_BASE_URL", "")).netloc}
+    hosts |= {h.strip().lower() for h in os.getenv("POWER_MARKETING_HOSTS", "homeenergywatch.com,www.homeenergywatch.com").split(",")}
+    return {h for h in hosts if h}
+
+
+def credentials():
+    """Client credentials and registered redirect, without the customer-collection switch."""
     values = {k: os.getenv("POWER_XCEL_" + k, "").strip() for k in
               ("CLIENT_ID", "CLIENT_SECRET", "REDIRECT_URI")}
-    if os.getenv("POWER_XCEL_ENABLED", "").lower() != "true" or not all(values.values()):
+    if not all(values.values()):
         raise ConnectionError("Xcel automatic updates are not available yet. You can still upload your history.")
-    public = urlsplit(os.getenv("POWER_PUBLIC_BASE_URL", ""))
     target = urlsplit(values["REDIRECT_URI"])
     if (target.scheme != "https" or not target.netloc or target.username or
-            target.netloc != public.netloc or target.path != CALLBACK or target.query or target.fragment):
+            target.netloc not in allowed_redirect_hosts() or target.path != CALLBACK or target.query or target.fragment):
         raise ConnectionError("Xcel's return address needs attention.")
     return values
+
+
+def config():
+    if os.getenv("POWER_XCEL_ENABLED", "").lower() != "true":
+        raise ConnectionError("Xcel automatic updates are not available yet. You can still upload your history.")
+    return credentials()
 
 
 def available():
@@ -85,14 +106,16 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def transport(url, *, token=None, form=None, client=None):
-    config()  # Every outbound path is guarded, including refresh and notifications.
+def transport(url, *, token=None, form=None, client=None, service_check=False):
+    # Every outbound path is guarded, including refresh and notifications. The
+    # service check (client credentials, no customer data) only needs credentials.
+    credentials() if service_check else config()
     headers = {"Accept": "application/json" if form else "application/atom+xml,application/xml"}
     if form:
         if url != BASE + "oauth/token":
             raise ConnectionError("Unexpected Xcel token address.")
-        credentials = base64.b64encode((client["CLIENT_ID"] + ":" + client["CLIENT_SECRET"]).encode()).decode()
-        headers.update({"Authorization": "Basic " + credentials, "Content-Type": "application/x-www-form-urlencoded"})
+        basic = base64.b64encode((client["CLIENT_ID"] + ":" + client["CLIENT_SECRET"]).encode()).decode()
+        headers.update({"Authorization": "Basic " + basic, "Content-Type": "application/x-www-form-urlencoded"})
     else:
         resource_url(url)
         headers["Authorization"] = "Bearer " + token
@@ -276,6 +299,10 @@ def ensure_schema(conn):
         connection_id BIGINT PRIMARY KEY, lease TEXT NOT NULL, expires_at BIGINT NOT NULL)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS xcel_meter_bindings (
         meter_url TEXT PRIMARY KEY, account_id BIGINT NOT NULL, connection_id BIGINT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS xcel_subscriptions (
+        subscription TEXT PRIMARY KEY, connection_id BIGINT NOT NULL)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS xcel_fetch_queue (
+        connection_id BIGINT PRIMARY KEY, requested_at BIGINT NOT NULL)""")
 
 
 def save_connection(api, account, payload):
@@ -295,6 +322,11 @@ def save_connection(api, account, payload):
                 access_method, secret_token, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (account["id"], account["energy_company"], "Xcel automatic updates", METHOD, sealed, "Ready to sync", now, now))
             connection_id = conn.execute("SELECT id FROM utility_connections WHERE account_id = ? AND access_method = ?", (account["id"], METHOD)).fetchone()["id"]
+        # A subscription belongs to one connection; notifications are matched against this.
+        conn.execute("DELETE FROM xcel_subscriptions WHERE connection_id = ?", (connection_id,))
+        conn.execute("""INSERT INTO xcel_subscriptions (subscription, connection_id) VALUES (?, ?)
+            ON CONFLICT(subscription) DO UPDATE SET connection_id = excluded.connection_id""",
+            (payload["subscription"], connection_id))
         # Global unique meter binding prevents the same meter being linked to two accounts.
         for meter in payload["meters"]:
             changed = conn.execute("""INSERT INTO xcel_meter_bindings (meter_url, account_id, connection_id)
@@ -482,27 +514,127 @@ def register_routes(app, api, current_customer_user):
 
     @app.post(NOTIFICATION)
     def xcel_notification():
-        # Public protocol endpoint, deliberately no login/CSRF. It never mutates
-        # connections or performs I/O; the scheduled job verifies current grants.
+        # Public protocol endpoint: Xcel sends no Authorization header, so there is
+        # no login or CSRF. The body is only a hint. A known subscription queues a
+        # fetch that uses our stored token and bindings against the configured
+        # Xcel host; the URL and range in the body are never fetched or kept.
         if request.mimetype not in ("application/atom+xml", "application/xml"):
             return {"error": "Unsupported content type"}, 415
         if request.content_length is None or request.content_length > 65536:
             return {"error": "Payload too large or missing length"}, 413
         try:
-            root = xml_root(request.get_data())
-            if root.tag != "{" + NS["e"] + "}BatchList":
-                raise ConnectionError("Invalid notification")
-            urls = root.findall("e:resources", NS)
-            if len(urls) != 1:
-                raise ConnectionError("Invalid notification")
-            parsed = urlsplit(urls[0].text or "")
-            subscription_id(parsed._replace(query="", fragment="").geturl())
-            if parsed.fragment or any(k not in ("published-min", "published-max") for k, _ in parse_qsl(parsed.query)):
-                raise ConnectionError("Invalid notification")
+            sub = notified_subscription(request.get_data())
         except ConnectionError:
             return {"error": "Invalid notification"}, 400
-        # Uniform result for known/unknown subscriptions. Daily polling uses only
-        # stored, approved bindings, never the supplied notification URL or range.
-        # Registration can verify receipt without enabling customer collection.
-        # Acknowledgment does not queue work or retain the notification payload.
-        return {"status": "accepted", "collection": "scheduled" if available() else "disabled"}, 202
+        queued = available() and queue_fetch(api, sub)
+        if queued:
+            start_queue_worker(api)
+        # Uniform result for known and unknown subscriptions.
+        return {"status": "accepted"}, 202
+
+
+def notified_subscription(body):
+    """The subscription id from a BatchList notification, or ConnectionError."""
+    root = xml_root(body)
+    if root.tag != "{" + NS["e"] + "}BatchList":
+        raise ConnectionError("Invalid notification")
+    urls = root.findall("e:resources", NS)
+    if len(urls) != 1:
+        raise ConnectionError("Invalid notification")
+    parsed = urlsplit((urls[0].text or "").strip())
+    if parsed.fragment or any(k not in ("published-min", "published-max") for k, _ in parse_qsl(parsed.query)):
+        raise ConnectionError("Invalid notification")
+    return subscription_id(parsed._replace(query="", fragment="").geturl())
+
+
+def queue_fetch(api, sub):
+    with api.get_db_connection() as conn:
+        row = conn.execute("""SELECT xcel_subscriptions.connection_id FROM xcel_subscriptions
+            JOIN utility_connections ON utility_connections.id = xcel_subscriptions.connection_id
+            WHERE xcel_subscriptions.subscription = ? AND utility_connections.access_method = ?
+              AND utility_connections.secret_token IS NOT NULL""", (sub, METHOD)).fetchone()
+        if row is None:
+            return False
+        conn.execute("""INSERT INTO xcel_fetch_queue (connection_id, requested_at) VALUES (?, ?)
+            ON CONFLICT(connection_id) DO UPDATE SET requested_at = excluded.requested_at""",
+            (int(row["connection_id"]), int(time.time())))
+        conn.commit()
+    return True
+
+
+def process_fetch_queue(api, limit=25):
+    """Fetch data for queued notifications. Each entry is claimed once; the
+    regular sync applies every permission, binding and lease check."""
+    if not available():
+        return {"processed": 0, "failed": 0}
+    processed = failed = 0
+    with api.get_db_connection() as conn:
+        rows = conn.execute("""SELECT xcel_fetch_queue.connection_id, xcel_fetch_queue.requested_at, accounts.account_number
+            FROM xcel_fetch_queue
+            JOIN utility_connections ON utility_connections.id = xcel_fetch_queue.connection_id
+            JOIN accounts ON accounts.id = utility_connections.account_id
+            ORDER BY xcel_fetch_queue.requested_at LIMIT ?""", (int(limit),)).fetchall()
+    for row in rows:
+        with api.get_db_connection() as conn:
+            claimed = conn.execute("DELETE FROM xcel_fetch_queue WHERE connection_id = ? AND requested_at = ?",
+                                   (row["connection_id"], row["requested_at"])).rowcount
+            conn.commit()
+        if claimed != 1:
+            continue
+        try:
+            api.sync_utility_connection(row["account_number"], int(row["connection_id"]))
+            processed += 1
+        except Exception as exc:
+            failed += 1
+            api.emit_application_log("utility.xcel_notification_fetch_failed", error_type=type(exc).__name__)
+    with api.get_db_connection() as conn:  # Drop entries whose connection is gone.
+        conn.execute("""DELETE FROM xcel_fetch_queue WHERE connection_id NOT IN
+            (SELECT id FROM utility_connections WHERE access_method = ?)""", (METHOD,))
+        conn.commit()
+    return {"processed": processed, "failed": failed}
+
+
+def start_queue_worker(api):
+    import threading
+
+    threading.Thread(target=lambda: _quiet(process_fetch_queue, api), name="xcel-fetch", daemon=True).start()
+
+
+def _quiet(fn, *args):
+    try:
+        fn(*args)
+    except Exception as exc:
+        args[0].emit_application_log("utility.xcel_queue_failed", error_type=type(exc).__name__)
+
+
+def check_service():
+    """Validate client credentials without customer data: a client-credentials
+    token (FB=34 35), then ApplicationInformation and ReadServiceStatus."""
+    cfg = credentials()
+    raw = transport(BASE + "oauth/token", form={"grant_type": "client_credentials", "scope": CLIENT_SCOPE},
+                    client=cfg, service_check=True)
+    try:
+        token = json.loads(raw)
+        access = token["access_token"]
+        if str(token.get("token_type", "")).lower() != "bearer" or not re.fullmatch(r"[!-~]{1,8192}", access):
+            raise ValueError()
+        app_info = str(token.get("resourceURI") or "")
+        if not re.fullmatch(re.escape(RESOURCE) + "ApplicationInformation/" + ID, app_info):
+            raise ValueError()
+    except (ValueError, KeyError, TypeError):
+        raise ConnectionError("Xcel did not return a usable client-credentials token.") from None
+    info = xml_root(transport(app_info, token=access, service_check=True))
+    status = xml_root(transport(RESOURCE + "ReadServiceStatus", token=access, service_check=True))
+
+    def text(root, name):
+        found = root.xpath(".//e:" + name, namespaces=NS)
+        return (found[0].text or "").strip() if found else ""
+
+    return {
+        "token_scope": str(token.get("scope") or ""),
+        "application_information": app_info.rsplit("/", 1)[-1],
+        "data_custodian_application_status": text(info, "dataCustodianApplicationStatus"),
+        "registered_redirect_uri": text(info, "redirect_uri"),
+        "registered_notification_uri": text(info, "thirdPartyNotifyUri"),
+        "service_status": text(status, "currentStatus"),
+    }

@@ -129,6 +129,10 @@ def purge_accounts(api, account_numbers, *, confirm=False):
         summary = {"accounts": sorted(found), "customers_removed": [], "files": len(files), "rows": 0, "confirmed": confirm}
         connection_ids = [int(r["id"]) for r in conn.execute(
             f"SELECT id FROM utility_connections WHERE account_id IN ({marks})", tuple(ids))]
+        for table in ("xcel_subscriptions", "xcel_fetch_queue") if connection_ids else ():
+            summary["rows"] += conn.execute(
+                f"DELETE FROM {table} WHERE connection_id IN ({_placeholders(connection_ids)})",
+                tuple(connection_ids)).rowcount or 0
         for table in SYNC_LOCK_TABLES:
             if connection_ids:
                 summary["rows"] += conn.execute(
