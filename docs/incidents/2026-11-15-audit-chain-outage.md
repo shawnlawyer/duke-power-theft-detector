@@ -12,42 +12,51 @@
 - **That fits the symptom exactly.** Event 258's own hash recomputes correctly. Only its link to its predecessor fails.
 - **Rehearsed:** reproduced on a Postgres copy seeded by the production code, with byte-identical startup errors.
 
-## Fix (PR "Keep audit history when accounts are removed")
-- **Account removal now moves audit rows, unchanged,** to `audit_events_detached`. It never deletes them.
-- **One chain across both tables:** the integrity check, startup and new events all treat the two tables as one chain, recomputing every hash.
-- **Rows already deleted are restored from a backup copy** into `audit_events_detached`:
-  - They go in verbatim, with the same ids and hashes, after each one is checked against its own hash.
-  - Nothing is written unless the whole chain then verifies.
-- **Nothing is rehashed, edited or deleted, and the startup check is not relaxed.**
+## Decision
+The owner wants the removed audit records to stay gone. They will not be restored from backup.
+
+## Fix
+- **Signed removal markers.** A new table, `audit_chain_removals`, holds one marker per gap left by removed events. Each marker records:
+  - the surviving event before the gap and its hash
+  - the first surviving event after it, and the hash that event links to
+  - how many ids were removed, and which
+  - the reason and the time
+
+  Each marker is HMAC-signed with the audit key.
+- **The integrity check only bridges marked gaps.** It accepts a gap only where a correctly signed marker matches exactly. Every surviving event is still recomputed. An edited event, a forged or edited marker, or an unmarked gap still fails.
+- **Markers are only written for pure gaps:** ids missing, and the next event's own hash recomputes. Anything else is refused and nothing is written.
+- **Account removal** deletes the account's audit events and writes the markers in the same transaction, so the chain is never left broken again.
+- **Nothing is rehashed or edited, removed events stay removed, and the startup check is not relaxed.**
 
 ## Runbook (production)
-`S=scripts/audit_chain_standalone.py`. It works with the running image, `report`/`export` are read-only, and `restore` is a dry run without `--confirm`.
+`S=scripts/audit_chain_standalone.py`. It works with the running image. `report` is read-only, and `mark-removals` is a dry run unless `--confirm` is given.
 
 1. **Snapshot** `home-energy-watch-pg` and wait until it shows `available`.
 2. **Report:**
    ```
    docker exec -i home-energy-watch python - report < $S
    ```
-   Continue only if the diagnosis is `missing_predecessor` and `rows_whose_own_hash_fails_count` is 0. The `account_removal_events` times show when the deletion happened.
-3. **Backup copy:** point-in-time restore to a temporary instance, at a time a few minutes before the first removal event. Confirm its chain is `intact`:
+   Continue only if the diagnosis is `missing_predecessor` and `rows_whose_own_hash_fails_count` is 0.
+3. **Dry run:**
    ```
-   docker exec -i -e POWER_DATABASE_URL=<copy DSN> home-energy-watch python - report < $S
+   docker exec -i home-energy-watch python - mark-removals "fake accounts removed by owner" < $S
    ```
-4. **Export** the missing ids from the copy:
-   ```
-   docker exec -i -e POWER_DATABASE_URL=<copy DSN> home-energy-watch python - export <missing_ids> < $S > missing.jsonl
-   ```
-5. **Staging test:** restore the step-1 snapshot to a second temporary instance and run `restore missing.jsonl --confirm` against it. Then run the new image's startup and `--audit-chain-report` against it. Both must pass.
-6. **Production (after approval):**
-   1. Run `restore missing.jsonl` (dry run), then `--confirm`.
-   2. Deploy `main`. The old image does not read `audit_events_detached`, so it still fails until the new code is deployed.
-7. **Verify:**
+   `chain_valid_after` must be `true`.
+4. **Write the markers:** repeat step 3 with `--confirm`.
+5. **Deploy `main`.** The old image does not read the markers, so it still fails until the new code is deployed.
+6. **Verify:**
    - `/health` returns 200
    - `/login` renders
-   - `python app.py --audit-chain-report` shows `intact`
-   - `/audit` shows "Integrity verified"
+   - `docker exec home-energy-watch python app.py --audit-chain-report` shows `intact`
 
-   Delete the temporary instances only after this.
+## Rehearsal (Postgres copy)
+1. Seeded the copy with the production code, and removed events the way the old removal did.
+2. Old code at startup: `RuntimeError: The audit record did not pass its integrity check.`, the same as production.
+3. Standalone report: `missing_predecessor`. The failing event's own hash recomputes.
+4. `mark-removals`, dry run, then confirm: `chain_valid_after: true`.
+5. `audit_events` is byte-identical before and after (md5 of all rows).
+6. Old code still fails, which is why step 5 of the runbook is required. New code starts, and its integrity check reports `valid` with `removed_events: 2`.
+7. New events chain on correctly after the repair.
 
 ## Evidence
-(fill in from step 2 and step 4 outputs)
+(fill in from runbook step 2)

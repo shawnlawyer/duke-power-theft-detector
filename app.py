@@ -676,12 +676,10 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--audit-chain-report", action="store_true",
                         help="Print a read-only audit integrity evidence report (JSON) and exit")
-    parser.add_argument("--audit-export-ids", metavar="IDS",
-                        help="Print these audit rows (e.g. 250-257,300) verbatim as JSON lines; read-only")
-    parser.add_argument("--audit-restore-detached", metavar="JSONL",
-                        help="Return original missing audit rows to the chain (dry run unless --confirm-audit-restore)")
-    parser.add_argument("--confirm-audit-restore", action="store_true",
-                        help="Write the rows given to --audit-restore-detached")
+    parser.add_argument("--audit-mark-removals", metavar="REASON",
+                        help="Record signed markers for deliberately removed audit events (dry run unless --confirm-audit-removals)")
+    parser.add_argument("--confirm-audit-removals", action="store_true",
+                        help="Write the markers found by --audit-mark-removals")
     parser.add_argument(
         "--xcel-check-service",
         action="store_true",
@@ -1694,7 +1692,7 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         ON processed_stripe_events (subscription_id, created)
         """
     )
-    ensure_audit_detached_table(conn)
+    ensure_audit_removals_table(conn)
     backfill_audit_event_hashes(conn)
     billing_columns = table_columns(conn, "customer_billing")
     if not billing_columns:
@@ -2421,7 +2419,7 @@ def migrate_database(conn: DatabaseConnection) -> None:
         ON processed_stripe_events (subscription_id, created)
         """
     )
-    ensure_audit_detached_table(conn)
+    ensure_audit_removals_table(conn)
     backfill_audit_event_hashes(conn)
     billing_columns = table_columns(conn, "customer_billing")
     if not billing_columns:
@@ -4814,58 +4812,109 @@ AUDIT_EVENT_COLUMNS = (
 )
 
 
-def ensure_audit_detached_table(conn: DatabaseConnection) -> None:
-    """Audit events whose account no longer exists.
+def ensure_audit_removals_table(conn: DatabaseConnection) -> None:
+    """Signed markers for audit events that were deliberately removed.
 
-    The audit chain is one sequence across `audit_events` and this table. Rows
-    are moved here verbatim (same id, content and hashes) when an account is
-    removed, because `audit_events.account_id` must reference a live account.
-    Nothing here is rewritten; the integrity check recomputes every hash.
+    Removed events are gone. Each marker records where the gap is (the surviving
+    event before it and its hash, the first surviving event after it and the
+    hash that event links to), how many events were removed and why, signed with
+    the audit key. The integrity check accepts a gap only where a matching,
+    correctly signed marker exists, so every surviving event is still verified
+    and any other change to the record still fails.
     """
-    id_type = "BIGINT" if conn.kind == "postgres" else "INTEGER"
+    id_type = "BIGSERIAL" if conn.kind == "postgres" else "INTEGER"
+    autoincrement = "" if conn.kind == "postgres" else " AUTOINCREMENT"
     conn.execute(
         f"""
-        CREATE TABLE IF NOT EXISTS audit_events_detached (
-            id {id_type} PRIMARY KEY,
-            occurred_at TEXT NOT NULL,
-            actor_type TEXT NOT NULL,
-            actor_id {id_type},
-            action TEXT NOT NULL,
-            account_id {id_type},
-            target_type TEXT,
-            target_id TEXT,
-            request_id TEXT NOT NULL,
-            remote_hash TEXT,
-            metadata_json TEXT NOT NULL DEFAULT '{{}}',
-            previous_hash TEXT,
-            event_hash TEXT NOT NULL,
-            detached_at TEXT NOT NULL,
-            detached_reason TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS audit_chain_removals (
+            id {id_type} PRIMARY KEY{autoincrement},
+            after_event_id BIGINT,
+            after_hash TEXT NOT NULL,
+            before_event_id BIGINT NOT NULL,
+            bridge_hash TEXT NOT NULL,
+            removed_count INTEGER NOT NULL,
+            removed_ids TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            signature TEXT NOT NULL
         )
         """
     )
 
 
+AUDIT_REMOVAL_FIELDS = (
+    "after_event_id", "after_hash", "before_event_id", "bridge_hash",
+    "removed_count", "removed_ids", "reason", "created_at",
+)
+
+
+def audit_removal_signature(marker: dict[str, object]) -> str:
+    canonical = json.dumps(
+        {field: marker.get(field) for field in AUDIT_REMOVAL_FIELDS},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    )
+    return hmac.new(
+        ("audit-removal:" + get_audit_signing_key()).encode("utf-8"),
+        canonical.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def load_audit_chain_rows(conn: DatabaseConnection) -> list[dict[str, object]]:
     columns = ", ".join(AUDIT_EVENT_COLUMNS)
-    rows = [dict(row) for row in conn.execute(f"SELECT {columns} FROM audit_events").fetchall()]
-    if table_exists(conn, "audit_events_detached"):
-        rows += [dict(row) for row in conn.execute(f"SELECT {columns} FROM audit_events_detached").fetchall()]
-    rows.sort(key=lambda row: int(row["id"]))
-    return rows
+    return [dict(row) for row in conn.execute(f"SELECT {columns} FROM audit_events ORDER BY id ASC").fetchall()]
+
+
+def load_audit_removals(conn: DatabaseConnection) -> list[dict[str, object]]:
+    if not table_exists(conn, "audit_chain_removals"):
+        return []
+    return [dict(row) for row in conn.execute("SELECT * FROM audit_chain_removals ORDER BY id").fetchall()]
 
 
 def audit_chain_status(conn: DatabaseConnection) -> dict[str, object]:
-    rows = load_audit_chain_rows(conn)
-    return audit_chain_status_for_rows(rows)
+    return audit_chain_status_for_rows(load_audit_chain_rows(conn), load_audit_removals(conn))
 
 
-def audit_chain_status_for_rows(rows: list[dict[str, object]]) -> dict[str, object]:
+def _compress_ids(ids) -> str:
+    ranges: list[str] = []
+    start = prev = None
+    for value in sorted(ids):
+        if start is None:
+            start = prev = value
+        elif value == prev + 1:
+            prev = value
+        else:
+            ranges.append(str(start) if start == prev else f"{start}-{prev}")
+            start = prev = value
+    if start is not None:
+        ranges.append(str(start) if start == prev else f"{start}-{prev}")
+    return ",".join(ranges)
+
+
+def _removal_bridges(removals) -> dict[tuple[str, int, str], dict[str, object]]:
+    bridges = {}
+    for marker in removals or ():
+        if hmac.compare_digest(str(marker.get("signature") or ""), audit_removal_signature(marker)):
+            bridges[(str(marker["after_hash"]), int(marker["before_event_id"]), str(marker["bridge_hash"]))] = marker
+    return bridges
+
+
+def audit_chain_status_for_rows(
+    rows: list[dict[str, object]],
+    removals: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    bridges = _removal_bridges(removals)
     previous_hash = ""
+    removed_events = 0
     for row in rows:
         mapping = dict(row)
         saved_previous = str(mapping.get("previous_hash") or "")
         saved_hash = str(mapping.get("event_hash") or "")
+        if saved_hash and not hmac.compare_digest(saved_previous, previous_hash):
+            marker = bridges.get((previous_hash, int(mapping["id"]), saved_previous))
+            if marker is not None:
+                removed_events += int(marker["removed_count"])
+                previous_hash = saved_previous
         if not saved_hash or not hmac.compare_digest(saved_previous, previous_hash):
             return {
                 "valid": False,
@@ -4885,7 +4934,63 @@ def audit_chain_status_for_rows(rows: list[dict[str, object]]) -> dict[str, obje
         "checked_events": len(rows),
         "failure_event_id": None,
         "latest_hash": previous_hash,
+        "removed_events": removed_events,
     }
+
+
+def record_audit_removals(conn: DatabaseConnection, reason: str) -> list[dict[str, object]]:
+    """Mark every gap left by deliberately removed audit events.
+
+    Only a pure gap qualifies: ids are missing between two surviving events and
+    the later event's own hash recomputes. Any other break (an edited event, a
+    changed key) is refused and nothing is written. Call inside the transaction
+    that removed the events.
+    """
+    clean_reason = (reason or "").strip()[:200]
+    if not clean_reason:
+        raise ValueError("Give a reason for removing audit events.")
+    ensure_audit_removals_table(conn)
+    rows = load_audit_chain_rows(conn)
+    removals = load_audit_removals(conn)
+    bridges = _removal_bridges(removals)
+    created: list[dict[str, object]] = []
+    previous_hash, previous_id = "", 0
+    for row in rows:
+        saved_previous = str(row.get("previous_hash") or "")
+        row_id = int(row["id"])
+        if not hmac.compare_digest(saved_previous, previous_hash) and (previous_hash, row_id, saved_previous) not in bridges:
+            own_hash_ok = hmac.compare_digest(str(row.get("event_hash") or ""), audit_event_hash(row, saved_previous))
+            missing = list(range(previous_id + 1, row_id))
+            if not own_hash_ok or not missing:
+                raise ValueError(
+                    f"Audit event {row_id} does not follow a removal gap; the record was changed in another way. "
+                    "Nothing was written."
+                )
+            marker = {
+                "after_event_id": previous_id or None,
+                "after_hash": previous_hash,
+                "before_event_id": row_id,
+                "bridge_hash": saved_previous,
+                "removed_count": len(missing),
+                "removed_ids": _compress_ids(missing),
+                "reason": clean_reason,
+                "created_at": timestamp_now(),
+            }
+            marker["signature"] = audit_removal_signature(marker)
+            created.append(marker)
+        if not hmac.compare_digest(str(row.get("event_hash") or ""), audit_event_hash(row, saved_previous)):
+            raise ValueError(f"Audit event {row_id} was changed; nothing was written.")
+        previous_hash, previous_id = str(row.get("event_hash") or ""), row_id
+    for marker in created:
+        conn.execute(
+            f"INSERT INTO audit_chain_removals ({', '.join(AUDIT_REMOVAL_FIELDS)}, signature) "
+            f"VALUES ({', '.join('?' for _ in AUDIT_REMOVAL_FIELDS)}, ?)",
+            (*[marker[f] for f in AUDIT_REMOVAL_FIELDS], marker["signature"]),
+        )
+    if not audit_chain_status(conn)["valid"]:
+        conn.rollback()
+        raise ValueError("The audit record still does not verify; nothing was written.")
+    return created
 
 
 def backfill_audit_event_hashes(conn: DatabaseConnection) -> None:
@@ -4948,14 +5053,6 @@ def record_audit_event(
         previous_row = conn.execute(
             "SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1"
         ).fetchone()
-        if table_exists(conn, "audit_events_detached"):
-            detached_row = conn.execute(
-                "SELECT id, event_hash FROM audit_events_detached ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            live_row = conn.execute("SELECT MAX(id) AS id FROM audit_events").fetchone()
-            live_max = int(live_row["id"] or 0) if live_row is not None else 0
-            if detached_row is not None and int(detached_row["id"]) > live_max:
-                previous_row = detached_row
         previous_hash = "" if previous_row is None else str(previous_row["event_hash"] or "")
         if previous_row is not None and not previous_hash:
             conn.rollback()
@@ -17246,21 +17343,16 @@ def main() -> None:
         print(json.dumps(audit_repair.chain_report(sys.modules[__name__]), indent=2, sort_keys=True, default=str))
         return
 
-    if args.audit_export_ids:
-        for row in audit_repair.export_rows(sys.modules[__name__], audit_repair.parse_ids(args.audit_export_ids)):
-            print(json.dumps(row, sort_keys=True))
-        return
-
-    if args.audit_restore_detached:
+    if args.audit_mark_removals:
         try:
-            rows = audit_repair.read_rows(args.audit_restore_detached, AUDIT_EVENT_COLUMNS)
-            result = audit_repair.restore_detached(sys.modules[__name__], rows, confirm=args.confirm_audit_restore)
+            result = audit_repair.mark_removals(sys.modules[__name__], args.audit_mark_removals,
+                                                confirm=args.confirm_audit_removals)
         except Exception as exc:
-            print(f"Audit restore refused: {exc}", file=sys.stderr)
+            print(f"Audit removal markers refused: {exc}", file=sys.stderr)
             sys.exit(1)
         print(json.dumps(result, sort_keys=True))
-        if not args.confirm_audit_restore:
-            print("Dry run only. Nothing was written. Add --confirm-audit-restore to write.")
+        if not args.confirm_audit_removals:
+            print("Dry run only. Nothing was written. Add --confirm-audit-removals to write.")
         return
 
     if args.xcel_check_service:

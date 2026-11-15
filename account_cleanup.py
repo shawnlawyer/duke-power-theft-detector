@@ -4,9 +4,9 @@
     python app.py --purge-accounts NUMBER [NUMBER ...]            # dry run
     python app.py --purge-accounts NUMBER [NUMBER ...] --confirm-purge
 
-A purge deletes the account and everything tied to it, including uploaded files,
-except audit history: audit events move unchanged to audit_events_detached so
-the integrity chain stays complete.
+A purge deletes the account and everything tied to it, including uploaded files
+and its audit events. Each gap this leaves in the audit chain gets a signed
+removal marker in the same transaction, so the rest of the record still verifies.
 It also deletes any customer sign-in left with no account afterwards. Accounts
 with a paid subscription or a legal hold are refused. The built-in "primary"
 placeholder is emptied but kept, because the app recreates it anyway.
@@ -31,9 +31,8 @@ ACCOUNT_TABLES = (
     "affiliate_commissions",
     "account_equipment_history",
     "household_assistant_interactions",
+    "audit_events",
 )
-# Audit history is never deleted. Rows that reference a removed account move,
-# unchanged, to audit_events_detached so the integrity chain stays complete.
 CUSTOMER_TABLES = (
     "customer_policy_acceptances",
     "customer_auth_tokens",
@@ -144,14 +143,6 @@ def purge_accounts(api, account_numbers, *, confirm=False):
         for table in OAUTH_STATE_TABLES:
             summary["rows"] += conn.execute(
                 f"DELETE FROM {table} WHERE account_number IN ({_placeholders(numbers)})", tuple(numbers)).rowcount or 0
-        api.ensure_audit_detached_table(conn)
-        columns = ", ".join(api.AUDIT_EVENT_COLUMNS)
-        summary["audit_events_detached"] = conn.execute(
-            f"""INSERT INTO audit_events_detached ({columns}, detached_at, detached_reason)
-                SELECT {columns}, ?, 'account removed' FROM audit_events WHERE account_id IN ({marks})""",
-            (api.timestamp_now(), *ids),
-        ).rowcount or 0
-        conn.execute(f"DELETE FROM audit_events WHERE account_id IN ({marks})", tuple(ids))
         for table in ACCOUNT_TABLES + ("utility_connections",):
             summary["rows"] += conn.execute(f"DELETE FROM {table} WHERE account_id IN ({marks})", tuple(ids)).rowcount or 0
         for number, account_id in found.items():
@@ -179,10 +170,14 @@ def purge_accounts(api, account_numbers, *, confirm=False):
                 summary["rows"] += conn.execute(
                     f"DELETE FROM {table} WHERE customer_user_id = ?", (customer_id,)).rowcount or 0
             summary["rows"] += conn.execute(
+                "DELETE FROM audit_events WHERE actor_type = 'customer' AND actor_id = ?", (customer_id,)).rowcount or 0
+            summary["rows"] += conn.execute(
                 "DELETE FROM passkey_credentials WHERE actor_kind = 'customer' AND actor_id = ?", (customer_id,)).rowcount or 0
             summary["rows"] += conn.execute("DELETE FROM customer_users WHERE id = ?", (customer_id,)).rowcount or 0
             summary["customers_removed"].append(customer["email"])
 
+        # Removed audit events leave gaps; mark each one so the chain still verifies.
+        summary["audit_gaps_marked"] = len(api.record_audit_removals(conn, "account removed"))
         if not confirm:
             conn.rollback()
             return summary
