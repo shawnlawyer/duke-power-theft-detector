@@ -6,10 +6,16 @@ the current container while startup is failing:
 
     docker exec -i home-energy-watch python - report < scripts/audit_chain_standalone.py
     docker exec -i home-energy-watch python - export 255-260 < scripts/audit_chain_standalone.py
+    docker exec -i home-energy-watch python - restore /tmp/missing.jsonl [--confirm] < scripts/audit_chain_standalone.py
+
+report and export are READ ONLY. restore is the one write: it puts original
+rows (exported from a backup copy) into audit_events_detached, unchanged, the
+same table the app uses for events of removed accounts. It refuses rows that do
+not match their own hashes, never overwrites an id, and writes nothing unless
+the whole chain then verifies. Dry run unless --confirm is given.
 
 Uses POWER_DATABASE_URL (or DATABASE_URL) and POWER_AUDIT_SIGNING_KEY from the
-container's environment. The session is READ ONLY; nothing is changed. Output
-never includes the signing key or database credentials.
+container's environment. Output never includes the signing key or credentials.
 """
 import hashlib
 import hmac
@@ -58,13 +64,78 @@ def compress(ids):
     return out
 
 
-def connect():
+def connect(read_only=True):
     dsn = os.environ.get("POWER_DATABASE_URL") or os.environ.get("DATABASE_URL")
     if not dsn:
         sys.exit("POWER_DATABASE_URL is not set in this environment.")
     conn = psycopg.connect(dsn, row_factory=dict_row)
-    conn.execute("SET TRANSACTION READ ONLY")
+    if read_only:
+        conn.execute("SET TRANSACTION READ ONLY")
     return conn
+
+
+def chain_valid(rows, key):
+    previous = ""
+    for row in rows:
+        if not row.get("event_hash") or not hmac.compare_digest(str(row.get("previous_hash") or ""), previous) \
+                or not hmac.compare_digest(str(row["event_hash"]), event_hash(row, previous, key)):
+            return False, int(row["id"])
+        previous = str(row["event_hash"])
+    return True, None
+
+
+DETACHED_DDL = """CREATE TABLE IF NOT EXISTS audit_events_detached (
+    id BIGINT PRIMARY KEY, occurred_at TEXT NOT NULL, actor_type TEXT NOT NULL, actor_id BIGINT,
+    action TEXT NOT NULL, account_id BIGINT, target_type TEXT, target_id TEXT, request_id TEXT NOT NULL,
+    remote_hash TEXT, metadata_json TEXT NOT NULL DEFAULT '{}', previous_hash TEXT, event_hash TEXT NOT NULL,
+    detached_at TEXT NOT NULL, detached_reason TEXT NOT NULL)"""  # Same as app.ensure_audit_detached_table.
+
+
+def restore(path, confirm):
+    key = os.environ.get("POWER_AUDIT_SIGNING_KEY", "").strip()
+    if not key:
+        sys.exit("POWER_AUDIT_SIGNING_KEY is not set in this environment.")
+    with open(path, encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle if line.strip()]
+    if not rows or any(set(r) != set(COLUMNS) for r in rows):
+        sys.exit("Each line must hold exactly the audit event columns.")
+    for r in rows:
+        if not hmac.compare_digest(str(r.get("event_hash") or ""), event_hash(r, str(r.get("previous_hash") or ""), key)):
+            sys.exit(f"Refused: row {r['id']} does not match its own hash; it is not an original record.")
+    with connect(read_only=not confirm) as conn:
+        if confirm:
+            conn.execute("LOCK TABLE audit_events IN SHARE ROW EXCLUSIVE MODE")
+            conn.execute(DETACHED_DDL)
+        current, _ = load(conn)
+        present = {int(r["id"]) for r in current}
+        clash = [int(r["id"]) for r in rows if int(r["id"]) in present]
+        if clash:
+            sys.exit("Refused: these ids already exist and are never overwritten: " + ", ".join(compress(clash)))
+        before = chain_valid(current, key)
+        after = chain_valid(sorted(current + rows, key=lambda r: int(r["id"])), key)
+        result = {"rows": len(rows), "ids": compress(int(r["id"]) for r in rows), "chain_valid_before": before[0],
+                  "chain_valid_after": after[0], "failure_event_id_after": after[1], "confirmed": confirm}
+        if not after[0]:
+            conn.rollback()
+            print(json.dumps(result))
+            sys.exit("Refused: the chain still does not verify with these rows. Nothing was written.")
+        if confirm:
+            stamp = __import__("datetime").datetime.now().isoformat(timespec="seconds")
+            for r in sorted(rows, key=lambda r: int(r["id"])):
+                conn.execute(
+                    f"INSERT INTO audit_events_detached ({', '.join(COLUMNS)}, detached_at, detached_reason) "
+                    f"VALUES ({', '.join(['%s'] * len(COLUMNS))}, %s, %s)",
+                    (*[r[c] for c in COLUMNS], stamp, "restored from backup after account removal"))
+            check, _ = load(conn)
+            if not chain_valid(check, key)[0]:
+                conn.rollback()
+                sys.exit("Refused: verification inside the transaction failed. Nothing was written.")
+            conn.commit()
+        else:
+            conn.rollback()
+    print(json.dumps(result))
+    if not confirm:
+        print("Dry run only. Nothing was written. Add --confirm to write.")
 
 
 def load(conn):
@@ -94,13 +165,8 @@ def report():
             "WHERE action IN ('maintenance.accounts_purged', 'account.deleted', 'account.disabled') ORDER BY id")]
         accounts = conn.execute("SELECT COUNT(*) AS n FROM accounts").fetchone()["n"]
         seq = conn.execute("SELECT last_value FROM audit_events_id_seq").fetchone()["last_value"]
-    previous, failure = "", None
-    for row in rows:
-        if not row.get("event_hash") or not hmac.compare_digest(str(row.get("previous_hash") or ""), previous) \
-                or not hmac.compare_digest(str(row["event_hash"]), event_hash(row, previous, key)):
-            failure = row
-            break
-        previous = str(row["event_hash"])
+    ok, failure_id = chain_valid(rows, key)
+    failure = None if ok else next(r for r in rows if int(r["id"]) == failure_id)
     present = {int(r["id"]) for r in rows}
     missing = sorted(set(range(1, int(rows[-1]["id"]) + 1)) - present) if rows else []
     self_fail = [int(r["id"]) for r in rows
@@ -156,5 +222,7 @@ if __name__ == "__main__":
         report()
     elif command == "export" and len(sys.argv) > 2:
         export(sys.argv[2])
+    elif command == "restore" and len(sys.argv) > 2:
+        restore(sys.argv[2], "--confirm" in sys.argv[3:])
     else:
-        sys.exit("Usage: report | export IDS")
+        sys.exit("Usage: report | export IDS | restore FILE [--confirm]")
