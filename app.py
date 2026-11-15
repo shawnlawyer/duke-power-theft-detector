@@ -68,6 +68,7 @@ from werkzeug.utils import secure_filename
 
 from utility_guides import UTILITY_DOWNLOAD_GUIDES, get_utility_download_guide
 import account_cleanup
+import audit_repair
 import coned_oru
 import national_grid
 import xcel
@@ -673,6 +674,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Sync saved utility connections once and exit",
     )
+    parser.add_argument("--audit-chain-report", action="store_true",
+                        help="Print a read-only audit integrity evidence report (JSON) and exit")
+    parser.add_argument("--audit-export-ids", metavar="IDS",
+                        help="Print these audit rows (e.g. 250-257,300) verbatim as JSON lines; read-only")
+    parser.add_argument("--audit-restore-detached", metavar="JSONL",
+                        help="Return original missing audit rows to the chain (dry run unless --confirm-audit-restore)")
+    parser.add_argument("--confirm-audit-restore", action="store_true",
+                        help="Write the rows given to --audit-restore-detached")
     parser.add_argument(
         "--xcel-check-service",
         action="store_true",
@@ -1685,6 +1694,7 @@ def migrate_database_postgres(conn: DatabaseConnection) -> None:
         ON processed_stripe_events (subscription_id, created)
         """
     )
+    ensure_audit_detached_table(conn)
     backfill_audit_event_hashes(conn)
     billing_columns = table_columns(conn, "customer_billing")
     if not billing_columns:
@@ -2411,6 +2421,7 @@ def migrate_database(conn: DatabaseConnection) -> None:
         ON processed_stripe_events (subscription_id, created)
         """
     )
+    ensure_audit_detached_table(conn)
     backfill_audit_event_hashes(conn)
     billing_columns = table_columns(conn, "customer_billing")
     if not billing_columns:
@@ -4797,15 +4808,59 @@ def audit_event_hash(
     ).hexdigest()
 
 
+AUDIT_EVENT_COLUMNS = (
+    "id", "occurred_at", "actor_type", "actor_id", "action", "account_id", "target_type",
+    "target_id", "request_id", "remote_hash", "metadata_json", "previous_hash", "event_hash",
+)
+
+
+def ensure_audit_detached_table(conn: DatabaseConnection) -> None:
+    """Audit events whose account no longer exists.
+
+    The audit chain is one sequence across `audit_events` and this table. Rows
+    are moved here verbatim (same id, content and hashes) when an account is
+    removed, because `audit_events.account_id` must reference a live account.
+    Nothing here is rewritten; the integrity check recomputes every hash.
+    """
+    id_type = "BIGINT" if conn.kind == "postgres" else "INTEGER"
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS audit_events_detached (
+            id {id_type} PRIMARY KEY,
+            occurred_at TEXT NOT NULL,
+            actor_type TEXT NOT NULL,
+            actor_id {id_type},
+            action TEXT NOT NULL,
+            account_id {id_type},
+            target_type TEXT,
+            target_id TEXT,
+            request_id TEXT NOT NULL,
+            remote_hash TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{{}}',
+            previous_hash TEXT,
+            event_hash TEXT NOT NULL,
+            detached_at TEXT NOT NULL,
+            detached_reason TEXT NOT NULL
+        )
+        """
+    )
+
+
+def load_audit_chain_rows(conn: DatabaseConnection) -> list[dict[str, object]]:
+    columns = ", ".join(AUDIT_EVENT_COLUMNS)
+    rows = [dict(row) for row in conn.execute(f"SELECT {columns} FROM audit_events").fetchall()]
+    if table_exists(conn, "audit_events_detached"):
+        rows += [dict(row) for row in conn.execute(f"SELECT {columns} FROM audit_events_detached").fetchall()]
+    rows.sort(key=lambda row: int(row["id"]))
+    return rows
+
+
 def audit_chain_status(conn: DatabaseConnection) -> dict[str, object]:
-    rows = conn.execute(
-        """
-        SELECT id, occurred_at, actor_type, actor_id, action, account_id, target_type,
-               target_id, request_id, remote_hash, metadata_json, previous_hash, event_hash
-        FROM audit_events
-        ORDER BY id ASC
-        """
-    ).fetchall()
+    rows = load_audit_chain_rows(conn)
+    return audit_chain_status_for_rows(rows)
+
+
+def audit_chain_status_for_rows(rows: list[dict[str, object]]) -> dict[str, object]:
     previous_hash = ""
     for row in rows:
         mapping = dict(row)
@@ -4834,14 +4889,7 @@ def audit_chain_status(conn: DatabaseConnection) -> dict[str, object]:
 
 
 def backfill_audit_event_hashes(conn: DatabaseConnection) -> None:
-    rows = conn.execute(
-        """
-        SELECT id, occurred_at, actor_type, actor_id, action, account_id, target_type,
-               target_id, request_id, remote_hash, metadata_json, previous_hash, event_hash
-        FROM audit_events
-        ORDER BY id ASC
-        """
-    ).fetchall()
+    rows = load_audit_chain_rows(conn)
     if not rows:
         return
     saved_hashes = [str(dict(row).get("event_hash") or "") for row in rows]
@@ -4900,6 +4948,14 @@ def record_audit_event(
         previous_row = conn.execute(
             "SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1"
         ).fetchone()
+        if table_exists(conn, "audit_events_detached"):
+            detached_row = conn.execute(
+                "SELECT id, event_hash FROM audit_events_detached ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            live_row = conn.execute("SELECT MAX(id) AS id FROM audit_events").fetchone()
+            live_max = int(live_row["id"] or 0) if live_row is not None else 0
+            if detached_row is not None and int(detached_row["id"]) > live_max:
+                previous_row = detached_row
         previous_hash = "" if previous_row is None else str(previous_row["event_hash"] or "")
         if previous_row is not None and not previous_hash:
             conn.rollback()
@@ -17184,6 +17240,27 @@ def main() -> None:
     if args.serve:
         ensure_data_dirs()
         web_app.run(host=args.host, port=args.port, debug=False)
+        return
+
+    if args.audit_chain_report:
+        print(json.dumps(audit_repair.chain_report(sys.modules[__name__]), indent=2, sort_keys=True, default=str))
+        return
+
+    if args.audit_export_ids:
+        for row in audit_repair.export_rows(sys.modules[__name__], audit_repair.parse_ids(args.audit_export_ids)):
+            print(json.dumps(row, sort_keys=True))
+        return
+
+    if args.audit_restore_detached:
+        try:
+            rows = audit_repair.read_rows(args.audit_restore_detached, AUDIT_EVENT_COLUMNS)
+            result = audit_repair.restore_detached(sys.modules[__name__], rows, confirm=args.confirm_audit_restore)
+        except Exception as exc:
+            print(f"Audit restore refused: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(result, sort_keys=True))
+        if not args.confirm_audit_restore:
+            print("Dry run only. Nothing was written. Add --confirm-audit-restore to write.")
         return
 
     if args.xcel_check_service:
