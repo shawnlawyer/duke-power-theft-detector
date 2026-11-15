@@ -188,3 +188,33 @@ def test_only_commissioners_can_manage(db):
     anonymous = app.web_app.test_client()
     manage(anonymous, "delete", ["bot-1"], confirm_delete="DELETE")
     assert app.find_account("bot-1") is not None
+
+
+def test_purge_all_except_keeps_every_account_an_email_can_reach(db):
+    fake_account("910046647361", "owner@example.com", address="33 Real Lane")
+    fake_account("second-home", "owner@example.com", address="2 Real Lane")
+    fake_account("bot-1", "bot1@example.com")
+    fake_account("bot-2", "bot2@example.com")
+    app.record_audit_event("auth.login_link_requested", actor_type="customer", account_number="bot-1")
+    app.record_audit_event("auth.login_link_requested", actor_type="customer", account_number="910046647361")
+
+    dry = account_cleanup.purge_all_except(app, keep_emails=["Owner@Example.com"])
+    assert sorted(dry["accounts"]) == ["bot-1", "bot-2", "primary"]
+    assert dry["kept"] == ["910046647361", "second-home"] and dry["accounts_count"] == 3
+    assert app.find_account("bot-1") is not None
+
+    account_cleanup.purge_all_except(app, keep_emails=["owner@example.com"], confirm=True)
+    assert app.find_account("bot-1") is None and app.find_account("bot-2") is None
+    assert app.get_customer_user_by_email("bot1@example.com") is None
+    assert app.find_account("910046647361")["address"] == "33 Real Lane"
+    assert app.find_account("second-home") is not None
+    assert app.get_customer_user_by_email("owner@example.com") is not None
+    app.SCHEMA_READY_TARGETS.clear()
+    assert app.verify_audit_chain()["valid"]
+
+
+def test_purge_all_except_unknown_email_purges_nothing(db):
+    fake_account("bot-1", "bot1@example.com")
+    with pytest.raises(ValueError, match="No account is reachable"):
+        account_cleanup.purge_all_except(app, keep_emails=["typo@example.com"], confirm=True)
+    assert app.find_account("bot-1") is not None
