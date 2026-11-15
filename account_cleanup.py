@@ -4,7 +4,9 @@
     python app.py --purge-accounts NUMBER [NUMBER ...]            # dry run
     python app.py --purge-accounts NUMBER [NUMBER ...] --confirm-purge
 
-A purge deletes the account and everything tied to it, including uploaded files.
+A purge deletes the account and everything tied to it, including uploaded files
+and its audit events. Each gap this leaves in the audit chain gets a signed
+removal marker in the same transaction, so the rest of the record still verifies.
 It also deletes any customer sign-in left with no account afterwards. Accounts
 with a paid subscription or a legal hold are refused. The built-in "primary"
 placeholder is emptied but kept, because the app recreates it anyway.
@@ -168,12 +170,14 @@ def purge_accounts(api, account_numbers, *, confirm=False):
                 summary["rows"] += conn.execute(
                     f"DELETE FROM {table} WHERE customer_user_id = ?", (customer_id,)).rowcount or 0
             summary["rows"] += conn.execute(
-                "DELETE FROM passkey_credentials WHERE actor_kind = 'customer' AND actor_id = ?", (customer_id,)).rowcount or 0
-            summary["rows"] += conn.execute(
                 "DELETE FROM audit_events WHERE actor_type = 'customer' AND actor_id = ?", (customer_id,)).rowcount or 0
+            summary["rows"] += conn.execute(
+                "DELETE FROM passkey_credentials WHERE actor_kind = 'customer' AND actor_id = ?", (customer_id,)).rowcount or 0
             summary["rows"] += conn.execute("DELETE FROM customer_users WHERE id = ?", (customer_id,)).rowcount or 0
             summary["customers_removed"].append(customer["email"])
 
+        # Removed audit events leave gaps; mark each one so the chain still verifies.
+        summary["audit_gaps_marked"] = len(api.record_audit_removals(conn, "account removed"))
         if not confirm:
             conn.rollback()
             return summary
@@ -192,15 +196,28 @@ def purge_accounts(api, account_numbers, *, confirm=False):
     return summary
 
 
-def purge_all_except(api, keep_numbers, *, confirm=False):
+def purge_all_except(api, keep_numbers=(), *, keep_emails=(), confirm=False):
     """Purge every account except those named, skipping anything that looks real.
 
-    Accounts with a paid subscription, a legal hold or uploaded meter readings
-    are never swept up in bulk; they are reported so a person can decide.
+    keep_emails keeps every account those sign-ins can reach. Accounts with a
+    paid subscription, a legal hold or uploaded meter readings are never swept
+    up in bulk; they are reported so a person can decide.
     """
     keep = {api.normalize_account_number(n) for n in keep_numbers if str(n or "").strip()}
+    emails = [api.clean_email(e) for e in keep_emails if str(e or "").strip()]
+    if emails:
+        with api.get_db_connection() as conn:
+            reachable = conn.execute(
+                f"""SELECT DISTINCT accounts.account_number FROM account_access_emails
+                    JOIN accounts ON accounts.id = account_access_emails.account_id
+                    WHERE account_access_emails.email IN ({_placeholders(emails)})""",
+                tuple(emails),
+            ).fetchall()
+        if not reachable:
+            raise ValueError("No account is reachable by " + ", ".join(emails) + ". Nothing was purged.")
+        keep |= {row["account_number"] for row in reachable}
     if not keep:
-        raise ValueError("Name at least one account to keep.")
+        raise ValueError("Name at least one account or email to keep.")
     with api.get_db_connection() as conn:
         rows = conn.execute(
             """
@@ -231,5 +248,8 @@ def purge_all_except(api, keep_numbers, *, confirm=False):
     summary = purge_accounts(api, targets, confirm=confirm) if targets else {
         "accounts": [], "customers_removed": [], "files": 0, "rows": 0, "confirmed": confirm}
     summary["kept"] = sorted(keep)
+    summary["kept_for_emails"] = emails
+    summary["accounts_count"] = len(summary["accounts"])
+    summary["customers_removed_count"] = len(summary["customers_removed"])
     summary["skipped_for_review"] = skipped
     return summary
