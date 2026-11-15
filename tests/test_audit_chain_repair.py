@@ -60,7 +60,13 @@ def test_deleting_audit_rows_breaks_startup_and_report_names_missing_predecessor
     assert report["missing_count"] == len(ids)
 
 
+def needs_sqlite_file():
+    if app.get_database_settings()["kind"] != "sqlite":
+        pytest.skip("Backup copy is simulated with a SQLite file; Postgres is rehearsed with pg_dump.")
+
+
 def test_restore_from_backup_copy_repairs_chain_without_changing_any_row(db, monkeypatch):
+    needs_sqlite_file()
     backup = db / "backup.db"
     shutil.copy(app.DB_PATH, backup)
     ids = old_buggy_purge()
@@ -95,6 +101,7 @@ def test_restore_from_backup_copy_repairs_chain_without_changing_any_row(db, mon
 
 
 def test_restore_refuses_altered_unbridging_or_duplicate_rows(db, monkeypatch):
+    needs_sqlite_file()
     backup = db / "backup.db"
     shutil.copy(app.DB_PATH, backup)
     ids = old_buggy_purge()
