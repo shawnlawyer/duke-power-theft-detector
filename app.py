@@ -745,21 +745,11 @@ def normalize_account_number(value: str | None) -> str:
 
 
 def clean_account_number(value: str | None) -> str:
-    normalized = clean_optional_text(value)
-    if not normalized:
-        raise ValueError("Enter the electric account number.")
-    if len(normalized) > 100:
-        raise ValueError("The electric account number is too long.")
-    return normalized
+    return clean_form_text(value, "electric account number", max_length=100, required=True)
 
 
 def clean_meter_value(value: str | None) -> str | None:
-    normalized = clean_optional_text(value)
-    if normalized is None:
-        return None
-    if len(normalized) > 100:
-        raise ValueError("The meter value is too long.")
-    return normalized
+    return clean_form_text(value, "meter value", max_length=100)
 
 
 def normalize_optional_date(value: str | None) -> str | None:
@@ -770,6 +760,13 @@ def normalize_optional_date(value: str | None) -> str | None:
         return ddate.fromisoformat(normalized).isoformat()
     except ValueError as exc:
         raise ValueError("Choose a valid baseline date.") from exc
+
+
+def clean_baseline_date(value: str | None) -> str | None:
+    normalized = normalize_optional_date(value)
+    if normalized and ddate.fromisoformat(normalized) > ddate.today():
+        raise ValueError("Choose a reference day that is not in the future.")
+    return normalized
 
 
 def timestamp_now() -> str:
@@ -2468,7 +2465,11 @@ def migrate_database(conn: DatabaseConnection) -> None:
 
 def clean_email(value: str | None) -> str:
     normalized = (value or "").strip().lower()
-    if "@" not in normalized or normalized.startswith("@") or normalized.endswith("@"):
+    if (
+        len(normalized) > 254
+        or not re.fullmatch(r"[^@\s]+@[^@\s]+", normalized)
+        or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+    ):
         raise ValueError("Enter a valid email address.")
     return normalized
 
@@ -2477,6 +2478,8 @@ def clean_password(value: str | None) -> str:
     password = value or ""
     if len(password) < 10:
         raise ValueError("Use at least 10 characters for the password.")
+    if len(password) > 256:
+        raise ValueError("Use a password with 256 characters or fewer.")
     return password
 
 
@@ -2709,7 +2712,7 @@ def ensure_commission_staff_user(email: str, full_name: str | None = None) -> di
     if commission is None:
         return None
     normalized_email = clean_email(email)
-    normalized_name = (full_name or "").strip() or normalized_email
+    normalized_name = clean_form_text(full_name, "name", max_length=120) or normalized_email
     timestamp = timestamp_now()
     with get_db_connection() as conn:
         row = conn.execute("SELECT id FROM staff_users WHERE email = ?", (normalized_email,)).fetchone()
@@ -3881,7 +3884,7 @@ def mark_staff_login_succeeded(staff_user_id: int) -> None:
 
 def invite_staff_user(email: str, full_name: str, role: str, invited_by_id: int) -> dict[str, object]:
     normalized_email = clean_email(email)
-    normalized_name = (full_name or "").strip() or normalized_email
+    normalized_name = clean_form_text(full_name, "name", max_length=120, required=True)
     normalized_role = clean_role(role)
     token = secrets.token_urlsafe(32)
     token_hash = staff_invite_token_hash(token)
@@ -5393,7 +5396,7 @@ def list_utility_access_guides() -> list[dict[str, str]]:
 
 
 def clean_energy_company(value: str | None) -> str:
-    normalized = (value or "").strip()
+    normalized = clean_form_text(value, "utility or provider name", max_length=100)
     if not normalized:
         return ""
     companies_by_lower = {company.lower(): company for company in list_energy_companies()}
@@ -6784,6 +6787,7 @@ def save_account_profile(
     meter_value: str | None | object = ACCOUNT_FIELD_UNSET,
     current_account_number: str | None = None,
 ) -> dict[str, object]:
+    normalized_baseline_date = clean_baseline_date(baseline_date) if baseline_date is not None else None
     with get_db_connection() as conn:
         if current_account_number is not None and normalize_account_number(current_account_number) != normalize_account_number(account_number):
             rename_account_number(conn, current_account_number, account_number)
@@ -6792,7 +6796,7 @@ def save_account_profile(
             account_number,
             display_name=display_name,
             energy_company=energy_company,
-            baseline_date=baseline_date,
+            baseline_date=normalized_baseline_date,
             meter_value=meter_value,
         )
         conn.commit()
@@ -9166,6 +9170,26 @@ def clean_optional_text(value: str | None) -> str | None:
     return normalized or None
 
 
+def clean_form_text(
+    value: str | None,
+    field_label: str,
+    *,
+    max_length: int,
+    required: bool = False,
+) -> str | None:
+    """Validate a browser text field again before it reaches persistent state."""
+    normalized = clean_optional_text(value)
+    if normalized is None:
+        if required:
+            raise ValueError(f"Enter the {field_label}.")
+        return None
+    if len(normalized) > max_length:
+        raise ValueError(f"Keep the {field_label} under {max_length} characters.")
+    if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        raise ValueError(f"Enter a valid {field_label}.")
+    return normalized
+
+
 def clean_note_date(value: str | None) -> str:
     normalized = clean_optional_text(value)
     if not normalized:
@@ -9207,7 +9231,7 @@ def clean_household_profile_values(
     require_address: bool = False,
     require_zip: bool = False,
 ) -> dict[str, object]:
-    address = clean_optional_text(form_like.get("address"))
+    address = clean_form_text(form_like.get("address"), "service address", max_length=300)
     if require_address and not address:
         raise ValueError("Enter the electric service address.")
     zip_was_provided = "zip_code" in form_like
@@ -9217,12 +9241,12 @@ def clean_household_profile_values(
     occupant_count = clean_optional_int(form_like.get("occupant_count"), "occupancy")
     year_built = clean_optional_int(form_like.get("year_built"), "year built")
     square_footage = clean_optional_int(form_like.get("square_footage"), "square footage")
-    if occupant_count is not None and occupant_count < 0:
-        raise ValueError("Occupancy cannot be negative.")
+    if occupant_count is not None and not 0 <= occupant_count <= 100:
+        raise ValueError("Choose an occupancy between 0 and 100.")
     if year_built is not None and not 1700 <= year_built <= datetime.now().year + 1:
         raise ValueError("Choose a valid year built.")
-    if square_footage is not None and square_footage < 0:
-        raise ValueError("Square footage cannot be negative.")
+    if square_footage is not None and not 0 <= square_footage <= 1_000_000:
+        raise ValueError("Choose square footage between 0 and 1,000,000.")
     return {
         "address": address,
         "zip_was_provided": zip_was_provided,
@@ -9230,10 +9254,10 @@ def clean_household_profile_values(
         "occupant_count": occupant_count,
         "year_built": year_built,
         "square_footage": square_footage,
-        "heating_system": clean_optional_text(form_like.get("heating_system")),
-        "cooling_system": clean_optional_text(form_like.get("cooling_system")),
-        "water_heater": clean_optional_text(form_like.get("water_heater")),
-        "notes": clean_optional_text(form_like.get("notes")),
+        "heating_system": clean_form_text(form_like.get("heating_system"), "heating system", max_length=120),
+        "cooling_system": clean_form_text(form_like.get("cooling_system"), "cooling system", max_length=120),
+        "water_heater": clean_form_text(form_like.get("water_heater"), "water heater", max_length=120),
+        "notes": clean_form_text(form_like.get("notes"), "house notes", max_length=2000),
     }
 
 
@@ -9429,7 +9453,7 @@ def create_customer_signup(
     accepted_at: str | None = None,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     normalized_email = clean_email(email)
-    normalized_name = (full_name or "").strip() or normalized_email
+    normalized_name = clean_form_text(full_name, "name", max_length=120, required=True)
     if not accept_policies:
         raise ValueError("Agree to the Terms and Privacy Notice to create an account.")
     if not confirm_account_authority:
@@ -13003,6 +13027,7 @@ def create_web_app() -> Flask:
         "pricing_page",
         "how_it_works_page",
         "for_homeowners_page",
+        "utilities_page",
         "for_commissions_page",
         "features_page",
         "for_professionals_page",
@@ -13420,6 +13445,7 @@ def create_web_app() -> Flask:
             "pricing_url": build_absolute_url(marketing_base_url, "/pricing"),
             "how_it_works_url": build_absolute_url(marketing_base_url, "/how-it-works"),
             "for_homeowners_url": build_absolute_url(marketing_base_url, "/for-homeowners"),
+            "utilities_url": build_absolute_url(marketing_base_url, "/utilities"),
             "for_commissions_url": build_absolute_url(marketing_base_url, "/for-commissions"),
             "features_url": build_absolute_url(marketing_base_url, "/features"),
             "for_professionals_url": build_absolute_url(marketing_base_url, "/for-professionals"),
@@ -14337,6 +14363,18 @@ def create_web_app() -> Flask:
                 page_title="For Homeowners",
                 page_description="Use Home Energy Watch to compare your overnight baseline, flagged nights, and utility export history without giving up your own records.",
                 active_page="for-homeowners",
+            ),
+        )
+
+    @app.get("/utilities")
+    def utilities_page():
+        return render_template(
+            "marketing_utilities.html",
+            guide_count=len(UTILITY_DOWNLOAD_GUIDES),
+            **build_marketing_page_context(
+                page_title="Supported Utilities",
+                page_description="Download guidance for the electric utilities Home Energy Watch currently supports, plus compatible usage files from other providers.",
+                active_page="utilities",
             ),
         )
 

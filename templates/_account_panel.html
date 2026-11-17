@@ -156,7 +156,7 @@
         <span>Utility / provider name</span>
         <input type="text" name="energy_company" value="{{ current_account.energy_company }}" list="utility-provider-options" maxlength="100" placeholder="Duke Energy, Xcel Energy, or your local utility">
         {% include "_utility_provider_options.html" %}
-        <small>Leave this blank if you want the ZIP code to suggest the provider.</small>
+        <small>Choose from our <a class="inline-link" href="{{ url_for('utilities_page') }}">supported utility list</a>, or leave this blank to match from your ZIP code. We add providers regularly, including utilities that participate in the Green Button Alliance.</small>
       </label>
       <label>
         <span>Meter value</span>
@@ -168,7 +168,7 @@
       </label>
       <label class="wide-field">
         <span>Service address</span>
-        <input type="text" name="address" value="{{ current_profile.address }}" autocomplete="street-address" data-utility-address required>
+        <input type="text" name="address" value="{{ current_profile.address }}" autocomplete="street-address" maxlength="300" data-utility-address required>
       </label>
       <label>
         <span>Matched electric company</span>
@@ -179,35 +179,35 @@
       </label>
       <label>
         <span>Reference day</span>
-        <input type="date" name="baseline_date" value="{{ current_account.baseline_date or '' }}">
+        <input type="date" name="baseline_date" value="{{ current_account.baseline_date or '' }}" max="{{ today_iso }}">
       </label>
       <label>
         <span>People on this meter</span>
-        <input type="number" name="occupant_count" min="0" step="1" value="{{ current_profile.occupant_count if current_profile.occupant_count is not none else '' }}">
+        <input type="number" name="occupant_count" min="0" max="100" step="1" inputmode="numeric" value="{{ current_profile.occupant_count if current_profile.occupant_count is not none else '' }}">
       </label>
       <label>
         <span>Year built</span>
-        <input type="number" name="year_built" min="1800" step="1" value="{{ current_profile.year_built if current_profile.year_built is not none else '' }}">
+        <input type="number" name="year_built" min="1700" max="{{ today_iso[:4]|int + 1 }}" step="1" inputmode="numeric" value="{{ current_profile.year_built if current_profile.year_built is not none else '' }}">
       </label>
       <label>
         <span>Square feet</span>
-        <input type="number" name="square_footage" min="0" step="1" value="{{ current_profile.square_footage if current_profile.square_footage is not none else '' }}">
+        <input type="number" name="square_footage" min="0" max="1000000" step="1" inputmode="numeric" value="{{ current_profile.square_footage if current_profile.square_footage is not none else '' }}">
       </label>
       <label>
         <span>Heating system</span>
-        <input type="text" name="heating_system" value="{{ current_profile.heating_system }}" placeholder="Heat pump, gas furnace, baseboard">
+        <input type="text" name="heating_system" value="{{ current_profile.heating_system }}" maxlength="120" placeholder="Heat pump, gas furnace, baseboard">
       </label>
       <label>
         <span>Cooling system</span>
-        <input type="text" name="cooling_system" value="{{ current_profile.cooling_system }}" placeholder="Central air, heat pump, window units">
+        <input type="text" name="cooling_system" value="{{ current_profile.cooling_system }}" maxlength="120" placeholder="Central air, heat pump, window units">
       </label>
       <label>
         <span>Water heater</span>
-        <input type="text" name="water_heater" value="{{ current_profile.water_heater }}" placeholder="Electric tank, tankless, gas">
+        <input type="text" name="water_heater" value="{{ current_profile.water_heater }}" maxlength="120" placeholder="Electric tank, tankless, gas">
       </label>
       <label class="wide-field">
         <span>House notes</span>
-        <input type="text" name="notes" value="{{ current_profile.notes }}" placeholder="Pool pump, well pump, EV charger, workshop, solar, crawlspace equipment">
+        <textarea name="notes" rows="3" maxlength="2000" placeholder="Pool pump, well pump, EV charger, workshop, solar, crawlspace equipment">{{ current_profile.notes }}</textarea>
       </label>
     </div>
     <p class="plain-note">These details make it easier to tell the difference between expected household use and something that does not fit the home.</p>
