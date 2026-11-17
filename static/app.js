@@ -64,6 +64,22 @@
     });
   }
 
+  function setupNativeFormValidation() {
+    document.querySelectorAll("form").forEach((form) => {
+      form.addEventListener("submit", (event) => {
+        if (form.checkValidity()) {
+          return;
+        }
+        event.preventDefault();
+        const firstInvalid = form.querySelector(":invalid");
+        if (firstInvalid) {
+          firstInvalid.focus();
+          firstInvalid.reportValidity();
+        }
+      });
+    });
+  }
+
   function setupPasswordToggles() {
     document.querySelectorAll('input[type="password"]').forEach((input, index) => {
       if (input.dataset.passwordToggleReady === "true") {
@@ -434,6 +450,7 @@
   }
 
   setupUtilityLookups();
+  setupNativeFormValidation();
   setupPasswordToggles();
   setupLoadAutocomplete();
   setupPasskeys();

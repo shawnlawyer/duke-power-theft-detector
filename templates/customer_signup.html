@@ -38,21 +38,21 @@
         <div class="field-grid">
           <label>
             <span>Name</span>
-            <input type="text" name="full_name" value="{{ signup_form.full_name }}" required>
+            <input type="text" name="full_name" value="{{ signup_form.full_name }}" autocomplete="name" maxlength="120" required>
           </label>
           <label>
             <span>Email</span>
-            <input type="email" name="email" value="{{ signup_form.email }}" required>
+            <input type="email" name="email" value="{{ signup_form.email }}" autocomplete="email" maxlength="254" required>
           </label>
           <label>
             <span>Electric account number</span>
-            <input type="text" name="account_number" value="{{ signup_form.account_number }}" required>
+            <input type="text" name="account_number" value="{{ signup_form.account_number }}" maxlength="100" required>
           </label>
           <label>
             <span>Utility / provider name</span>
             <input type="text" name="energy_company" value="{{ signup_form.energy_company }}" list="utility-provider-options" maxlength="100" placeholder="Duke Energy, Entergy, or your local utility">
             {% include "_utility_provider_options.html" %}
-            <small>Leave this blank if you want the ZIP code to suggest the provider.</small>
+            <small>Choose from our <a class="inline-link" href="{{ url_for('utilities_page') }}">supported utility list</a>, or leave this blank to match from your ZIP code. We add providers regularly, including utilities that participate in the Green Button Alliance.</small>
           </label>
           <label>
             <span>Meter value</span>
@@ -64,7 +64,7 @@
           </label>
           <label class="wide-field">
             <span>Service address</span>
-            <input type="text" name="address" value="{{ signup_form.address }}" placeholder="Street, city, state" autocomplete="street-address" data-utility-address required>
+            <input type="text" name="address" value="{{ signup_form.address }}" placeholder="Street, city, state" autocomplete="street-address" maxlength="300" data-utility-address required>
           </label>
           <label>
             <span>Matched electric company</span>

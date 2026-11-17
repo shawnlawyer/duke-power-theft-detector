@@ -2360,6 +2360,58 @@ def test_account_forms_keep_zip_lookup_and_allow_manual_provider_names(tmp_path,
     assert b"Home name" not in signup.data
 
 
+def test_customer_forms_and_server_reject_invalid_field_values(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+
+    signup = lxml_html.fromstring(client.get("/signup").data)
+    assert signup.xpath('//input[@name="email" and @type="email" and @maxlength="254"]')
+    assert signup.xpath('//input[@name="full_name" and @maxlength="120"]')
+    assert signup.xpath('//input[@name="zip_code" and @pattern="[0-9]{5}(-[0-9]{4})?"]')
+    assert signup.xpath('//input[@name="address" and @maxlength="300"]')
+
+    with pytest.raises(ValueError, match="valid email"):
+        app.clean_email("not an email")
+    with pytest.raises(ValueError, match="Enter the name"):
+        app.create_customer_signup(
+            email="missing-name@example.com",
+            full_name="",
+            password="customer-password-123",
+            account_number="missing-name-account",
+            energy_company="Duke Energy",
+            plan_id="home",
+            household_form={"address": "123 Main Street", "zip_code": "28205"},
+            accept_policies=True,
+            confirm_account_authority=True,
+        )
+    with pytest.raises(ValueError, match="electric account number"):
+        app.clean_account_number("account\x00number")
+    with pytest.raises(ValueError, match="service address"):
+        app.clean_household_profile_values({"address": "x" * 301}, require_address=True)
+    with pytest.raises(ValueError, match="occupancy"):
+        app.clean_household_profile_values({"occupant_count": "2.5"})
+    with pytest.raises(ValueError, match="occupancy between"):
+        app.clean_household_profile_values({"occupant_count": "101"})
+    with pytest.raises(ValueError, match="square footage between"):
+        app.clean_household_profile_values({"square_footage": "1000001"})
+    with pytest.raises(ValueError, match="not in the future"):
+        app.save_account_profile("future-reference", baseline_date="2999-01-01")
+
+
+def test_supported_utilities_page_lists_every_verified_download_guide(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    response = app.web_app.test_client().get("/utilities")
+
+    assert response.status_code == 200
+    document = lxml_html.fromstring(response.data)
+    assert b"Green Button Alliance" in response.data
+    assert len(document.xpath('//article[contains(@class, "hew-card")]')) == len(app.UTILITY_DOWNLOAD_GUIDES)
+    for guide in app.UTILITY_DOWNLOAD_GUIDES:
+        assert guide.provider in document.text_content()
+
+
 def test_account_profile_stores_and_searches_energy_company(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
 

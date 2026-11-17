@@ -1,0 +1,26 @@
+{% extends "marketing_base.html" %}
+
+{% block content %}
+  <section class="hew-section">
+    <div class="hew-wrap">
+      <div class="hew-section-head">
+        <span class="hew-eyebrow">Utility downloads</span>
+        <h1>Use the history your utility already provides.</h1>
+        <p class="hew-lead">We keep clear download guidance for {{ guide_count }} electric utilities and add providers regularly, including utilities that participate in the Green Button Alliance. We can also read compatible Green Button XML and interval CSV files from other providers.</p>
+      </div>
+
+      <div class="hew-steps">
+        {% for guide in utility_download_guides %}
+          <article class="hew-card">
+            <h2>{{ guide.provider }}</h2>
+            <p>{{ guide.summary }}</p>
+            <a class="hew-btn hew-btn-ghost" href="{{ guide.url }}" target="_blank" rel="noopener noreferrer">{{ guide.link_label }}</a>
+          </article>
+        {% endfor %}
+      </div>
+
+      <p class="hew-lead">A guide helps you get a customer download. It does not create an automatic connection, and a utility name alone does not guarantee that every export contains interval readings.</p>
+      <a class="hew-btn hew-btn-primary" href="{{ start_home_url }}">Add your electric account</a>
+    </div>
+  </section>
+{% endblock %}
