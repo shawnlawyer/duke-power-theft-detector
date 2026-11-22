@@ -42,6 +42,16 @@ The logs must not include passwords, email addresses, account numbers, file cont
 4. If the issue is database-related, stop and preserve the current instance and recent logs before any migration work.
 5. If the issue is request-volume related, reduce traffic at the load balancer or reverse proxy before changing app code.
 
+## When deployment access fails
+
+Record the exact command target and error before changing any access setting. Do not assume an SSH failure means the public IP address or security group must change.
+
+1. A timeout, refused connection, or no-route error can indicate a wrong or changed target, an offline instance, a missing route, or a security-group rule. Read the current EC2 instance state, public address or DNS name, and inbound port-22 rules first. Change a security group only when that check identifies a specific missing rule.
+2. A host-key warning can indicate that the address now belongs to a different host. Stop and verify the instance identity before replacing a known-host entry.
+3. `Permission denied (publickey)` means the SSH service answered and rejected the offered identity. Do not change the security group for this error. Confirm the intended operating-system user, key file, SSH configuration, and the instance key-pair record.
+4. If the normal key is unavailable, use a previously verified recovery method such as Systems Manager or an explicitly authorized temporary EC2 Instance Connect session. Do not make a permanent key or access-policy change merely to complete a deployment.
+5. Before closing the incident, record the verified instance ID, current target address or DNS name, named key pair, successful access method, date checked, and owner of that access method. Keep private-key paths and credential material out of the runbook.
+
 ## When the database is unhappy
 
 1. Confirm whether the problem is connectivity, authentication, migration drift, or a lock contention issue.
