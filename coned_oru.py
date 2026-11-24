@@ -303,6 +303,7 @@ def save_connection(api, account, key, secret):
 
 def replace_secret(api, connection, new_secret):
     """Store refreshed tokens only if the connection is unchanged and still permitted."""
+    sealed = api.seal_secret_value(new_secret)
     with api.get_db_connection() as conn:
         row = conn.execute("""SELECT utility_connections.secret_token FROM utility_connections
             JOIN accounts ON accounts.id = utility_connections.account_id
@@ -310,15 +311,16 @@ def replace_secret(api, connection, new_secret):
               AND EXISTS (SELECT 1 FROM account_data_authorizations
                           WHERE account_id = accounts.id AND status = 'active')""",
             (connection["id"], METHOD)).fetchone()
-        if not row or api.unseal_secret_value(row["secret_token"]) != connection["access_secret"]:
+        if not row or row["secret_token"] != connection["_sealed_secret"] or api.unseal_secret_value(row["secret_token"]) != connection["access_secret"]:
             raise ConnectionError("Utility access changed or permission was withdrawn. Start again.")
         changed = conn.execute("""UPDATE utility_connections SET secret_token = ?, updated_at = ?
             WHERE id = ? AND access_method = ? AND secret_token = ?""",
-            (api.seal_secret_value(new_secret), api.timestamp_now(), connection["id"], METHOD, row["secret_token"]))
+            (sealed, api.timestamp_now(), connection["id"], METHOD, row["secret_token"]))
         if changed.rowcount != 1:
             raise ConnectionError("Utility access changed or permission was withdrawn. Start again.")
         conn.commit()
     connection["access_secret"] = new_secret
+    connection["_sealed_secret"] = sealed
 
 
 def refresh(api, cfg, connection, payload):
@@ -370,7 +372,7 @@ def sync(api, connection):
         conn.commit()
     try:
         # Reload after taking the lease; a preceding sync may have rotated credentials.
-        connection = api.load_utility_connection_for_sync(connection["account_number"], connection["id"])
+        connection.update(api.load_utility_connection_for_sync(connection["account_number"], connection["id"]))
         return _sync(api, connection)
     finally:
         with api.get_db_connection() as conn:
@@ -394,7 +396,7 @@ def _sync(api, connection):
             source_path=f"green-button://{payload['provider_key'].lower()}/connection/{connection['id']}",
             account_number=connection["account_number"], adapter_id=METHOD,
             adapter_name=f"{label(payload['provider_key'])} automatic connection",
-            connection_guard=(int(connection["id"]), connection["access_secret"]))
+            connection_guard=connection)
     except AuthorizationExpired:
         with api.get_db_connection() as conn:
             row = conn.execute("SELECT secret_token, provider_name FROM utility_connections WHERE id = ?",

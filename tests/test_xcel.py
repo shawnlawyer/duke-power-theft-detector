@@ -442,3 +442,34 @@ def test_real_transport_allows_service_check_without_collection_switch(monkeypat
         REAL_TRANSPORT(xc.RESOURCE + "ReadServiceStatus", token="t", service_check=True)
     with pytest.raises(xc.ConnectionError):
         REAL_TRANSPORT(xc.RESOURCE + "ReadServiceStatus", token="t")
+
+
+@pytest.mark.parametrize("phase", ["refresh", "download"])
+def test_same_credentials_reconnect_invalidates_inflight_sync(setup, monkeypatch, phase):
+    client, _, _ = setup
+    complete(client)
+    connection = app.list_utility_connections("123456")[0]
+    snapshot = app.load_utility_connection_for_sync("123456", connection["id"])
+    payload = json.loads(snapshot["access_secret"])
+    if phase == "refresh":
+        payload["expires_at"] = 0
+    encoded = json.dumps(payload)
+    with app.get_db_connection() as conn:
+        conn.execute("UPDATE utility_connections SET secret_token = ? WHERE id = ?", (app.seal_secret_value(encoded), connection["id"]))
+    original = xc.transport
+    replacement = {}
+    def reconnect(url, **kwargs):
+        if (phase == "refresh" and kwargs.get("form")) or (phase == "download" and url == xc.RESOURCE + "Batch/" + METER[len(xc.RESOURCE):]):
+            with app.get_db_connection() as conn:
+                conn.execute("UPDATE utility_connections SET secret_token = ?, status = 'Ready to sync' WHERE id = ?",
+                             (app.seal_secret_value(encoded), connection["id"]))
+                replacement.update(dict(conn.execute("SELECT * FROM utility_connections WHERE id = ?", (connection["id"],)).fetchone()))
+        return original(url, **kwargs)
+    monkeypatch.setattr(xc, "transport", reconnect)
+    with pytest.raises(ValueError, match="changed"):
+        app.sync_utility_connection("123456", connection["id"])
+    assert replacement
+    with app.get_db_connection() as conn:
+        assert dict(conn.execute("SELECT * FROM utility_connections WHERE id = ?", (connection["id"],)).fetchone()) == replacement
+        assert conn.execute("SELECT COUNT(*) AS n FROM interval_reading_sources").fetchone()["n"] == 0
+    assert app.load_intervals_from_db("123456").empty

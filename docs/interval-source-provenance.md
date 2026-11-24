@@ -10,4 +10,11 @@ Readings, assertions and the file summary commit or roll back together. Non-fini
 
 Customer export format 4 adds `interval-sources.csv` for authorized accounts, with sanitized source basenames and CSV formula protection. Local paths, connection identifiers and credentials are not exported. Basenames are display labels and need not uniquely identify different sources.
 
-This adds no provider-specific deletion operation, retention decision or connector activation. It does not reconstruct unknown source history or prove a live utility feed. Any later operation that changes a retained canonical value must also recompute the agreement flags. The unguarded Duke and generic-download import paths require separate consent-race review before treating their records as guarded provider observations.
+This adds no provider-specific deletion operation, retention decision or connector activation. It does not reconstruct unknown source history or prove a live utility feed. Any later operation that changes a retained canonical value must also recompute the agreement flags. Duke and generic-download imports now use the same transactional authorization guard as the other connectors; this does not establish provider approval or a verified feed.
+
+
+## In-flight connection changes
+
+Imports lock the account and connection before checking active authorization. Sync attempts carry the original encrypted-token snapshot, access method and download target; a reconnect that saves the same plaintext credentials still invalidates the old attempt. Duke refreshes verify the account identity and authorization before saving tokens, then use the refreshed snapshot for import. Other connectors update the shared attempt snapshot only after their own conditional refresh succeeds.
+
+Success and failure status changes use the same guard. The web route and scheduled runner no longer perform an unconditional second status write. Replaced, withdrawn, disabled or deleted connections keep their current state. A download that fails parsing or is refused before import loses only its newly created file; an import committed before a later reconnect retains its readings and file. Network fetches occur outside database locks. Permission remains valid when another manager still has an active authorization, matching existing account policy.
