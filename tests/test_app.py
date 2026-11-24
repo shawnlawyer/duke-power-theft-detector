@@ -1094,6 +1094,7 @@ def test_customer_data_export_is_tenant_bounded_and_excludes_secrets(tmp_path, m
     app.save_household_profile("acct-b", {"address": "999 Other Lane", "zip_code": "27601"})
     app.add_account_access_email("acct-b", "other@example.com", full_name="Other Owner", access_level="Manager")
     app.add_load_item("acct-b", label="Private load", quantity=1, watts_each=999, include_when_off=False)
+    app.import_interval_frame_to_db(pd.DataFrame([{ "start_epoch": 1704067200, "duration_s": 900, "wh": 777.0 }]), "other-customer-private.xml", "acct-b")
     client = app.web_app.test_client()
     customer_sign_in(client)
 
@@ -1106,6 +1107,7 @@ def test_customer_data_export_is_tenant_bounded_and_excludes_secrets(tmp_path, m
     profile_name = next(name for name in names if name.endswith("/profile.json"))
     profile = json.loads(extracted[profile_name])
     interval_name = next(name for name in names if name.endswith("/interval-readings.csv"))
+    sources_name = next(name for name in names if name.endswith("/interval-sources.csv"))
     report_name = next(name for name in names if name.endswith("/reports/authorized-report.csv"))
     with app.get_db_connection() as conn:
         event = conn.execute(
@@ -1118,7 +1120,7 @@ def test_customer_data_export_is_tenant_bounded_and_excludes_secrets(tmp_path, m
     assert "home-energy-watch-data-" in response.headers["Content-Disposition"]
     assert manifest["customer"]["email"] == "owner@example.com"
     assert manifest["account_count"] == 1
-    assert manifest["format_version"] == 3
+    assert manifest["format_version"] == 4
     assert manifest["policy_acceptances"][0]["terms_version"] == app.CURRENT_TERMS_VERSION
     assert profile["account"]["account_number"] == "acct-a"
     assert profile["household"]["address"] == "123 Main Street"
@@ -1126,11 +1128,14 @@ def test_customer_data_export_is_tenant_bounded_and_excludes_secrets(tmp_path, m
     assert profile["utility_connections"][0]["provider_name"] == "Duke Energy Carolinas, LLC"
     assert profile["data_authorizations"][0]["status"] == "active"
     assert profile["data_requests"] == []
+    assert b"observed_import" in extracted[sources_name]
+    assert b"sample_interval.xml" in extracted[sources_name]
     assert b"2024-01-01" in extracted[interval_name]
     assert b"2026-01-01,12.3" in extracted[report_name]
     assert b"acct-b" not in combined
     assert b"999 Other Lane" not in combined
     assert b"Private load" not in combined
+    assert b"other-customer-private.xml" not in combined
     assert b"customer-approved-secret-1234" not in combined
     assert b"owner-utility-login@example.com" not in combined
     assert b"password_hash" not in combined

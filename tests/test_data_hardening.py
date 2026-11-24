@@ -140,6 +140,7 @@ def test_data_deletion_removes_assistant_notes_equipment_and_commission_rows(tmp
             tuple(values.values()),
         )
         conn.commit()
+    app.import_interval_file_to_db(FIXTURE, account_number="acct-wipe")
     data_request = app.create_account_deletion_request("acct-wipe", int(customer["id"]))
     app.review_account_deletion_request(int(data_request["id"]), int(commissioner["id"]), "approve", "Verified.")
 
@@ -151,6 +152,9 @@ def test_data_deletion_removes_assistant_notes_equipment_and_commission_rows(tmp
             assert conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE account_id = ?", (account_id,)).fetchone()["count"] == 0
     for table in tables:
         assert result["deleted_counts"][table] == 1
+    assert result["deleted_counts"]["interval_reading_sources"] > 0
+    with app.get_db_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM interval_reading_sources").fetchone()["n"] == 0
 
 
 def test_compare_upload_files_are_removed_after_report(tmp_path, monkeypatch):
@@ -334,6 +338,10 @@ def test_csv_values_neutralize_tab_and_carriage_return_and_export_uses_helper(tm
     with zipfile.ZipFile(BytesIO(response.data)) as archive:
         name = next(name for name in archive.namelist() if name.endswith("/interval-readings.csv"))
         rows = list(csv.DictReader(StringIO(archive.read(name).decode("utf-8"))))
+        source_name = next(name for name in archive.namelist() if name.endswith("/interval-sources.csv"))
+        source_rows = list(csv.DictReader(StringIO(archive.read(source_name).decode("utf-8"))))
+    assert source_rows
+    assert all(row["source_file"] == "'=HYPERLINK(1).xml" for row in source_rows)
     assert rows
     assert all(row["source_file"] == "'=HYPERLINK(1).xml" for row in rows)
 
@@ -436,3 +444,129 @@ def test_analysis_surface_always_shows_caveat(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert CAVEAT.encode() in response.data
+
+
+@pytest.mark.parametrize("sources", [
+    ("national-grid://connection/17", "/private/upload.xml"),
+    ("/private/upload.xml", "national-grid://connection/17"),
+])
+def test_interval_sources_preserve_both_orders_and_conflicting_observations(tmp_path, monkeypatch, sources):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    frame = pd.DataFrame([{"start_epoch": 1704067200, "duration_s": 900, "wh": 250.0}])
+    first = app.import_interval_frame_to_db(frame, sources[0], "acct-sources")
+    second = app.import_interval_frame_to_db(frame, sources[1], "acct-sources")
+    repeat = app.import_interval_frame_to_db(frame, sources[1], "acct-sources")
+    conflict = frame.assign(wh=300.0)
+    rejected = app.import_interval_frame_to_db(conflict, sources[1], "acct-sources")
+    app.import_interval_frame_to_db(conflict, sources[1], "acct-sources")
+    assert first["added_count"] == 1
+    assert second["already_present_count"] == repeat["already_present_count"] == 1
+    assert rejected["conflicts_skipped_count"] == 1
+    with app.get_db_connection() as conn:
+        retained = conn.execute("SELECT wh, source_path FROM interval_readings").fetchone()
+        rows = conn.execute("SELECT * FROM interval_reading_sources").fetchall()
+    assert retained["wh"] == 250.0
+    assert retained["source_path"] == sources[0]
+    assert len(rows) == 3
+    assert {row["source_path"] for row in rows if row["matches_retained_value"]} == set(sources)
+    assert [(row["source_path"], row["asserted_wh"]) for row in rows if not row["matches_retained_value"]] == [(sources[1], 300.0)]
+    assert all(row["record_kind"] == "observed_import" for row in rows)
+
+
+def test_interval_sources_account_isolation_and_repeat_timestamps(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    frame = pd.DataFrame([{"start_epoch": 1704067200, "duration_s": 900, "wh": 250.0}])
+    monkeypatch.setattr(app, "timestamp_now", lambda: "2026-11-23T00:00:00+00:00")
+    app.import_interval_frame_to_db(frame, "same.xml", "acct-one")
+    monkeypatch.setattr(app, "timestamp_now", lambda: "2026-11-24T00:00:00+00:00")
+    app.import_interval_frame_to_db(frame, "same.xml", "acct-one")
+    app.import_interval_frame_to_db(frame.assign(wh=400.0), "same.xml", "acct-two")
+    with app.get_db_connection() as conn:
+        rows = conn.execute("SELECT * FROM interval_reading_sources ORDER BY account_id").fetchall()
+    assert len(rows) == 2
+    assert rows[0]["account_id"] != rows[1]["account_id"]
+    assert rows[0]["first_observed_at"].startswith("2026-11-23")
+    assert rows[0]["last_observed_at"].startswith("2026-11-24")
+    assert rows[1]["asserted_wh"] == 400.0
+    assert all(row["matches_retained_value"] == 1 for row in rows)
+
+
+@pytest.mark.parametrize("invalid_wh", [float("nan"), float("inf"), -float("inf")])
+def test_interval_sources_and_readings_rollback_together(tmp_path, monkeypatch, invalid_wh):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    frame = pd.DataFrame([
+        {"start_epoch": 1704067200, "duration_s": 900, "wh": 250.0},
+        {"start_epoch": 1704068100, "duration_s": 900, "wh": invalid_wh},
+    ])
+    with pytest.raises(ValueError, match="finite"):
+        app.import_interval_frame_to_db(frame, "failed.xml", "acct-rollback")
+    with app.get_db_connection() as conn:
+        for table in ("interval_readings", "interval_reading_sources", "imported_files"):
+            assert conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"] == 0
+
+
+def test_interval_sources_backfill_only_known_canonical_source_once(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    frame = pd.DataFrame([{"start_epoch": 1704067200, "duration_s": 900, "wh": 250.0}])
+    app.import_interval_frame_to_db(frame, "known.xml", "acct-legacy")
+    app.import_interval_frame_to_db(frame, "historical-duplicate.xml", "acct-legacy")
+    with app.get_db_connection() as conn:
+        conn.execute("DROP TABLE interval_reading_sources")
+    app.SCHEMA_READY_TARGETS.clear()
+    app.ensure_database()
+    with app.get_db_connection() as conn:
+        rows = conn.execute("SELECT * FROM interval_reading_sources").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["source_path"] == "known.xml"
+        assert rows[0]["record_kind"] == "retained_before_tracking"
+        assert rows[0]["adapter_id"] == ""
+        conn.execute("DELETE FROM interval_reading_sources")
+    app.SCHEMA_READY_TARGETS.clear()
+    app.ensure_database()
+    with app.get_db_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM interval_reading_sources").fetchone()["n"] == 0
+        assert conn.execute("SELECT COUNT(*) AS n FROM interval_readings").fetchone()["n"] == 1
+
+
+@pytest.mark.parametrize("failure", ["revoked", "replaced", "wrong_account"])
+def test_interval_sources_respect_connection_guard(tmp_path, monkeypatch, failure):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    authorize_account("acct-guard", email="owner@example.com")
+    app.save_utility_connection("acct-guard", {
+        "provider_name": "Duke Energy Carolinas, LLC", "connection_label": "Main account",
+        "access_method": "customer_api_key", "access_identifier": "test-account",
+        "access_secret": "test-approved-secret",
+    })
+    connection = app.list_utility_connections("acct-guard")[0]
+    guarded = app.load_utility_connection_for_sync("acct-guard", connection["id"])
+    frame = pd.DataFrame([{"start_epoch": 1704067200, "duration_s": 900, "wh": 250.0}])
+    app.import_interval_frame_to_db(frame, "guarded://test", "acct-guard",
+                                   connection_guard=(connection["id"], guarded["access_secret"]))
+    with app.get_db_connection() as conn:
+        row = conn.execute("SELECT * FROM interval_reading_sources").fetchone()
+        assert row["guarded_connection_id"] == connection["id"]
+        if failure == "revoked":
+            conn.execute("UPDATE account_data_authorizations SET status = 'revoked' WHERE account_id = ?", (app.find_account("acct-guard")["id"],))
+        elif failure == "replaced":
+            conn.execute("UPDATE utility_connections SET secret_token = ? WHERE id = ?",
+                         (app.seal_secret_value("replacement"), connection["id"]))
+    with pytest.raises(ValueError):
+        app.import_interval_frame_to_db(frame, "refused://test", "wrong-account" if failure == "wrong_account" else "acct-guard",
+                                       connection_guard=(connection["id"], guarded["access_secret"]))
+    with app.get_db_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM interval_reading_sources").fetchone()["n"] == 1
+        assert conn.execute("SELECT COUNT(*) AS n FROM imported_files").fetchone()["n"] == 1
+
+
+def test_interval_sources_keep_shared_managed_files(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    frame = pd.DataFrame([{"start_epoch": 1704067200, "duration_s": 900, "wh": 250.0}])
+    shared = app.INPUT_DIR / "shared.xml"
+    shared.write_bytes(FIXTURE.read_bytes())
+    app.import_interval_frame_to_db(frame, str(shared), "acct-one")
+    app.import_interval_frame_to_db(frame, "original.xml", "acct-two")
+    app.import_interval_frame_to_db(frame, str(shared), "acct-two")
+    with app.get_db_connection() as conn:
+        second = app.find_account("acct-two")["id"]
+        conn.execute("DELETE FROM imported_files WHERE account_id = ? AND path = ?", (second, str(shared)))
+        assert shared not in app.account_managed_files(conn, app.find_account("acct-one")["id"])
