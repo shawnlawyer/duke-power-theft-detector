@@ -312,7 +312,7 @@ def sync(api, connection):
         conn.commit()
     try:
         # Reload after obtaining the cross-worker lease; a preceding sync may have rotated credentials.
-        connection = api.load_utility_connection_for_sync(connection["account_number"], connection["id"])
+        connection.update(api.load_utility_connection_for_sync(connection["account_number"], connection["id"]))
         return _sync(api, connection)
     finally:
         with api.get_db_connection() as conn:
@@ -326,17 +326,19 @@ def _sync(api, connection):
         payload = json.loads(connection["access_secret"])
         if payload["expires_at"] <= time.time() + 60:
             payload = exchange({"grant_type": "refresh_token", "refresh_token": payload["refresh_token"]}, payload)
+            sealed = api.seal_secret_value(json.dumps(payload))
             with api.get_db_connection() as conn:
                 row = conn.execute("SELECT secret_token FROM utility_connections WHERE id = ?", (connection["id"],)).fetchone()
-                if not row or api.unseal_secret_value(row["secret_token"]) != connection["access_secret"]:
+                if not row or row["secret_token"] != connection["_sealed_secret"] or api.unseal_secret_value(row["secret_token"]) != connection["access_secret"]:
                     raise ConnectionError("National Grid connection changed during the refresh. Try again.")
                 changed = conn.execute("""UPDATE utility_connections SET secret_token = ?, updated_at = ?
                     WHERE id = ? AND access_method = ? AND secret_token = ?""",
-                    (api.seal_secret_value(json.dumps(payload)), api.timestamp_now(), connection["id"], METHOD, row["secret_token"]))
+                    (sealed, api.timestamp_now(), connection["id"], METHOD, row["secret_token"]))
                 if changed.rowcount != 1:
                     raise AuthorizationExpired("National Grid access was removed during the refresh.")
                 conn.commit()
             connection["access_secret"] = json.dumps(payload)
+            connection["_sealed_secret"] = sealed
         meters = matched_usage_points(payload, connection["account_number"])
         if meters != payload["meters"]:
             raise ConnectionError("National Grid's meter list changed. Connect again to confirm the account.")
@@ -354,7 +356,7 @@ def _sync(api, connection):
             source_path=f"national-grid://connection/{connection['id']}",
             account_number=connection["account_number"], adapter_id=METHOD,
             adapter_name="National Grid automatic connection",
-            connection_guard=(int(connection["id"]), json.dumps(payload)))
+            connection_guard=connection)
     except AuthorizationExpired:
         with api.get_db_connection() as conn:
             row = conn.execute("SELECT secret_token FROM utility_connections WHERE id = ?", (connection["id"],)).fetchone()

@@ -348,20 +348,22 @@ def sync(api, connection):
             raise ConnectionError("Xcel is already syncing this account.")
         conn.commit()
     try:
-        connection = api.load_utility_connection_for_sync(connection["account_number"], connection["id"])
+        connection.update(api.load_utility_connection_for_sync(connection["account_number"], connection["id"]))
         payload = json.loads(connection["access_secret"])
         if payload["expires_at"] <= time.time() + 60:
             payload = exchange({"grant_type": "refresh_token", "refresh_token": payload["refresh_token"]}, payload)
+            sealed = api.seal_secret_value(json.dumps(payload))
             with api.get_db_connection() as conn:
                 row = conn.execute("SELECT secret_token FROM utility_connections WHERE id = ?", (connection["id"],)).fetchone()
-                if not row or api.unseal_secret_value(row["secret_token"]) != connection["access_secret"]:
+                if not row or row["secret_token"] != connection["_sealed_secret"] or api.unseal_secret_value(row["secret_token"]) != connection["access_secret"]:
                     raise ConnectionError("The Xcel connection changed during refresh.")
                 changed = conn.execute("UPDATE utility_connections SET secret_token = ?, updated_at = ? WHERE id = ? AND secret_token = ?",
-                    (api.seal_secret_value(json.dumps(payload)), api.timestamp_now(), connection["id"], row["secret_token"]))
+                    (sealed, api.timestamp_now(), connection["id"], row["secret_token"]))
                 if changed.rowcount != 1:
                     raise AuthorizationExpired("Xcel access was removed during refresh.")
                 conn.commit()
             connection["access_secret"] = json.dumps(payload)
+            connection["_sealed_secret"] = sealed
         points = usage_points(payload)
         meters = payload["meters"]
         if not meters or len(set(meters)) != len(meters) or any(m not in points for m in meters):
@@ -376,7 +378,7 @@ def sync(api, connection):
             raise AuthorizationExpired("Permission was withdrawn during refresh.")
         return api.import_interval_frame_to_db(pd.DataFrame(rows), source_path=f"xcel://connection/{connection['id']}",
             account_number=connection["account_number"], adapter_id=METHOD, adapter_name="Xcel automatic connection",
-            connection_guard=(int(connection["id"]), json.dumps(payload)))
+            connection_guard=connection)
     except AuthorizationExpired:
         with api.get_db_connection() as conn:
             row = conn.execute("SELECT secret_token FROM utility_connections WHERE id = ?", (connection["id"],)).fetchone()

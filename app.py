@@ -8825,40 +8825,66 @@ def load_utility_connection_for_sync(account_number: str | None, connection_id: 
         "access_method": mapping["access_method"],
         "access_identifier": mapping.get("access_identifier") or "",
         "access_secret": access_secret,
+        "_sealed_secret": mapping["secret_token"],
         "secret_last4": mapping.get("secret_last4"),
         "status": mapping.get("status") or "Not connected",
         "last_sync_at": mapping.get("last_sync_at"),
     }
 
 
-def update_duke_oauth_connection_secret(
+class UtilityConnectionChanged(ValueError):
+    """The fetched data no longer belongs to a currently permitted connection."""
+
+
+def lock_authorized_utility_connection(
+    conn: DatabaseConnection,
     account_number: str | None,
-    connection_id: int,
-    secret_payload: str,
-) -> None:
-    parse_duke_oauth_secret(secret_payload)
-    timestamp = timestamp_now()
+    guard: tuple[int, str] | dict[str, object],
+):
+    if conn.kind != "postgres":
+        conn.execute("BEGIN IMMEDIATE")
+    suffix = " FOR UPDATE" if conn.kind == "postgres" else ""
+    # Parent first, matching connection creation. Do not recreate a deleted account.
+    account = conn.execute("SELECT id FROM accounts WHERE account_number = ? AND disabled_at IS NULL" + suffix,
+                           (normalize_account_number(account_number),)).fetchone()
+    if account is None:
+        raise UtilityConnectionChanged("The utility account is no longer available for import.")
+    connection_id, expected_secret = ((guard["id"], guard["access_secret"]) if isinstance(guard, dict) else guard)
+    row = conn.execute("""SELECT account_id, secret_token, access_method, access_identifier
+        FROM utility_connections WHERE id = ? AND account_id = ?""" + suffix,
+        (connection_id, account["id"])).fetchone()
+    if row is None or not expected_secret or unseal_secret_value(row["secret_token"]) != expected_secret:
+        raise UtilityConnectionChanged("The utility connection changed before import. Please sync again.")
+    if isinstance(guard, dict) and (
+        row["secret_token"] != guard["_sealed_secret"]
+        or row["access_method"] != guard["access_method"]
+        or (row["access_identifier"] or "") != (guard.get("access_identifier") or "")
+    ):
+        raise UtilityConnectionChanged("The utility connection changed before import. Please sync again.")
+    permitted = conn.execute("SELECT 1 FROM account_data_authorizations WHERE account_id = ? AND status = 'active'",
+                             (account["id"],)).fetchone()
+    if permitted is None:
+        raise UtilityConnectionChanged("Customer authorization was withdrawn before import.")
+    return row
+
+
+def update_duke_oauth_connection_secret(connection: dict[str, object], secret_payload: str) -> None:
+    parsed = parse_duke_oauth_secret(secret_payload)
+    original = parse_duke_oauth_secret(str(connection["access_secret"]))
+    if normalize_duke_account_number(parsed["duke_account_number"]) != normalize_duke_account_number(original["duke_account_number"]):
+        raise ValueError("The refreshed Duke authorization belongs to a different account.")
+    sealed = seal_secret_value(secret_payload)
     with get_db_connection() as conn:
-        account = get_or_create_account(conn, account_number)
-        cursor = conn.execute(
-            """
-            UPDATE utility_connections
+        row = lock_authorized_utility_connection(conn, str(connection["account_number"]), connection)
+        if row["access_method"] != DUKE_OAUTH_ACCESS_METHOD:
+            raise UtilityConnectionChanged("That Duke connection is no longer available.")
+        conn.execute("""UPDATE utility_connections
             SET secret_hash = ?, secret_token = ?, secret_last4 = NULL, updated_at = ?
-            WHERE account_id = ? AND id = ? AND access_method = ?
-            """,
-            (
-                build_secret_hash(secret_payload),
-                seal_secret_value(secret_payload),
-                timestamp,
-                account["id"],
-                int(connection_id),
-                DUKE_OAUTH_ACCESS_METHOD,
-            ),
-        )
-        if cursor.rowcount != 1:
-            conn.rollback()
-            raise ValueError("That Duke connection could not be updated.")
+            WHERE account_id = ? AND id = ?""",
+            (build_secret_hash(secret_payload), sealed, timestamp_now(), row["account_id"], connection["id"]))
         conn.commit()
+    connection["access_secret"] = secret_payload
+    connection["_sealed_secret"] = sealed
 
 
 def build_duke_usage_frame(readings: dict[datetime, float]) -> pd.DataFrame:
@@ -8941,11 +8967,7 @@ def fetch_duke_usage(connection: dict[str, object]) -> dict[str, object]:
 
 def sync_duke_oauth_connection(connection: dict[str, object]) -> dict[str, object]:
     fetched = fetch_duke_usage(connection)
-    update_duke_oauth_connection_secret(
-        str(connection["account_number"]),
-        int(connection["id"]),
-        str(fetched["secret_payload"]),
-    )
+    update_duke_oauth_connection_secret(connection, str(fetched["secret_payload"]))
     frame = fetched["frame"]
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return {
@@ -8969,6 +8991,7 @@ def sync_duke_oauth_connection(connection: dict[str, object]) -> dict[str, objec
         modified_time=end_date.timestamp(),
         adapter_id="duke_oauth",
         adapter_name="Duke automatic connection",
+        connection_guard=connection,
     )
 
 
@@ -9101,37 +9124,28 @@ def clean_sync_error(error: Exception | str, max_length: int = 240) -> str:
     return f"{message[: max_length - 1].rstrip()}..."
 
 
-def record_utility_connection_sync_success(account_number: str | None, connection_id: int) -> str:
+def record_utility_connection_sync_success(connection: dict[str, object]) -> str:
     sync_time = timestamp_now()
     with get_db_connection() as conn:
-        account = get_or_create_account(conn, account_number)
-        conn.execute(
-            """
-            UPDATE utility_connections
+        row = lock_authorized_utility_connection(conn, str(connection["account_number"]), connection)
+        conn.execute("""UPDATE utility_connections
             SET status = ?, last_sync_at = ?, last_sync_status = ?, last_sync_error = ?,
-                last_sync_attempt_at = ?, updated_at = ?
-            WHERE account_id = ? AND id = ?
-            """,
-            ("Synced", sync_time, "success", None, sync_time, sync_time, account["id"], int(connection_id)),
-        )
-        conn.commit()
+                last_sync_attempt_at = ?, updated_at = ? WHERE account_id = ? AND id = ?""",
+            ("Synced", sync_time, "success", None, sync_time, sync_time, row["account_id"], connection["id"]))
     return sync_time
 
 
-def record_utility_connection_sync_failure(account_number: str | None, connection_id: int, error: Exception | str) -> str:
+def record_utility_connection_sync_failure(connection: dict[str, object], error: Exception | str) -> str:
     sync_time = timestamp_now()
-    with get_db_connection() as conn:
-        account = get_or_create_account(conn, account_number)
-        conn.execute(
-            """
-            UPDATE utility_connections
-            SET status = ?, last_sync_status = ?, last_sync_error = ?,
-                last_sync_attempt_at = ?, updated_at = ?
-            WHERE account_id = ? AND id = ?
-            """,
-            ("Sync failed", "failed", clean_sync_error(error), sync_time, sync_time, account["id"], int(connection_id)),
-        )
-        conn.commit()
+    try:
+        with get_db_connection() as conn:
+            row = lock_authorized_utility_connection(conn, str(connection["account_number"]), connection)
+            conn.execute("""UPDATE utility_connections
+                SET status = ?, last_sync_status = ?, last_sync_error = ?,
+                    last_sync_attempt_at = ?, updated_at = ? WHERE account_id = ? AND id = ?""",
+                ("Sync failed", "failed", clean_sync_error(error), sync_time, sync_time, row["account_id"], connection["id"]))
+    except UtilityConnectionChanged:
+        pass  # Keep withdrawn, deleted and replacement connections untouched.
     return sync_time
 
 
@@ -9140,30 +9154,48 @@ def sync_utility_connection(account_number: str | None, connection_id: int) -> d
     if not account_has_active_data_authorization(account_number):
         raise ValueError("Customer authorization is required before utility data can be synced.")
     connection = load_utility_connection_for_sync(account_number, connection_id)
-    if connection["access_method"] == DUKE_OAUTH_ACCESS_METHOD:
-        imported = sync_duke_oauth_connection(connection)
-    elif connection["access_method"] == national_grid.METHOD:
-        imported = national_grid.sync(sys.modules[__name__], connection)
-    elif connection["access_method"] == xcel.METHOD:
-        imported = xcel.sync(sys.modules[__name__], connection)
-    elif connection["access_method"] == coned_oru.METHOD:
-        imported = coned_oru.sync(sys.modules[__name__], connection)
-    else:
-        exported = fetch_utility_connection_export(connection)
-        filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
-        if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
-            filename = f"{Path(filename).stem or 'utility-history'}.xml"
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        destination = INPUT_DIR / f"utility-sync-{connection_id}-{timestamp}-{uuid4().hex[:16]}-{filename}"
-        content = exported.get("content") or b""
-        if isinstance(content, str):
-            content = content.encode("utf-8")
-        destination.write_bytes(content)
-        imported = import_interval_file_to_db(
-            destination,
-            account_number=connection["account_number"],
-        )
-    sync_time = record_utility_connection_sync_success(connection["account_number"], connection_id)
+    try:
+        with get_db_connection() as conn:
+            lock_authorized_utility_connection(conn, account_number, connection)
+        if connection["access_method"] == DUKE_OAUTH_ACCESS_METHOD:
+            imported = sync_duke_oauth_connection(connection)
+        elif connection["access_method"] == national_grid.METHOD:
+            imported = national_grid.sync(sys.modules[__name__], connection)
+        elif connection["access_method"] == xcel.METHOD:
+            imported = xcel.sync(sys.modules[__name__], connection)
+        elif connection["access_method"] == coned_oru.METHOD:
+            imported = coned_oru.sync(sys.modules[__name__], connection)
+        else:
+            exported = fetch_utility_connection_export(connection)
+            filename = secure_filename(str(exported.get("filename") or "utility-history.xml")) or "utility-history.xml"
+            if Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
+                filename = f"{Path(filename).stem or 'utility-history'}.xml"
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            destination = INPUT_DIR / f"utility-sync-{connection_id}-{timestamp}-{uuid4().hex[:16]}-{filename}"
+            content = exported.get("content") or b""
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            # Exclusive creation means cleanup can remove only this attempt's file.
+            download = destination.open("xb")
+            try:
+                with download:
+                    download.write(content)
+            except Exception:
+                destination.unlink(missing_ok=True)
+                raise
+            try:
+                imported = import_interval_file_to_db(destination, account_number=connection["account_number"],
+                                                      connection_guard=connection)
+            except Exception:
+                destination.unlink(missing_ok=True)
+                raise
+        sync_time = record_utility_connection_sync_success(connection)
+    except Exception as exc:
+        try:
+            record_utility_connection_sync_failure(connection, exc)
+        except Exception as record_exc:
+            log_handled_exception("utility.connection_sync_failure_record_failed", record_exc)
+        raise
     return {**imported, "status": "Synced", "last_sync_at": sync_time}
 
 
@@ -9187,7 +9219,7 @@ def run_scheduled_utility_sync(account_number: str | None = None) -> dict[str, o
         try:
             synced = sync_utility_connection(connection_account, connection_id)
         except Exception as exc:
-            attempt_at = record_utility_connection_sync_failure(connection_account, connection_id, exc)
+            attempt_at = timestamp_now()
             results.append(
                 {
                     **result,
@@ -11119,7 +11151,7 @@ def import_interval_frame_to_db(
     modified_time: float | None = None,
     adapter_id: str = "interval_frame",
     adapter_name: str = "Interval readings",
-    connection_guard: tuple[int, str] | None = None,
+    connection_guard: tuple[int, str] | dict[str, object] | None = None,
 ) -> dict[str, object]:
     if frame.empty:
         raise ValueError("No interval rows were found to import.")
@@ -11132,25 +11164,7 @@ def import_interval_frame_to_db(
 
     with get_db_connection() as conn:
         if connection_guard is not None:
-            # Lock the connection through import so withdrawal or replacement cannot
-            # race a completed fetch into an account after access has been removed.
-            connection_id, expected_secret = connection_guard
-            lock_suffix = " FOR UPDATE" if conn.kind == "postgres" else ""
-            if conn.kind != "postgres":
-                conn.execute("BEGIN IMMEDIATE")
-            connection_row = conn.execute(
-                "SELECT account_id, secret_token FROM utility_connections WHERE id = ?" + lock_suffix,
-                (connection_id,),
-            ).fetchone()
-            if connection_row is None or unseal_secret_value(connection_row["secret_token"]) != expected_secret:
-                raise ValueError("The utility connection changed before import. Please sync again.")
-            permitted = conn.execute("""SELECT accounts.id FROM accounts
-                WHERE accounts.id = ? AND accounts.account_number = ? AND EXISTS (
-                    SELECT 1 FROM account_data_authorizations WHERE account_id = accounts.id AND status = 'active')""",
-                (connection_row["account_id"], normalize_account_number(account_number)),
-            ).fetchone()
-            if permitted is None:
-                raise ValueError("Customer authorization was withdrawn before import.")
+            lock_authorized_utility_connection(conn, account_number, connection_guard)
         account = get_or_create_account(
             conn,
             account_number,
@@ -11198,7 +11212,7 @@ def import_interval_frame_to_db(
                 ON CONFLICT(account_id, start_epoch, duration_s, source_path, asserted_wh, record_kind)
                 DO UPDATE SET last_observed_at = excluded.last_observed_at
             """, (row_account_id, start_epoch, duration_s, source_path, wh, int(matches_retained),
-                  adapter_id, connection_guard[0] if connection_guard is not None else None,
+                  adapter_id, (connection_guard["id"] if isinstance(connection_guard, dict) else connection_guard[0]) if connection_guard is not None else None,
                   imported_at, imported_at))
         conn.execute(
             """
@@ -11232,41 +11246,43 @@ def import_interval_file_to_db(
     display_name: str | None = None,
     energy_company: str | None = None,
     baseline_date: str | None = None,
+    connection_guard: tuple[int, str] | dict[str, object] | None = None,
 ) -> dict[str, object]:
     path = Path(path).resolve()
     stat = path.stat()
     modified_time = stat.st_mtime
 
-    with get_db_connection() as conn:
-        account = get_or_create_account(
-            conn,
-            account_number,
-            display_name=display_name,
-            energy_company=energy_company,
-            baseline_date=baseline_date,
-        )
-        existing = conn.execute(
-            """
-            SELECT modified_time, interval_count
-            FROM imported_files
-            WHERE account_id = ? AND path = ?
-            """,
-            (account["id"], path.as_posix()),
-        ).fetchone()
-        if existing and float(existing["modified_time"]) == modified_time:
-            adapter = detect_utility_feed_adapter(path)
-            conn.commit()
-            return {
-                "path": path.as_posix(),
-                "imported": False,
-                "interval_count": int(existing["interval_count"]),
-                "added_count": 0,
-                "already_present_count": int(existing["interval_count"]),
-                "conflicts_skipped_count": 0,
-                "account_number": account["account_number"],
-                "adapter_id": adapter["adapter_id"],
-                "adapter_name": adapter["display_name"],
-            }
+    if connection_guard is None:
+        with get_db_connection() as conn:
+            account = get_or_create_account(
+                conn,
+                account_number,
+                display_name=display_name,
+                energy_company=energy_company,
+                baseline_date=baseline_date,
+            )
+            existing = conn.execute(
+                """
+                SELECT modified_time, interval_count
+                FROM imported_files
+                WHERE account_id = ? AND path = ?
+                """,
+                (account["id"], path.as_posix()),
+            ).fetchone()
+            if existing and float(existing["modified_time"]) == modified_time:
+                adapter = detect_utility_feed_adapter(path)
+                conn.commit()
+                return {
+                    "path": path.as_posix(),
+                    "imported": False,
+                    "interval_count": int(existing["interval_count"]),
+                    "added_count": 0,
+                    "already_present_count": int(existing["interval_count"]),
+                    "conflicts_skipped_count": 0,
+                    "account_number": account["account_number"],
+                    "adapter_id": adapter["adapter_id"],
+                    "adapter_name": adapter["display_name"],
+                }
 
     parsed = parse_interval_xml(path)
     frame = parsed.frame
@@ -11280,6 +11296,7 @@ def import_interval_file_to_db(
         modified_time=modified_time,
         adapter_id=parsed.adapter.adapter_id,
         adapter_name=parsed.adapter.display_name,
+        connection_guard=connection_guard,
     )
 
 
@@ -17071,10 +17088,6 @@ def create_web_app() -> Flask:
             )
             flash("Utility history synced.")
         except Exception as exc:
-            try:
-                record_utility_connection_sync_failure(account_number, connection_id, exc)
-            except Exception as record_exc:
-                log_handled_exception("utility.connection_sync_failure_record_failed", record_exc)
             record_actor_event(
                 actor,
                 "utility.connection_sync_failed",

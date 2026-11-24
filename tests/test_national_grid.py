@@ -325,3 +325,34 @@ def test_http_errors_are_redacted(monkeypatch, setup):
 
 
 REAL_TRANSPORT = ng.transport
+
+
+@pytest.mark.parametrize("phase", ["refresh", "download"])
+def test_same_credentials_reconnect_invalidates_inflight_sync(setup, monkeypatch, phase):
+    client, _, _ = setup
+    complete(client)
+    connection = app.list_utility_connections("123456")[0]
+    snapshot = app.load_utility_connection_for_sync("123456", connection["id"])
+    payload = json.loads(snapshot["access_secret"])
+    if phase == "refresh":
+        payload["expires_at"] = 0
+    encoded = json.dumps(payload)
+    with app.get_db_connection() as conn:
+        conn.execute("UPDATE utility_connections SET secret_token = ? WHERE id = ?", (app.seal_secret_value(encoded), connection["id"]))
+    original = ng.transport
+    replacement = {}
+    def reconnect(url, **kwargs):
+        if (phase == "refresh" and kwargs.get("form")) or (phase == "download" and url == ng.batch(METER)):
+            with app.get_db_connection() as conn:
+                conn.execute("UPDATE utility_connections SET secret_token = ?, status = 'Ready to sync' WHERE id = ?",
+                             (app.seal_secret_value(encoded), connection["id"]))
+                replacement.update(dict(conn.execute("SELECT * FROM utility_connections WHERE id = ?", (connection["id"],)).fetchone()))
+        return original(url, **kwargs)
+    monkeypatch.setattr(ng, "transport", reconnect)
+    with pytest.raises(ValueError, match="changed"):
+        app.sync_utility_connection("123456", connection["id"])
+    assert replacement
+    with app.get_db_connection() as conn:
+        assert dict(conn.execute("SELECT * FROM utility_connections WHERE id = ?", (connection["id"],)).fetchone()) == replacement
+        assert conn.execute("SELECT COUNT(*) AS n FROM interval_reading_sources").fetchone()["n"] == 0
+    assert app.load_intervals_from_db("123456").empty

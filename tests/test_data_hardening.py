@@ -570,3 +570,224 @@ def test_interval_sources_keep_shared_managed_files(tmp_path, monkeypatch):
         second = app.find_account("acct-two")["id"]
         conn.execute("DELETE FROM imported_files WHERE account_id = ? AND path = ?", (second, str(shared)))
         assert shared not in app.account_managed_files(conn, app.find_account("acct-one")["id"])
+
+
+def legacy_sync_setup(kind):
+    authorize_account("acct-race", email="owner@example.com")
+    if kind == "duke":
+        secret = app.serialize_duke_oauth_secret({"access_token": "original-token", "refresh_token": "original-refresh", "id_token": "original-id"}, "acct-race")
+        connection = app.save_duke_oauth_connection("acct-race", secret, "acct-race")
+        def reconnect():
+            # Even the same plaintext credentials are a new connection save.
+            app.save_duke_oauth_connection("acct-race", secret, "acct-race")
+        fetched = {
+            "frame": app.parse_interval_file(FIXTURE).frame,
+            "secret_payload": app.serialize_duke_oauth_secret({"access_token": "refreshed-token", "refresh_token": "refreshed-refresh", "id_token": "refreshed-id"}, "acct-race"),
+            "end_date": app.datetime.now(app.timezone.utc),
+        }
+        fetch_name = "fetch_duke_usage"
+    else:
+        form = {"provider_name": "Duke Energy", "connection_label": "Main meter",
+                "access_method": "customer_api_key", "access_identifier": "https://utility.example.test/meter.xml",
+                "access_secret": "original-key"}
+        connection = app.save_utility_connection("acct-race", form)
+        def reconnect():
+            app.save_utility_connection("acct-race", form)
+        fetched = {"filename": "history.xml", "content": FIXTURE.read_bytes()}
+        fetch_name = "fetch_utility_connection_export"
+    return connection, reconnect, fetch_name, fetched
+
+
+def raw_utility_connection(connection_id):
+    with app.get_db_connection() as conn:
+        row = conn.execute("SELECT * FROM utility_connections WHERE id = ?", (connection_id,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+@pytest.mark.parametrize("kind", ["duke", "download"])
+@pytest.mark.parametrize("channel", ["direct", "scheduled", "web"])
+@pytest.mark.parametrize("change", ["withdraw", "reconnect"])
+@pytest.mark.parametrize("fetch_fails", [False, True])
+def test_legacy_sync_preserves_changed_connection_and_refuses_old_data(tmp_path, monkeypatch, kind, channel, change, fetch_fails):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    connection, reconnect, fetch_name, fetched = legacy_sync_setup(kind)
+    after_change = {}
+    def fetch(_connection):
+        if change == "withdraw":
+            owner = app.get_customer_user_by_email("owner@example.com")
+            app.revoke_account_data_authorization("acct-race", owner["id"])
+        else:
+            reconnect()
+        after_change.update(raw_utility_connection(connection["id"]))
+        if fetch_fails:
+            raise RuntimeError("utility temporarily unavailable")
+        return fetched
+    monkeypatch.setattr(app, fetch_name, fetch)
+    if channel == "scheduled":
+        assert app.run_scheduled_utility_sync("acct-race")["failed"] == 1
+    elif channel == "web":
+        client = app.web_app.test_client()
+        customer_sign_in(client)
+        response = client.post(f"/utility-connection/{connection['id']}/sync", data={"account_number": "acct-race"})
+        assert response.status_code == 302
+    else:
+        with pytest.raises((ValueError, RuntimeError)):
+            app.sync_utility_connection("acct-race", connection["id"])
+    assert raw_utility_connection(connection["id"]) == after_change
+    with app.get_db_connection() as conn:
+        for table in ("interval_readings", "interval_reading_sources", "imported_files"):
+            assert conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"] == 0
+    assert not list(app.INPUT_DIR.glob("utility-sync-*"))
+
+
+@pytest.mark.parametrize("kind", ["duke", "download"])
+def test_legacy_sync_refuses_deleted_connection(tmp_path, monkeypatch, kind):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    connection, _, fetch_name, fetched = legacy_sync_setup(kind)
+    def fetch(_connection):
+        app.delete_utility_connection("acct-race", connection["id"])
+        return fetched
+    monkeypatch.setattr(app, fetch_name, fetch)
+    assert app.run_scheduled_utility_sync("acct-race")["failed"] == 1
+    assert raw_utility_connection(connection["id"]) is None
+    assert app.load_intervals_from_db("acct-race").empty
+    assert not list(app.INPUT_DIR.glob("utility-sync-*"))
+
+
+@pytest.mark.parametrize("column,value", [("access_identifier", "https://utility.example.test/replacement.xml"),
+                                          ("access_method", "green_button_oauth")])
+def test_download_refuses_changed_target_even_with_same_secret(tmp_path, monkeypatch, column, value):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    connection, _, fetch_name, fetched = legacy_sync_setup("download")
+    after_change = {}
+    def fetch(_connection):
+        with app.get_db_connection() as conn:
+            conn.execute(f"UPDATE utility_connections SET {column} = ? WHERE id = ?", (value, connection["id"]))
+        after_change.update(raw_utility_connection(connection["id"]))
+        return fetched
+    monkeypatch.setattr(app, fetch_name, fetch)
+    assert app.run_scheduled_utility_sync("acct-race")["failed"] == 1
+    assert raw_utility_connection(connection["id"]) == after_change
+    assert app.load_intervals_from_db("acct-race").empty
+    assert not list(app.INPUT_DIR.glob("utility-sync-*"))
+
+
+@pytest.mark.parametrize("kind", ["duke", "download"])
+def test_legacy_sync_rechecks_permission_immediately_before_insert(tmp_path, monkeypatch, kind):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    connection, _, fetch_name, fetched = legacy_sync_setup(kind)
+    monkeypatch.setattr(app, fetch_name, lambda _connection: fetched)
+    original_import = app.import_interval_frame_to_db
+    def revoke_then_import(*args, **kwargs):
+        owner = app.get_customer_user_by_email("owner@example.com")
+        app.revoke_account_data_authorization("acct-race", owner["id"])
+        return original_import(*args, **kwargs)
+    monkeypatch.setattr(app, "import_interval_frame_to_db", revoke_then_import)
+    assert app.run_scheduled_utility_sync("acct-race")["failed"] == 1
+    row = raw_utility_connection(connection["id"])
+    assert row["secret_token"] is None
+    assert row["last_sync_status"] == "authorization_revoked"
+    with app.get_db_connection() as conn:
+        for table in ("interval_readings", "interval_reading_sources", "imported_files"):
+            assert conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"] == 0
+    assert not list(app.INPUT_DIR.glob("utility-sync-*"))
+
+
+@pytest.mark.parametrize("kind", ["duke", "download"])
+def test_legacy_sync_does_not_set_success_on_replacement_after_import(tmp_path, monkeypatch, kind):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    connection, reconnect, fetch_name, fetched = legacy_sync_setup(kind)
+    monkeypatch.setattr(app, fetch_name, lambda _connection: fetched)
+    original_status = app.record_utility_connection_sync_success
+    after_change = {}
+    def reconnect_then_status(snapshot):
+        reconnect()
+        after_change.update(raw_utility_connection(connection["id"]))
+        return original_status(snapshot)
+    monkeypatch.setattr(app, "record_utility_connection_sync_success", reconnect_then_status)
+    assert app.run_scheduled_utility_sync("acct-race")["failed"] == 1
+    assert raw_utility_connection(connection["id"]) == after_change
+    # The import committed while authorized; retain its data and file.
+    assert len(app.load_intervals_from_db("acct-race")) == 6
+    if kind == "download":
+        assert len(list(app.INPUT_DIR.glob("utility-sync-*"))) == 1
+
+
+def test_download_parse_failure_removes_only_its_new_file(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    connection, _, fetch_name, _ = legacy_sync_setup("download")
+    existing = app.INPUT_DIR / "customer-upload.xml"
+    existing.write_bytes(FIXTURE.read_bytes())
+    monkeypatch.setattr(app, fetch_name, lambda _connection: {"filename": "bad.xml", "content": b"invalid XML"})
+    assert app.run_scheduled_utility_sync("acct-race")["failed"] == 1
+    assert raw_utility_connection(connection["id"])["last_sync_status"] == "failed"
+    assert existing.read_bytes() == FIXTURE.read_bytes()
+    assert not list(app.INPUT_DIR.glob("utility-sync-*"))
+
+
+def test_duke_refresh_refuses_different_account(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    connection, _, fetch_name, fetched = legacy_sync_setup("duke")
+    original = raw_utility_connection(connection["id"])
+    fetched["secret_payload"] = app.serialize_duke_oauth_secret({"access_token": "wrong-account-token", "refresh_token": "wrong-refresh", "id_token": "wrong-id"}, "another-account")
+    monkeypatch.setattr(app, fetch_name, lambda _connection: fetched)
+    assert app.run_scheduled_utility_sync("acct-race")["failed"] == 1
+    assert raw_utility_connection(connection["id"])["secret_token"] == original["secret_token"]
+    assert app.load_intervals_from_db("acct-race").empty
+
+
+@pytest.mark.parametrize("kind", ["duke", "download"])
+def test_legacy_sync_keeps_other_managers_active_authorization(tmp_path, monkeypatch, kind):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    connection, _, fetch_name, fetched = legacy_sync_setup(kind)
+    authorize_account("acct-race", email="second-owner@example.com")
+    def fetch(_connection):
+        owner = app.get_customer_user_by_email("owner@example.com")
+        app.revoke_account_data_authorization("acct-race", owner["id"])
+        return fetched
+    monkeypatch.setattr(app, fetch_name, fetch)
+    assert app.run_scheduled_utility_sync("acct-race")["succeeded"] == 1
+    assert len(app.load_intervals_from_db("acct-race")) == 6
+    with app.get_db_connection() as conn:
+        rows = conn.execute("SELECT guarded_connection_id FROM interval_reading_sources").fetchall()
+    assert len(rows) == 6
+    assert all(row["guarded_connection_id"] == connection["id"] for row in rows)
+
+
+@pytest.mark.parametrize("kind", ["duke", "download"])
+def test_disabled_account_is_refused_before_fetch(tmp_path, monkeypatch, kind):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    connection, _, fetch_name, _ = legacy_sync_setup(kind)
+    with app.get_db_connection() as conn:
+        conn.execute("UPDATE accounts SET disabled_at = ? WHERE account_number = ?", (app.timestamp_now(), "acct-race"))
+    before = raw_utility_connection(connection["id"])
+    def unexpected_fetch(_connection):
+        pytest.fail("disabled accounts must not fetch utility data")
+    monkeypatch.setattr(app, fetch_name, unexpected_fetch)
+    with pytest.raises(ValueError, match="no longer available"):
+        app.sync_utility_connection("acct-race", connection["id"])
+    assert raw_utility_connection(connection["id"]) == before
+
+
+
+def test_download_close_failure_removes_incomplete_file(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    connection, _, fetch_name, fetched = legacy_sync_setup("download")
+    monkeypatch.setattr(app, fetch_name, lambda _connection: fetched)
+    original_open = app.Path.open
+    class FailingClose:
+        def __init__(self, file):
+            self.file = file
+        def __enter__(self):
+            return self.file
+        def __exit__(self, *_):
+            self.file.close()
+            raise OSError("Download could not be saved")
+    def fail_close(path, mode="r", *args, **kwargs):
+        file = original_open(path, mode, *args, **kwargs)
+        return FailingClose(file) if mode == "xb" and path.name.startswith("utility-sync-") else file
+    monkeypatch.setattr(app.Path, "open", fail_close)
+    assert app.run_scheduled_utility_sync("acct-race")["failed"] == 1
+    assert not list(app.INPUT_DIR.glob("utility-sync-*"))
+    assert app.load_intervals_from_db("acct-race").empty

@@ -585,3 +585,27 @@ def test_generic_feed_form_cannot_inject_green_button_connection(utility):
     with pytest.raises(ValueError, match="sign-in"):
         app.save_utility_connection(ACCOUNT, {"access_method": gb.METHOD})
     assert app.list_utility_connections(ACCOUNT) == []
+
+
+@pytest.mark.parametrize("phase", ["refresh", "download"])
+def test_same_credentials_reconnect_invalidates_inflight_sync(utility, monkeypatch, phase):
+    connection = saved_connection(expires_in=0 if phase == "refresh" else 3600)
+    replacement = {}
+    def respond(cfg, url, **kwargs):
+        if (phase == "refresh" and url == TOKEN_URL) or (phase == "download" and url == RESOURCE):
+            with app.get_db_connection() as conn:
+                conn.execute("UPDATE utility_connections SET secret_token = ?, status = 'Ready to sync' WHERE id = ?",
+                             (app.seal_secret_value(connection["access_secret"]), connection["id"]))
+                replacement.update(dict(conn.execute("SELECT * FROM utility_connections WHERE id = ?", (connection["id"],)).fetchone()))
+        if url == TOKEN_URL:
+            return json.dumps(token_response()).encode()
+        if url == AUTHORIZATION:
+            return json.dumps(authorization_document()).encode()
+        return FIXTURE.read_bytes()
+    monkeypatch.setattr(gb, "request_bytes", respond)
+    with pytest.raises(ValueError, match="changed"):
+        app.sync_utility_connection(ACCOUNT, connection["id"])
+    assert replacement and db_row(connection) == replacement
+    assert app.load_intervals_from_db(ACCOUNT).empty
+    with app.get_db_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM interval_reading_sources").fetchone()["n"] == 0
