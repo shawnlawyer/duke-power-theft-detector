@@ -19,7 +19,8 @@ from test_app import FIXTURE, authorize_account, configure_tmp_paths, customer_s
 ACCOUNT = "410000000001"
 EMAIL = "green-button-owner@example.com"
 PUBLIC = "https://app.homeenergywatch.com"
-ROOT = "https://utility.example/gbc/espi/1_1"
+ROOT = "https://api.coned.com/gbc/espi/1_1"
+AUTHORIZE_URL = "https://www.coned.com/en/oauth/authorize"
 TOKEN_URL = f"{ROOT}/oauth/Token"
 RESOURCE = f"{ROOT}/resource/Subscription/sub-1"
 CUSTOMER = f"{ROOT}/resource/Customer/sub-1"
@@ -33,7 +34,7 @@ def utility(tmp_path, monkeypatch):
     authorize_account(ACCOUNT, EMAIL)
     app.save_account_profile(ACCOUNT, energy_company="Con Edison")
     monkeypatch.setenv("POWER_PUBLIC_BASE_URL", PUBLIC)
-    for key, value in {"AUTHORIZE_URL": f"{ROOT}/oauth/authorize", "TOKEN_URL": TOKEN_URL,
+    for key, value in {"AUTHORIZE_URL": AUTHORIZE_URL, "TOKEN_URL": TOKEN_URL,
                        "CLIENT_ID": "fixture-client", "CLIENT_SECRET": "fixture-secret",
                        "BULK_ID": "fixture-bulk", "SCOPE": "configured-broad-scope", "APPROVED": "true",
                        "REDIRECT_URI": PUBLIC + gb.callback_path("CONED")}.items():
@@ -88,7 +89,7 @@ def start(client):
     response = client.post("/utility-connection/green-button/coned/start", data={"account_number": ACCOUNT})
     assert response.status_code == 302
     location = urlsplit(response.location)
-    assert f"{location.scheme}://{location.netloc}{location.path}" == f"{ROOT}/oauth/authorize"
+    assert f"{location.scheme}://{location.netloc}{location.path}" == AUTHORIZE_URL
     return parse_qs(location.query)
 
 
@@ -146,6 +147,52 @@ def test_configured_and_approved_is_still_unavailable_while_disabled(utility, mo
 ])
 def test_config_requires_approval_and_safe_addresses(utility, monkeypatch, name, value):
     monkeypatch.setenv("POWER_CONED_GREEN_BUTTON_" + name, value)
+    assert not gb.available("CONED")
+
+
+
+@pytest.mark.parametrize("key,authorize_url,token_url", [
+    ("CONED", "https://www.coned.com/en/oauth/authorize",
+     "https://api.coned.com/gbc/espi/1_1/oauth/Token"),
+    ("ORU", "https://www.oru.com/en/oauth/authorize",
+     "https://api.coned.com/gbc/espi/1_1/oauth/Token"),
+    ("CONED", "https://uat10.coned.com/en/oauth/authorize",
+     "https://apit.coned.com/gbc/espi/1_1/oauth/token"),
+    ("ORU", "https://uat10.oru.com/en/oauth/authorize",
+     "https://apit.coned.com/gbc/espi/1_1/oauth/token"),
+])
+def test_published_endpoint_pairs(utility, monkeypatch, key, authorize_url, token_url):
+    for name in ("CLIENT_ID", "CLIENT_SECRET", "BULK_ID"):
+        monkeypatch.setenv(f"POWER_{key}_GREEN_BUTTON_{name}", "fixture-value")
+    monkeypatch.setenv(f"POWER_{key}_GREEN_BUTTON_APPROVED", "true")
+    monkeypatch.setenv(f"POWER_{key}_GREEN_BUTTON_REDIRECT_URI", PUBLIC + gb.callback_path(key))
+    monkeypatch.setenv(f"POWER_{key}_GREEN_BUTTON_AUTHORIZE_URL", authorize_url)
+    monkeypatch.setenv(f"POWER_{key}_GREEN_BUTTON_TOKEN_URL", token_url)
+    cfg = gb.config(key)
+    assert cfg["authorize_url"] == authorize_url
+    assert cfg["token_url"] == token_url
+    assert gb.origin(authorize_url) != gb.origin(token_url)
+    # Recognizing published addresses does not bypass the readiness gate.
+    monkeypatch.setattr(gb, "IMPLEMENTATION_READY", False)
+    assert not gb.available(key)
+
+
+@pytest.mark.parametrize("authorize_url,token_url", [
+    (AUTHORIZE_URL, "https://apit.coned.com/gbc/espi/1_1/oauth/token"),
+    ("https://uat10.coned.com/en/oauth/authorize", TOKEN_URL),
+    ("https://www.oru.com/en/oauth/authorize", TOKEN_URL),
+    ("https://api.coned.com/gbc/espi/1_1/oauth/authorize", TOKEN_URL),
+    ("https://www.coned.com.evil.example/en/oauth/authorize", TOKEN_URL),
+    ("https://attacker@www.coned.com/en/oauth/authorize", TOKEN_URL),
+    (AUTHORIZE_URL + "?redirect_uri=https://evil.example", TOKEN_URL),
+    (AUTHORIZE_URL + "#fragment", TOKEN_URL),
+    (AUTHORIZE_URL, TOKEN_URL + "?destination=evil"),
+    (AUTHORIZE_URL, "https://api.coned.com/gbc/espi/1_1/oauth/token"),
+    (AUTHORIZE_URL, "https://api.coned.com:444/gbc/espi/1_1/oauth/Token"),
+])
+def test_reject_mixed_or_modified_endpoint_pairs(utility, monkeypatch, authorize_url, token_url):
+    monkeypatch.setenv("POWER_CONED_GREEN_BUTTON_AUTHORIZE_URL", authorize_url)
+    monkeypatch.setenv("POWER_CONED_GREEN_BUTTON_TOKEN_URL", token_url)
     assert not gb.available("CONED")
 
 

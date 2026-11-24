@@ -137,6 +137,8 @@ It is **disabled in source**. `coned_oru.IMPLEMENTATION_READY` is `False` and is
 
 What it already does: provider-returned resource addresses only (the configured scope is sent once at sign-in and never re-requested on refresh), HTTPS-only same-origin requests that never follow redirects and are size-bounded, encrypted token storage, a stored account/subscription binding checked against the utility's `AuthorizationModel` at sign-in and on every sync, one-time sign-in state tied to the browser, a cross-worker sync lease, conditional token replacement that cannot restore a withdrawn or replaced connection, and `connection_guard` on import. HTTP 202 (batch still being prepared) is an error, never an empty import.
 
+Configuration pins the published OAuth endpoint pairs from the technical onboarding guide (version 4.4, sections 3.2.1 and 3.2.2). Customer authorization uses `https://www.coned.com/en/oauth/authorize` or `https://www.oru.com/en/oauth/authorize`; both use `https://api.coned.com/gbc/espi/1_1/oauth/Token` for token exchange. Test authorization uses the corresponding `uat10` website and `https://apit.coned.com/gbc/espi/1_1/oauth/token`. The token path's case differs between environments. Cross-utility and mixed-environment pairs are rejected. Authenticated resource requests remain restricted to the token host; this change does not permit off-host data downloads or enable the connector.
+
 Before turning it on, verify with utility-issued test credentials and finish:
 
 1. The real authorization/customer/usage-point shapes, scopes, expiry and revocation responses. Fixtures in `tests/test_green_button.py` are synthetic.

@@ -84,12 +84,18 @@ def config(key):
     values["scope"] = os.getenv(prefix + "SCOPE", "").strip() or DEFAULT_SCOPE
     if os.getenv(prefix + "APPROVED", "").lower() != "true" or not all(values.values()):
         raise ConnectionError(f"{label(key)} automatic updates are waiting for utility approval. You can still upload your history.")
-    token_origin = origin(values["token_url"])
-    if origin(values["authorize_url"]) != token_origin:
+    # The browser signs in on the selected utility's website; tokens are
+    # exchanged on Con Edison's separate API host for both utilities. Pin the
+    # published pairs so test/production and ConEd/ORU cannot be mixed.
+    utility_domain = "coned.com" if key == "CONED" else "oru.com"
+    endpoint_pairs = {
+        (f"https://www.{utility_domain}/en/oauth/authorize",
+         "https://api.coned.com/gbc/espi/1_1/oauth/Token"),
+        (f"https://uat10.{utility_domain}/en/oauth/authorize",
+         "https://apit.coned.com/gbc/espi/1_1/oauth/token"),
+    }
+    if (values["authorize_url"], values["token_url"]) not in endpoint_pairs:
         raise ConnectionError(f"{label(key)} connection settings need attention.")
-    for name in ("authorize_url", "token_url"):
-        if urlsplit(values[name]).query:
-            raise ConnectionError(f"{label(key)} connection settings need attention.")
     p = urlsplit(values["redirect_uri"])
     public = urlsplit(os.getenv("POWER_PUBLIC_BASE_URL", ""))
     if (p.scheme != "https" or not p.netloc or p.username or p.netloc != public.netloc
