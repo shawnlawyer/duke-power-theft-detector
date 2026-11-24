@@ -14,6 +14,7 @@ from __future__ import annotations
 ACCOUNT_TABLES = (
     # Children before parents, so foreign keys hold on Postgres too.
     "xcel_meter_bindings",
+    "interval_reading_sources",
     "interval_readings",
     "imported_files",
     "account_load_items",

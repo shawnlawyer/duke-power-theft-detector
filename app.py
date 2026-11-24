@@ -21,6 +21,7 @@ import hmac
 import io
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -849,6 +850,40 @@ def ensure_schema_ready(conn: DatabaseConnection) -> None:
         conn.rollback()
         raise
     SCHEMA_READY_TARGETS.add(target_label)
+
+
+def ensure_interval_sources(conn: DatabaseConnection) -> None:
+    # Backfill once, in the schema transaction. File-level import counts cannot
+    # establish which historical duplicate readings a second source supplied.
+    if table_columns(conn, "interval_reading_sources"):
+        return
+    conn.execute("""
+        CREATE TABLE interval_reading_sources (
+            account_id BIGINT NOT NULL,
+            start_epoch BIGINT NOT NULL,
+            duration_s INTEGER NOT NULL,
+            source_path TEXT NOT NULL,
+            asserted_wh DOUBLE PRECISION NOT NULL,
+            matches_retained_value INTEGER NOT NULL CHECK (matches_retained_value IN (0, 1)),
+            record_kind TEXT NOT NULL CHECK (record_kind IN ('observed_import', 'retained_before_tracking')),
+            adapter_id TEXT NOT NULL,
+            guarded_connection_id BIGINT,
+            first_observed_at TEXT NOT NULL,
+            last_observed_at TEXT NOT NULL,
+            PRIMARY KEY (account_id, start_epoch, duration_s, source_path, asserted_wh, record_kind),
+            FOREIGN KEY (account_id, start_epoch, duration_s)
+                REFERENCES interval_readings(account_id, start_epoch, duration_s) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("""
+        INSERT INTO interval_reading_sources
+            (account_id, start_epoch, duration_s, source_path, asserted_wh,
+             matches_retained_value, record_kind, adapter_id, guarded_connection_id,
+             first_observed_at, last_observed_at)
+        SELECT account_id, start_epoch, duration_s, source_path, wh,
+               1, 'retained_before_tracking', '', NULL, imported_at, imported_at
+        FROM interval_readings
+    """)
 
 
 def get_db_connection(*, ensure_schema: bool = True) -> DatabaseConnection:
@@ -1743,6 +1778,7 @@ def migrate_database(conn: DatabaseConnection) -> None:
         migrate_database_postgres(conn)
         ensure_equipment_history_table(conn)
         migrate_staff_roles(conn)
+        ensure_interval_sources(conn)
         return
 
     default_account_id = ensure_accounts_table(conn)
@@ -2461,6 +2497,7 @@ def migrate_database(conn: DatabaseConnection) -> None:
     ensure_equipment_history_table(conn)
     seed_commission_registry(conn)
     migrate_staff_roles(conn)
+    ensure_interval_sources(conn)
 
 
 def clean_email(value: str | None) -> str:
@@ -5179,7 +5216,7 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
             (customer_id,),
         ).fetchall()
         manifest = {
-            "format_version": 3,
+            "format_version": 4,
             "generated_at": timestamp_now(),
             "customer": {} if user_row is None else dict(user_row),
             "billing": {} if billing_row is None else dict(billing_row),
@@ -5309,6 +5346,26 @@ def build_customer_data_archive(customer_user: dict[str, object]) -> tuple[bytes
                     )
                 )
             archive.writestr(f"{prefix}/interval-readings.csv", interval_output.getvalue())
+
+            source_rows = conn.execute("""
+                SELECT start_epoch, duration_s, source_path, asserted_wh,
+                       matches_retained_value, record_kind, adapter_id,
+                       first_observed_at, last_observed_at
+                FROM interval_reading_sources WHERE account_id = ?
+                ORDER BY start_epoch, duration_s, source_path, asserted_wh, record_kind
+            """, (account_id,)).fetchall()
+            source_output = io.StringIO(newline="")
+            source_writer = csv.writer(source_output)
+            source_writer.writerow(("start_epoch", "duration_seconds", "source_file", "asserted_wh",
+                                    "matches_retained_value", "record_kind", "adapter_id",
+                                    "first_observed_at", "last_observed_at"))
+            for row in source_rows:
+                source_writer.writerow(tuple(audit_csv_value(value) for value in (
+                    row["start_epoch"], row["duration_s"], Path(str(row["source_path"])).name,
+                    row["asserted_wh"], row["matches_retained_value"], row["record_kind"],
+                    row["adapter_id"], row["first_observed_at"], row["last_observed_at"],
+                )))
+            archive.writestr(f"{prefix}/interval-sources.csv", source_output.getvalue())
 
             weather_rows = conn.execute(
                 """
@@ -7665,8 +7722,10 @@ def account_managed_files(conn: DatabaseConnection, account_id: int) -> list[Pat
         SELECT path AS managed_path FROM imported_files WHERE account_id = ?
         UNION
         SELECT source_path AS managed_path FROM interval_readings WHERE account_id = ?
+        UNION
+        SELECT source_path AS managed_path FROM interval_reading_sources WHERE account_id = ?
         """,
-        (int(account_id), int(account_id)),
+        (int(account_id), int(account_id), int(account_id)),
     ).fetchall()
     for row in input_rows:
         raw_path = str(row["managed_path"] or "")
@@ -7678,9 +7737,11 @@ def account_managed_files(conn: DatabaseConnection, account_id: int) -> list[Pat
                 (SELECT COUNT(*) FROM imported_files WHERE account_id != ? AND path = ?)
                 +
                 (SELECT COUNT(*) FROM interval_readings WHERE account_id != ? AND source_path = ?)
+                +
+                (SELECT COUNT(*) FROM interval_reading_sources WHERE account_id != ? AND source_path = ?)
             ) AS count
             """,
-            (int(account_id), raw_path, int(account_id), raw_path),
+            (int(account_id), raw_path, int(account_id), raw_path, int(account_id), raw_path),
         ).fetchone()
         if int(other_reference["count"] if other_reference is not None else 0) == 0:
             path = managed_account_file(INPUT_DIR, raw_path)
@@ -7740,6 +7801,7 @@ def execute_account_data_deletion(request_id: int, staff_user_id: int) -> dict[s
             tables = (
                 "xcel_meter_bindings",
                 "imported_files",
+                "interval_reading_sources",
                 "interval_readings",
                 "account_load_items",
                 "household_profiles",
@@ -11101,6 +11163,8 @@ def import_interval_frame_to_db(
             start_epoch = int(row.start_epoch)
             duration_s = int(row.duration_s)
             wh = float(row.wh)
+            if not math.isfinite(wh):
+                raise ValueError("Interval usage must be a finite number.")
             existing = conn.execute(
                 """
                 SELECT wh
@@ -11118,11 +11182,24 @@ def import_interval_frame_to_db(
                     (row_account_id, start_epoch, duration_s, wh, source_path, imported_at),
                 )
                 added_count += 1
-                continue
-            if round(float(existing["wh"]), 9) == round(wh, 9):
-                already_present_count += 1
-                continue
-            conflicts_skipped_count += 1
+                matches_retained = True
+            else:
+                matches_retained = round(float(existing["wh"]), 9) == round(wh, 9)
+                if matches_retained:
+                    already_present_count += 1
+                else:
+                    conflicts_skipped_count += 1
+            conn.execute("""
+                INSERT INTO interval_reading_sources
+                    (account_id, start_epoch, duration_s, source_path, asserted_wh,
+                     matches_retained_value, record_kind, adapter_id, guarded_connection_id,
+                     first_observed_at, last_observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'observed_import', ?, ?, ?, ?)
+                ON CONFLICT(account_id, start_epoch, duration_s, source_path, asserted_wh, record_kind)
+                DO UPDATE SET last_observed_at = excluded.last_observed_at
+            """, (row_account_id, start_epoch, duration_s, source_path, wh, int(matches_retained),
+                  adapter_id, connection_guard[0] if connection_guard is not None else None,
+                  imported_at, imported_at))
         conn.execute(
             """
             INSERT INTO imported_files (account_id, path, modified_time, interval_count, imported_at, service_point_id)

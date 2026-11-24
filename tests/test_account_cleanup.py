@@ -48,6 +48,7 @@ def test_purge_removes_account_data_files_and_orphan_sign_in(db):
     assert app.find_account("fake-1") is None
     assert app.get_customer_user_by_email("tester@example.com") is None
     assert count("interval_readings") == 0
+    assert count("interval_reading_sources") == 0
     assert count("household_profiles", "address LIKE ?", ("33 Test%",)) == 0
     assert count("account_data_authorizations", "customer_user_id = ?", (customer["id"],)) == 0
     assert count("audit_events", "actor_type = 'customer' AND actor_id = ?", (customer["id"],)) == 0
