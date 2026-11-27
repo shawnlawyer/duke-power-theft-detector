@@ -5841,3 +5841,34 @@ def test_equipment_proposal_requires_confirmation_and_saves_confirmed_dates(tmp_
     )
     assert history.status_code == 200
     assert history.get_json()["interactions"][0]["question"] == "What is my modeled annual use?"
+
+
+def test_press_page_social_tags_and_favicon(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    client = app.web_app.test_client()
+
+    press = client.get("/press", base_url="https://homeenergywatch.com")
+    assert press.status_code == 200
+    assert b"style=" not in press.data
+    for image in app.PRESS_IMAGES:
+        assert f"/static/press/{image['slug']}.jpg".encode() in press.data
+        assert (app.STATIC_DIR / "press" / f"{image['slug']}.jpg").is_file()
+        assert (app.STATIC_DIR / "press" / f"{image['slug']}-720.jpg").is_file()
+    assert b'<meta property="og:title" content="Press \xc2\xb7 Home Energy Watch">' in press.data
+
+    home = client.get("/", base_url="https://homeenergywatch.com")
+    for tag in (b'property="og:image" content="https://homeenergywatch.com/static/social/home-energy-watch-share.jpg"',
+                b'name="twitter:card" content="summary_large_image"',
+                b'property="og:url" content="https://homeenergywatch.com/"',
+                b'rel="icon" href="/static/favicon.svg"',
+                b'rel="apple-touch-icon"',
+                b'href="https://homeenergywatch.com/press"'):
+        assert tag in home.data, tag
+
+    icon = client.get("/favicon.ico", base_url="https://homeenergywatch.com")
+    assert icon.status_code == 200 and icon.mimetype == "image/vnd.microsoft.icon"
+    sitemap = client.get("/sitemap.xml", base_url="https://homeenergywatch.com")
+    assert b"https://homeenergywatch.com/press" in sitemap.data
+    login = client.get("/login", base_url="https://app.homeenergywatch.com")
+    assert b"/static/favicon.svg" in login.data

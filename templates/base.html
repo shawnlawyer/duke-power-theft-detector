@@ -5,6 +5,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ page_title or "Home Energy Watch" }}</title>
+    {% include "_site_icons.html" %}
+    <meta name="theme-color" content="#0b3a35">
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='hew-design.css') }}">
     <script defer src="{{ url_for('static', filename='app.js') }}"></script>
