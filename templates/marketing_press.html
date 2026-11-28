@@ -1,0 +1,100 @@
+{% extends "marketing_base.html" %}
+{% from "_hew_ui.html" import icon, logo %}
+
+{% block content %}
+  <section class="hew-page-hero">
+    <div class="hew-wrap">
+      <span class="hew-eyebrow">Press</span>
+      <h1>Home Energy Watch press kit.</h1>
+      <p class="hew-lead">Campaign images, logos and a short description of the product, ready to use in coverage and partner materials.</p>
+    </div>
+  </section>
+
+  <section class="hew-section">
+    <div class="hew-wrap hew-press-about">
+      <div>
+        <span class="hew-eyebrow">About Home Energy Watch</span>
+        <h2>The pattern behind the electric bill.</h2>
+      </div>
+      <div class="hew-press-copy">
+        <p>Home Energy Watch turns the electricity readings a utility already provides into a clear, organized record of how a home uses energy. Homeowners see their overnight baseline, compare periods and review the days that changed. Professionals and utility commissions get the same record with the rule behind every finding.</p>
+        <p>A flagged pattern is a reason to look more closely. What it means is for the account holder to decide.</p>
+        <p><a href="{{ home_url }}">HomeEnergyWatch.com</a></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="hew-section hew-section-alt" id="images">
+    <div class="hew-wrap">
+      <div class="hew-section-head is-left">
+        <span class="hew-eyebrow">Campaign images</span>
+        <h2>Advertising images</h2>
+        <p class="hew-lead">Each image is 1254 × 1254 pixels. Download the full-size file for print or social posts.</p>
+      </div>
+      <div class="hew-press-grid">
+        {% for image in press_images %}
+          <figure class="hew-card hew-press-item">
+            <a href="{{ url_for('static', filename='press/' ~ image.slug ~ '.jpg') }}" class="hew-press-thumb">
+              <img src="{{ url_for('static', filename='press/' ~ image.slug ~ '-720.jpg') }}" alt="{{ image.alt }}" width="720" height="720" loading="lazy" decoding="async">
+            </a>
+            <figcaption>
+              <h3>{{ image.title }}</h3>
+              <p>{{ image.line }}</p>
+              <a class="hew-btn hew-btn-outline" href="{{ url_for('static', filename='press/' ~ image.slug ~ '.jpg') }}" download>{{ icon("download") }} Download</a>
+            </figcaption>
+          </figure>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="hew-section" id="brand">
+    <div class="hew-wrap">
+      <div class="hew-section-head is-left">
+        <span class="hew-eyebrow">Brand assets</span>
+        <h2>Logo and colors</h2>
+      </div>
+      <div class="hew-press-brand">
+        <article class="hew-card hew-press-asset">
+          <div class="hew-press-asset-preview">{{ logo("hew-press-logo") }}</div>
+          <h3>Logo mark</h3>
+          <div class="hew-press-links">
+            <a href="{{ url_for('static', filename='favicon.svg') }}" download="home-energy-watch-logo.svg">{{ icon("download") }} SVG</a>
+            <a href="{{ url_for('static', filename='icons/logo-512.png') }}" download="home-energy-watch-logo.png">{{ icon("download") }} PNG</a>
+          </div>
+        </article>
+        <article class="hew-card hew-press-asset">
+          <div class="hew-press-asset-preview is-dark"><img src="{{ url_for('static', filename='icons/icon-192.png') }}" alt="Home Energy Watch app icon" width="96" height="96"></div>
+          <h3>App icon</h3>
+          <div class="hew-press-links">
+            <a href="{{ url_for('static', filename='icons/icon-512.png') }}" download="home-energy-watch-icon.png">{{ icon("download") }} PNG</a>
+          </div>
+        </article>
+        <article class="hew-card hew-press-asset">
+          <div class="hew-press-asset-preview is-photo"><img src="{{ url_for('static', filename='social/home-energy-watch-share.jpg') }}" alt="{{ share_image_alt }}" width="1200" height="630" loading="lazy"></div>
+          <h3>Social share image</h3>
+          <div class="hew-press-links">
+            <a href="{{ url_for('static', filename='social/home-energy-watch-share.jpg') }}" download>{{ icon("download") }} JPG, 1200 × 630</a>
+          </div>
+        </article>
+        <article class="hew-card hew-press-asset">
+          <ul class="hew-press-colors">
+            <li><span class="hew-swatch is-forest"></span>Forest <code>#0B3A35</code></li>
+            <li><span class="hew-swatch is-mint"></span>Mint <code>#3FD98A</code></li>
+            <li><span class="hew-swatch is-teal"></span>Teal <code>#22B5A3</code></li>
+            <li><span class="hew-swatch is-ink"></span>Ink <code>#11221F</code></li>
+          </ul>
+          <h3>Colors</h3>
+          <p>Headlines are set in Poppins, body text in Inter.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="hew-cta">
+    <div class="hew-wrap hew-cta-inner">
+      <div><h2>Media inquiries</h2><p>For interviews, product questions or other images, email our team.</p></div>
+      <a class="hew-btn hew-btn-primary" href="mailto:{{ support_email }}?subject=Press%20inquiry">{{ icon("mail") }} Email {{ support_email }}</a>
+    </div>
+  </section>
+{% endblock %}
