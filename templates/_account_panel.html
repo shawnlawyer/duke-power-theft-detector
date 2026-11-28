@@ -1,3 +1,4 @@
+{% from "_utility_provider_options.html" import provider_select with context %}
 {% set current_account = analysis.account if analysis else account %}
 {% set known_accounts = analysis.accounts if analysis else accounts %}
 {% set current_account_page = account_page if account_page is defined else none %}
@@ -80,7 +81,7 @@
         {% endif %}
         <label class="account-delete-confirm">
           <span>Type DELETE to delete</span>
-          <input type="text" name="confirm_delete" autocomplete="off" placeholder="DELETE">
+          <input type="text" name="confirm_delete" autocomplete="off" placeholder="DELETE" maxlength="10">
         </label>
         <button type="submit" name="action" value="delete" class="button-small danger">Delete</button>
       </form>
@@ -126,7 +127,7 @@
         {% endif %}
         <label class="account-delete-confirm">
           <span>Type DELETE to delete this account</span>
-          <input type="text" name="confirm_delete" autocomplete="off" placeholder="DELETE">
+          <input type="text" name="confirm_delete" autocomplete="off" placeholder="DELETE" maxlength="10">
         </label>
         <button type="submit" name="action" value="delete" class="button-small danger">Delete account</button>
       </form>
@@ -153,10 +154,9 @@
         <input type="text" name="account_number" value="{{ current_account.account_number }}" maxlength="100" required>
       </label>
       <label>
-        <span>Utility / provider name</span>
-        <input type="text" name="energy_company" value="{{ current_account.energy_company }}" list="utility-provider-options" maxlength="100" placeholder="Duke Energy, Xcel Energy, or your local utility">
-        {% include "_utility_provider_options.html" %}
-        <small>Choose from our <a class="inline-link" href="{{ url_for('utilities_page') }}">supported utility list</a>, or leave this blank to match from your ZIP code. We add providers regularly, including utilities that participate in the Green Button Alliance.</small>
+        <span>Electric company</span>
+        {{ provider_select("energy_company", current_account.energy_company) }}
+        <small>Pick your company, or leave it on "Find it from my ZIP code" and we'll match it from the service address. See the <a class="inline-link" href="{{ url_for('utilities_page') }}">supported utility list</a>.</small>
       </label>
       <label>
         <span>Meter value</span>
@@ -243,7 +243,7 @@
     <div class="field-grid">
       <label class="wide-field">
         <span>Passkey label</span>
-        <input type="text" name="nickname" placeholder="MacBook, iPhone, security key">
+        <input type="text" name="nickname" placeholder="MacBook, iPhone, security key" maxlength="60">
       </label>
     </div>
     <button type="button" class="button-secondary" data-passkey-enroll-button>Add passkey</button>
@@ -299,11 +299,11 @@
     <div class="field-grid">
       <label>
         <span>Email</span>
-        <input type="email" name="email" placeholder="name@example.com" required>
+        <input type="email" name="email" placeholder="name@example.com" required maxlength="254">
       </label>
       <label>
         <span>Name</span>
-        <input type="text" name="full_name" placeholder="Homeowner, family member, advisor">
+        <input type="text" name="full_name" placeholder="Homeowner, family member, advisor" maxlength="120">
       </label>
       <label>
         <span>Access</span>
@@ -371,11 +371,11 @@
       <div class="field-grid">
         <label>
           <span>Email</span>
-          <input type="email" name="email" placeholder="name@example.com" required>
+          <input type="email" name="email" placeholder="name@example.com" required maxlength="254">
         </label>
         <label>
           <span>Name</span>
-          <input type="text" name="full_name" placeholder="Family member, advisor, or reviewer">
+          <input type="text" name="full_name" placeholder="Family member, advisor, or reviewer" maxlength="120">
         </label>
         <label>
           <span>Access</span>
@@ -622,7 +622,7 @@
       </label>
       <label>
         <span>Connection name</span>
-        <input type="text" name="connection_label" placeholder="Main electric account" required>
+        <input type="text" name="connection_label" placeholder="Main electric account" required maxlength="100">
       </label>
       <label>
         <span>Access type</span>
@@ -634,11 +634,11 @@
       </label>
       <label>
         <span>Export link</span>
-        <input type="text" name="access_identifier" placeholder="https://utility.example.com/export.xml">
+        <input type="url" name="access_identifier" placeholder="https://utility.example.com/export.xml" maxlength="1000">
       </label>
       <label class="wide-field">
         <span>Access key</span>
-        <input type="password" name="access_secret" autocomplete="new-password" placeholder="Paste the customer-approved key, if one was issued">
+        <input type="password" name="access_secret" autocomplete="new-password" placeholder="Paste the customer-approved key, if one was issued" maxlength="4000">
       </label>
     </div>
     <button type="submit" {% if not selected_connection_provider or not data_permission_active %}disabled{% endif %}>Save connection</button>
@@ -771,20 +771,20 @@
     <div class="inventory-grid">
       <label>
         <span>Load</span>
-        <input type="text" name="label" list="common-loads" data-load-label placeholder="Refrigerator" autocomplete="off" required>
+        <input type="text" name="label" list="common-loads" data-load-label placeholder="Refrigerator" autocomplete="off" required maxlength="120">
         <small>Choose a common load or enter your own.</small>
       </label>
       <label>
         <span>How many</span>
-        <input type="number" name="quantity" min="1" step="1" value="1" required>
+        <input type="number" name="quantity" min="1" max="1000" step="1" inputmode="numeric" value="1" required>
       </label>
       <label>
         <span>Watts each</span>
-        <input type="number" name="watts_each" data-load-watts min="1" step="1" placeholder="4500" required>
+        <input type="number" name="watts_each" data-load-watts min="1" max="1000000" step="1" inputmode="numeric" placeholder="4500" required>
       </label>
       <label class="wide-field">
         <span>Notes</span>
-        <input type="text" name="notes" placeholder="Two-stage heat strip, upstairs">
+        <input type="text" name="notes" placeholder="Two-stage heat strip, upstairs" maxlength="1000">
       </label>
       <label class="checkbox-field">
         <input type="checkbox" name="include_when_off" data-load-always-on value="1">

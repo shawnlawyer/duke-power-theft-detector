@@ -235,7 +235,7 @@ def user_facing_error_message(exc: BaseException, event: str = "request.handled_
 
 ENERGY_COMPANY_GROUPS = (
     {
-        "label": "Regulated electric companies",
+        "label": "North Carolina: regulated electric companies",
         "companies": (
             "Duke Energy Carolinas, LLC",
             "Duke Energy Progress, LLC",
@@ -245,7 +245,7 @@ ENERGY_COMPANY_GROUPS = (
         ),
     },
     {
-        "label": "Electric cooperatives",
+        "label": "North Carolina: electric cooperatives",
         "companies": (
             "Haywood EMC",
             "PITT & GREENE EMC",
@@ -282,7 +282,7 @@ ENERGY_COMPANY_GROUPS = (
         ),
     },
     {
-        "label": "Public power providers",
+        "label": "North Carolina: public power",
         "companies": (
             "City of Albemarle",
             "Town of Apex",
@@ -360,7 +360,7 @@ ENERGY_COMPANY_GROUPS = (
         ),
     },
     {
-        "label": "Other",
+        "label": "North Carolina: other",
         "companies": (
             "Other North Carolina electric provider",
         ),
@@ -1057,13 +1057,17 @@ def get_affiliate_by_slug(slug: str | None) -> dict[str, object] | None:
     return dict(row) if row else None
 
 
+AFFILIATE_PAYOUT_METHODS = ("", "paypal", "venmo", "other")
+
+
 def create_affiliate_account(name: str, email: str, slug: str, commission_percent: str, payout_method: str = "", payout_destination: str = "") -> dict[str, object]:
-    normalized_slug = re.sub(r"[^a-z0-9-]", "", slug.strip().lower())
-    if not normalized_slug:
-        raise ValueError("Choose a referral code using letters, numbers, or hyphens.")
-    percent = float(commission_percent)
-    if percent < 0 or percent > 100:
-        raise ValueError("The referral percentage must be between 0 and 100.")
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,60}", (slug or "").strip()):
+        raise ValueError("Choose a referral code of up to 60 letters, numbers, or hyphens.")
+    normalized_slug = slug.strip().lower()
+    percent = clean_number(commission_percent, "referral percentage", minimum=0, maximum=100)
+    name = clean_form_text(name, "partner name", max_length=120, required=True)
+    payout_method = clean_choice((payout_method or "").strip().lower(), "payout method", AFFILIATE_PAYOUT_METHODS, default="")
+    payout_destination = clean_form_text(payout_destination, "payout details", max_length=200) or ""
     timestamp = timestamp_now()
     with get_db_connection() as conn:
         conn.execute("INSERT INTO affiliate_accounts (slug, name, email, commission_percent, status, payout_method, payout_destination, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)", (normalized_slug, name.strip(), clean_email(email), percent, payout_method.strip().lower(), payout_destination.strip(), timestamp, timestamp))
@@ -3655,7 +3659,7 @@ def start_passkey_enrollment(
     session[passkey_session_key(normalized_kind, "enrollment")] = {
         "user_id": int(user["id"]),
         "state": serialize_passkey_state(state),
-        "nickname": (nickname or "").strip(),
+        "nickname": clean_form_text(nickname, "device name", max_length=60) or "",
         "origin": (origin or build_public_base_url()).rstrip("/"),
     }
     return normalize_passkey_json_value(dict(options.public_key))
@@ -3882,7 +3886,7 @@ def migrate_staff_roles(conn) -> None:
 
 def create_first_staff_user(email: str, full_name: str, password: str, role: str = "Owner") -> dict[str, object]:
     normalized_email = clean_email(email)
-    normalized_name = (full_name or "").strip() or "Commission user"
+    normalized_name = clean_form_text(full_name, "name", max_length=120) or "Commission user"
     normalized_role = clean_role(role)
     normalized_password = clean_password(password)
     with get_db_connection() as conn:
@@ -4352,7 +4356,7 @@ def get_customer_user_by_id(customer_user_id: int | None) -> dict[str, object] |
 def create_customer_user(email: str, full_name: str, password: str | None = None) -> dict[str, object]:
     # Empty hashes disable password authentication and support legacy NOT NULL schemas.
     normalized_email = clean_email(email)
-    normalized_name = (full_name or "").strip() or normalized_email
+    normalized_name = clean_form_text(full_name, "name", max_length=120) or normalized_email
     timestamp = timestamp_now()
     email_verified_at = None if email_verification_required() else timestamp
     with get_db_connection() as conn:
@@ -5462,13 +5466,38 @@ def list_offered_billing_plans() -> list[dict[str, object]]:
 
 
 def list_energy_company_groups() -> list[dict[str, object]]:
-    return [
-        {"label": group["label"], "companies": list(group["companies"])}
-        for group in ENERGY_COMPANY_GROUPS
-    ] + [{
-        "label": "More electric companies",
-        "companies": [guide.provider for guide in UTILITY_DOWNLOAD_GUIDES if guide.slug != "duke"],
-    }]
+    """Every electric company a customer can pick, nationwide companies first, then state lists."""
+    national = sorted({guide.provider for guide in UTILITY_DOWNLOAD_GUIDES}, key=str.lower)
+    seen = {company.lower() for company in national}
+    groups: list[dict[str, object]] = [{"label": "Electric companies", "companies": national}]
+    for group in ENERGY_COMPANY_GROUPS:
+        companies = [company for company in group["companies"] if company.lower() not in seen]
+        seen.update(company.lower() for company in companies)
+        if companies:
+            groups.append({"label": group["label"], "companies": companies})
+    return groups
+
+
+def energy_company_option_groups(current: str | None = None) -> list[dict[str, object]]:
+    """Dropdown groups; a saved company that is not on the list stays selectable."""
+    groups = list_energy_company_groups()
+    current_name = (current or "").strip()
+    if current_name and current_name.lower() not in {company.lower() for company in list_energy_companies()}:
+        groups = [{"label": "Saved for this account", "companies": [current_name]}] + groups
+    return groups
+
+
+def clean_selected_energy_company(value: object, *, allowed_current: str | None = None) -> str | None:
+    """A company chosen from the dropdown. Blank means: find it from the ZIP code."""
+    text = clean_form_text(None if value is None else str(value), "electric company", max_length=100)
+    if not text:
+        return None
+    if allowed_current and text.lower() == str(allowed_current).strip().lower():
+        return str(allowed_current).strip()
+    companies_by_lower = {company.lower(): company for company in list_energy_companies()}
+    if text.lower() not in companies_by_lower:
+        raise ValueError("Choose your electric company from the list, or leave it blank to find it from your ZIP code.")
+    return companies_by_lower[text.lower()]
 
 
 def list_energy_companies() -> list[str]:
@@ -6537,7 +6566,7 @@ def get_or_create_account(
         current = dict(existing)
         updates: list[str] = []
         values: list[object] = []
-        normalized_name = (display_name or "").strip()
+        normalized_name = clean_form_text(display_name, "home name", max_length=120) or ""
         if normalized_name and normalized_name != current["display_name"]:
             updates.append("display_name = ?")
             values.append(normalized_name)
@@ -6569,7 +6598,7 @@ def get_or_create_account(
         return serialize_account_row(existing) or {}
 
     timestamp = timestamp_now()
-    account_label = (display_name or "").strip() or normalized_energy_company or normalized_number
+    account_label = clean_form_text(display_name, "home name", max_length=120) or normalized_energy_company or normalized_number
     conn.execute(
         """
         INSERT INTO accounts (account_number, display_name, energy_company, baseline_date, meter_value, created_at, updated_at)
@@ -6948,7 +6977,7 @@ def add_account_access_email(
     access_level: str = "Viewer",
 ) -> dict[str, object]:
     normalized_email = clean_email(email)
-    normalized_name = clean_optional_text(full_name)
+    normalized_name = clean_form_text(full_name, "name", max_length=120)
     normalized_access = clean_optional_text(access_level) or "Viewer"
     if normalized_access not in CUSTOMER_ACCESS_LEVELS:
         raise ValueError("Choose a valid account access level.")
@@ -8745,9 +8774,10 @@ def list_saved_utility_connections_for_sync(account_number: str | None = None) -
     return connections
 
 
+MANUAL_CONNECTION_ACCESS_METHODS = ("utility_authorization", "customer_api_key", "customer_login")
+
+
 def save_utility_connection(account_number: str | None, form_like) -> dict[str, object]:
-    provider_name = clean_optional_text(form_like.get("provider_name")) or "Duke Energy"
-    connection_label = clean_optional_text(form_like.get("connection_label")) or provider_name
     access_method = clean_optional_text(form_like.get("access_method")) or "customer_api_key"
     if access_method == DUKE_OAUTH_ACCESS_METHOD:
         raise ValueError("Use the Duke sign-in steps to create an automatic Duke connection.")
@@ -8757,10 +8787,16 @@ def save_utility_connection(account_number: str | None, form_like) -> dict[str, 
         raise ValueError("Use Xcel sign-in to create this connection.")
     if access_method == coned_oru.METHOD:
         raise ValueError("Use the utility sign-in steps to create a Green Button connection.")
-    access_identifier = clean_optional_text(form_like.get("access_identifier"))
+    if access_method not in MANUAL_CONNECTION_ACCESS_METHODS:
+        raise ValueError("Choose an access type from the list.")
+    provider_name = clean_form_text(form_like.get("provider_name"), "electric company", max_length=100, required=True)
+    connection_label = clean_form_text(form_like.get("connection_label"), "connection name", max_length=100) or provider_name
+    access_identifier = clean_form_text(form_like.get("access_identifier"), "export link", max_length=1000)
     if access_identifier and "://" in access_identifier:
         access_identifier = validate_utility_export_url(access_identifier)
     access_secret = form_like.get("access_secret")
+    if access_secret is not None and len(str(access_secret)) > 4000:
+        raise ValueError("The access key is too long.")
     secret_hash = build_secret_hash(access_secret)
     secret_token = seal_secret_value(access_secret)
     secret_last4 = build_secret_last4(access_secret)
@@ -9314,6 +9350,92 @@ def clean_form_text(
     return normalized
 
 
+SUPPORTED_TIMEZONES = (
+    ("America/New_York", "Eastern"),
+    ("America/Chicago", "Central"),
+    ("America/Denver", "Mountain"),
+    ("America/Phoenix", "Mountain, Arizona (no daylight saving)"),
+    ("America/Los_Angeles", "Pacific"),
+    ("America/Anchorage", "Alaska"),
+    ("Pacific/Honolulu", "Hawaii"),
+    ("America/Puerto_Rico", "Atlantic (Puerto Rico)"),
+)
+
+
+def clean_number(
+    value: object,
+    field_label: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    integer: bool = False,
+    default: float | int | None = None,
+) -> float | int:
+    """Read a browser or API number: it must be a finite number in range, never NaN or infinity."""
+    if isinstance(value, bool):
+        raise ValueError(f"Enter a number for the {field_label}.")
+    text = "" if value is None else str(value).strip()
+    if not text:
+        if default is not None:
+            return default
+        raise ValueError(f"Enter the {field_label}.")
+    try:
+        number = float(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Enter a number for the {field_label}.") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"Enter a number for the {field_label}.")
+    if integer:
+        if not number.is_integer():
+            raise ValueError(f"Enter a whole number for the {field_label}.")
+        number = int(number)
+    if minimum is not None and number < minimum:
+        raise ValueError(f"The {field_label} must be at least {minimum:g}.")
+    if maximum is not None and number > maximum:
+        raise ValueError(f"The {field_label} must be no more than {maximum:g}.")
+    return number
+
+
+def clean_time_of_day(value: object, field_label: str, *, default: str | None = None) -> str:
+    text = "" if value is None else str(value).strip()
+    if not text and default is not None:
+        return default
+    match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)(?::[0-5]\d)?", text)
+    if not match:
+        raise ValueError(f"Enter the {field_label} as a time, like 02:00.")
+    return f"{int(match.group(1)):02d}:{match.group(2)}"
+
+
+def clean_timezone(value: object) -> str:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return DEFAULT_TZ
+    allowed = {zone for zone, _ in SUPPORTED_TIMEZONES} | {DEFAULT_TZ}
+    if text not in allowed:
+        raise ValueError("Choose a time zone from the list.")
+    return text
+
+
+def clean_choice(value: object, field_label: str, choices, *, default: str | None = None) -> str:
+    text = "" if value is None else str(value).strip()
+    if not text and default is not None:
+        return default
+    allowed = {str(choice) for choice in choices}
+    if text not in allowed:
+        raise ValueError(f"Choose a {field_label} from the list.")
+    return text
+
+
+def clean_optional_iso_date(value: object, field_label: str) -> str | None:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return None
+    try:
+        return ddate.fromisoformat(text).isoformat()
+    except ValueError as exc:
+        raise ValueError(f"Choose a valid {field_label}.") from exc
+
+
 def clean_note_date(value: str | None) -> str:
     normalized = clean_optional_text(value)
     if not normalized:
@@ -9346,7 +9468,7 @@ def clean_optional_int(value: str | int | None, field_label: str) -> int | None:
     try:
         return int(normalized)
     except ValueError as exc:
-        raise ValueError(f"Choose a valid {field_label}.") from exc
+        raise ValueError(f"Enter a whole number for the {field_label}.") from exc
 
 
 def clean_household_profile_values(
@@ -9816,9 +9938,12 @@ def resolve_energy_company_for_form(
     existing_profile: dict[str, object] | None = None,
     require_zip: bool = False,
 ) -> str:
-    manual_energy_company = clean_optional_text(form_like.get("energy_company"))
+    manual_energy_company = clean_selected_energy_company(
+        form_like.get("energy_company"),
+        allowed_current=(existing_account or {}).get("energy_company"),
+    )
     if manual_energy_company:
-        return clean_energy_company(manual_energy_company)
+        return manual_energy_company
     zip_code = clean_zip_code(form_like.get("zip_code"), required=require_zip)
     if not zip_code:
         if existing_profile and existing_profile.get("zip_code"):
@@ -10537,6 +10662,24 @@ def estimate_equipment_loads(
     }
 
 
+EQUIPMENT_FUEL_TYPES = ("electric", "gas", "propane", "oil", "wood", "solar", "other")
+
+
+def clean_season_day(value: object, field_label: str) -> str | None:
+    """A recurring season boundary, written MM-DD."""
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return None
+    match = re.fullmatch(r"(\d{2})-(\d{2})", text)
+    if not match:
+        raise ValueError(f"Enter the {field_label} as month and day, like 04-01.")
+    try:
+        ddate(2024, int(match.group(1)), int(match.group(2)))
+    except ValueError as exc:
+        raise ValueError(f"Enter a real calendar day for the {field_label}.") from exc
+    return text
+
+
 def add_equipment_history(
     account_number: str | None,
     *,
@@ -10547,27 +10690,38 @@ def add_equipment_history(
     manufacturer: str | None = None,
     model: str | None = None,
     fuel_type: str = "electric",
-    watts_each: float = 0.0,
-    quantity: int = 1,
-    duty_cycle: float = 1.0,
-    annual_hours: float = 8760.0,
+    watts_each: object = 0.0,
+    quantity: object = 1,
+    duty_cycle: object = 1.0,
+    annual_hours: object = 8760.0,
     season_start: str | None = None,
     season_end: str | None = None,
     notes: str | None = None,
     source: str = "user",
     confidence: str = "user_reported",
 ) -> dict[str, object]:
-    normalized_from = normalize_optional_date(active_from)
+    normalized_from = clean_optional_iso_date(active_from, "active date")
     if not normalized_from:
         raise ValueError("Choose when this equipment became active.")
-    normalized_until = normalize_optional_date(active_until)
+    normalized_until = clean_optional_iso_date(active_until, "replacement date")
     if normalized_until and normalized_until < normalized_from:
         raise ValueError("The replacement date cannot be before the active date.")
-    clean_label = (label or "").strip()
+    clean_label = clean_form_text(str(label or ""), "equipment name", max_length=120)
     if not clean_label:
         raise ValueError("Give this equipment a name.")
-    if watts_each < 0 or quantity <= 0:
-        raise ValueError("Enter a valid quantity and wattage.")
+    category = clean_form_text(str(category or ""), "equipment category", max_length=60) or "other"
+    fuel_type = clean_choice(str(fuel_type or "").lower(), "fuel type", EQUIPMENT_FUEL_TYPES, default="electric")
+    watts_each = clean_number(watts_each, "wattage", minimum=0, maximum=1_000_000, default=0.0)
+    quantity = clean_number(quantity, "quantity", minimum=1, maximum=1000, integer=True, default=1)
+    duty_cycle = clean_number(duty_cycle, "share of time running", minimum=0, maximum=1, default=1.0)
+    annual_hours = clean_number(annual_hours, "hours per year", minimum=0, maximum=8784, default=8760.0)
+    season_start = clean_season_day(season_start, "season start")
+    season_end = clean_season_day(season_end, "season end")
+    manufacturer = clean_form_text(None if manufacturer is None else str(manufacturer), "manufacturer", max_length=120)
+    model = clean_form_text(None if model is None else str(model), "model", max_length=120)
+    notes = clean_form_text(None if notes is None else str(notes), "equipment notes", max_length=2000)
+    source = clean_form_text(str(source or ""), "source", max_length=40) or "user"
+    confidence = clean_form_text(str(confidence or ""), "confidence", max_length=40) or "user_reported"
     with get_db_connection() as conn:
         account = get_or_create_account(conn, account_number)
         timestamp = timestamp_now()
@@ -10598,18 +10752,19 @@ def add_equipment_history(
 def add_load_item(
     account_number: str | None,
     label: str,
-    quantity: int,
-    watts_each: float,
+    quantity: object,
+    watts_each: object,
     include_when_off: bool,
     notes: str | None = None,
 ) -> dict[str, object]:
-    clean_label = (label or "").strip()
+    clean_label = clean_form_text(label, "load name", max_length=120)
     if not clean_label:
         raise ValueError("Give this load a name.")
-    if quantity <= 0:
-        raise ValueError("Quantity must be at least 1.")
+    quantity = clean_number(quantity, "quantity", minimum=1, maximum=1000, integer=True)
+    watts_each = clean_number(watts_each, "wattage", minimum=0, maximum=1_000_000)
     if watts_each <= 0:
         raise ValueError("Wattage must be above 0.")
+    notes = clean_form_text(notes, "load notes", max_length=1000)
 
     with get_db_connection() as conn:
         account = get_or_create_account(conn, account_number)
@@ -10733,13 +10888,13 @@ class GreenButtonESPIAdapter(UtilityFeedAdapter):
 class DukeStyleIntervalXmlAdapter(UtilityFeedAdapter):
     info = UtilityFeedAdapterInfo(
         adapter_id="duke_style_interval_xml",
-        display_name="Duke-style interval XML",
-        provider_label="Duke-style and other basic interval XML exports",
+        display_name="Interval XML",
+        provider_label="Basic interval XML exports, including Duke Energy",
         standard_label="Utility-specific interval XML",
         format_label="IntervalBlock / IntervalReading XML",
         file_types=(".xml",),
-        customer_label="Duke Energy history",
-        customer_note="Duke account history files with interval readings.",
+        customer_label="Utility interval history",
+        customer_note="Interval XML files from your utility account, such as Duke Energy's usage download.",
     )
 
     def detect_score(self, path: Path, source: Any) -> int:
@@ -12979,11 +13134,15 @@ def build_report_context(
 
 def parse_settings(form_like) -> dict[str, object]:
     return {
-        "tz": form_like.get("tz", DEFAULT_TZ),
-        "night_start": form_like.get("night_start", DEFAULT_NIGHT_START),
-        "night_end": form_like.get("night_end", DEFAULT_NIGHT_END),
-        "min_night_kw": float(form_like.get("min_night_kw", DEFAULT_MIN_NIGHT_KW)),
-        "night_multiplier": float(form_like.get("night_multiplier", DEFAULT_NIGHT_MULTIPLIER)),
+        "tz": clean_timezone(form_like.get("tz")),
+        "night_start": clean_time_of_day(form_like.get("night_start"), "night start", default=DEFAULT_NIGHT_START),
+        "night_end": clean_time_of_day(form_like.get("night_end"), "night end", default=DEFAULT_NIGHT_END),
+        "min_night_kw": clean_number(
+            form_like.get("min_night_kw"), "minimum night kW", minimum=0, maximum=1000, default=DEFAULT_MIN_NIGHT_KW
+        ),
+        "night_multiplier": clean_number(
+            form_like.get("night_multiplier"), "night multiplier", minimum=1, maximum=100, default=DEFAULT_NIGHT_MULTIPLIER
+        ),
     }
 
 
@@ -13617,10 +13776,10 @@ def create_web_app() -> Flask:
         email = (request.form.get("email") or "").strip()
         payout_method = (request.form.get("payout_method") or "").strip().lower()
         payout_destination = (request.form.get("payout_destination") or "").strip()
-        if not name or not email or payout_method not in {"paypal", "venmo", "other"} or not payout_destination:
+        if not name or not email or payout_method not in AFFILIATE_PAYOUT_METHODS[1:] or not payout_destination:
             flash("Please complete your name, email, payout method, and payout details.")
             return redirect(url_for("affiliate_page"))
-        slug_base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "partner"
+        slug_base = re.sub(r"[^a-z0-9]+", "-", name.lower())[:40].strip("-") or "partner"
         slug = f"{slug_base}-{secrets.token_hex(3)}"
         try:
             affiliate = create_affiliate_account(name, email, slug, "10", payout_method, payout_destination)
@@ -13829,6 +13988,8 @@ def create_web_app() -> Flask:
             "utility_download_guides": UTILITY_DOWNLOAD_GUIDES,
             "get_utility_download_guide": get_utility_download_guide,
             "energy_company_choices": list_energy_companies(),
+            "energy_company_option_groups": energy_company_option_groups,
+            "supported_timezones": SUPPORTED_TIMEZONES,
             "duke_oauth_helper_download_url": DUKE_OAUTH_HELPER_DOWNLOAD_URL,
             "national_grid_available": national_grid.available(),
             "national_grid_provider_matches": national_grid.provider_matches,
@@ -15643,7 +15804,7 @@ def create_web_app() -> Flask:
         if not isinstance(staff_user, dict):
             return staff_user
         try:
-            commission_id = int(request.form.get("commission_id") or 0)
+            commission_id = clean_number(request.form.get("commission_id"), "commission", minimum=1, integer=True)
         except ValueError:
             commission_id = 0
         commission = get_commission_organization(commission_id)
@@ -16351,11 +16512,15 @@ def create_web_app() -> Flask:
     @app.post("/compare")
     def compare_exports():
         ensure_data_dirs()
-        settings = parse_settings(request.form)
         account_number = request.form.get("account_number")
         actor = require_account_actor(account_number, write=True)
         if not isinstance(actor, dict):
             return actor
+        try:
+            settings = parse_settings(request.form)
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect_back_or_account(account_number)
 
         try:
             if not account_has_active_data_authorization(account_number) and not customer_can_manage_own_history_without_data_permission(
@@ -16443,7 +16608,10 @@ def create_web_app() -> Flask:
         actor = require_account_actor(request.args.get("account_number"), api=True)
         if not isinstance(actor, dict):
             return actor
-        settings = parse_settings(request.args)
+        try:
+            settings = parse_settings(request.args)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
         account = load_account(request.args.get("account_number"))
         load_items = list_load_items(account["account_number"])
         load_summary = build_load_inventory_summary(load_items)
@@ -16499,6 +16667,8 @@ def create_web_app() -> Flask:
     @app.post("/api/equipment-history")
     def api_add_equipment_history():
         payload = request.get_json(silent=True) or request.form
+        if not hasattr(payload, "get"):
+            return jsonify({"error": "Send a JSON object."}), 400
         account_number = payload.get("account_number")
         actor = require_account_actor(account_number, write=True, api=True)
         if not isinstance(actor, dict):
@@ -16513,10 +16683,10 @@ def create_web_app() -> Flask:
                 manufacturer=payload.get("manufacturer"),
                 model=payload.get("model"),
                 fuel_type=str(payload.get("fuel_type") or "electric"),
-                watts_each=float(payload.get("watts_each") or 0),
-                quantity=int(payload.get("quantity") or 1),
-                duty_cycle=float(payload.get("duty_cycle") or 1),
-                annual_hours=float(payload.get("annual_hours") or 8760),
+                watts_each=payload.get("watts_each"),
+                quantity=payload.get("quantity"),
+                duty_cycle=payload.get("duty_cycle"),
+                annual_hours=payload.get("annual_hours"),
                 season_start=payload.get("season_start"),
                 season_end=payload.get("season_end"),
                 notes=payload.get("notes"),
@@ -16570,10 +16740,10 @@ def create_web_app() -> Flask:
                     manufacturer=item.get("manufacturer"),
                     model=item.get("model"),
                     fuel_type=str(item.get("fuel_type") or "electric"),
-                    watts_each=float(item.get("watts_each") or 0),
-                    quantity=int(item.get("quantity") or 1),
-                    duty_cycle=float(item.get("duty_cycle") or 1),
-                    annual_hours=float(item.get("annual_hours") or 8760),
+                    watts_each=item.get("watts_each"),
+                    quantity=item.get("quantity"),
+                    duty_cycle=item.get("duty_cycle"),
+                    annual_hours=item.get("annual_hours"),
                     season_start=item.get("season_start"),
                     season_end=item.get("season_end"),
                     notes=item.get("notes"),
@@ -16637,13 +16807,21 @@ def create_web_app() -> Flask:
         payload = {}
         if request.is_json:
             payload = request.get_json(silent=True) or {}
-            settings = parse_settings(payload)
+            if not isinstance(payload, dict):
+                return jsonify({"error": "Send a JSON object."}), 400
+            try:
+                settings = parse_settings(payload)
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
             account_number = payload.get("account_number")
             display_name = payload.get("display_name")
             energy_company = payload.get("energy_company")
             baseline_date = payload.get("baseline_date")
         else:
-            settings = parse_settings(request.form)
+            try:
+                settings = parse_settings(request.form)
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
             account_number = request.form.get("account_number")
             display_name = request.form.get("display_name")
             energy_company = request.form.get("energy_company")
@@ -17165,8 +17343,8 @@ def create_web_app() -> Flask:
             item = add_load_item(
                 account_number=account_number,
                 label=request.form.get("label", ""),
-                quantity=int(request.form.get("quantity", "1")),
-                watts_each=float(request.form.get("watts_each", "0")),
+                quantity=request.form.get("quantity", "1"),
+                watts_each=request.form.get("watts_each", ""),
                 include_when_off=bool(request.form.get("include_when_off")),
                 notes=request.form.get("notes"),
             )
@@ -17211,7 +17389,6 @@ def create_web_app() -> Flask:
     @app.post("/analyze")
     def analyze():
         ensure_data_dirs()
-        settings = parse_settings(request.form)
         account_number = request.form.get("account_number")
         display_name = request.form.get("display_name")
         energy_company = request.form.get("energy_company")
@@ -17219,6 +17396,11 @@ def create_web_app() -> Flask:
         actor = require_account_actor(account_number, write=True)
         if not isinstance(actor, dict):
             return actor
+        try:
+            settings = parse_settings(request.form)
+        except ValueError as exc:
+            flash(str(exc))
+            return redirect_back_or_account(account_number)
 
         try:
             if not account_has_active_data_authorization(account_number) and not customer_can_manage_own_history_without_data_permission(

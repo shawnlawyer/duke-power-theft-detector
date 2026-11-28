@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_utility_provider_options.html" import provider_select with context %}
 
 {% block content %}
   <main class="app-layout auth-layout signup-layout">
@@ -49,10 +50,9 @@
             <input type="text" name="account_number" value="{{ signup_form.account_number }}" maxlength="100" required>
           </label>
           <label>
-            <span>Utility / provider name</span>
-            <input type="text" name="energy_company" value="{{ signup_form.energy_company }}" list="utility-provider-options" maxlength="100" placeholder="Duke Energy, Entergy, or your local utility">
-            {% include "_utility_provider_options.html" %}
-            <small>Choose from our <a class="inline-link" href="{{ url_for('utilities_page') }}">supported utility list</a>, or leave this blank to match from your ZIP code. We add providers regularly, including utilities that participate in the Green Button Alliance.</small>
+            <span>Electric company</span>
+            {{ provider_select("energy_company", signup_form.energy_company) }}
+            <small>Pick your company, or leave it on "Find it from my ZIP code" and we'll match it from the service address. See the <a class="inline-link" href="{{ url_for('utilities_page') }}">supported utility list</a>.</small>
           </label>
           <label>
             <span>Meter value</span>

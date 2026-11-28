@@ -1,5 +1,12 @@
-<datalist id="utility-provider-options">
-  {% for provider in energy_company_choices %}
-    <option value="{{ provider }}"></option>
+{% macro provider_select(name, current="", blank_label="Find it from my ZIP code") -%}
+<select name="{{ name }}">
+  <option value="" {% if not current %}selected{% endif %}>{{ blank_label }}</option>
+  {% for group in energy_company_option_groups(current) %}
+    <optgroup label="{{ group.label }}">
+      {% for company in group.companies %}
+        <option value="{{ company }}" {% if current and company|lower == current|lower %}selected{% endif %}>{{ company }}</option>
+      {% endfor %}
+    </optgroup>
   {% endfor %}
-</datalist>
+</select>
+{%- endmacro %}

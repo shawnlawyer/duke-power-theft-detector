@@ -1799,3 +1799,7 @@ label > small {
 }
 .commission-preview-banner p { margin: 0; }
 .commission-preview-banner strong { color: var(--flag); }
+
+.guide-picker { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin: 6px 0 12px; }
+.guide-picker label { display: grid; gap: 6px; min-width: min(320px, 100%); flex: 1; }
+.guide-picker select { width: 100%; }

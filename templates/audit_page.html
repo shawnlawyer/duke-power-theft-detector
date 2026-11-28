@@ -23,11 +23,11 @@
       <form class="account-search-form" action="{{ url_for('audit_page') }}" method="get">
         <label>
           <span>Electric account number</span>
-          <input type="search" name="account_number" value="{{ audit_page.account_number }}">
+          <input type="search" name="account_number" value="{{ audit_page.account_number }}" maxlength="100">
         </label>
         <label>
           <span>Action</span>
-          <input type="search" name="action" value="{{ audit_page.action }}" placeholder="customer.login_succeeded">
+          <input type="search" name="action" value="{{ audit_page.action }}" placeholder="customer.login_succeeded" maxlength="120">
         </label>
         <button type="submit">Filter activity</button>
       </form>
