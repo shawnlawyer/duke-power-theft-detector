@@ -318,7 +318,7 @@ def test_detect_utility_feed_adapter_identifies_duke_style_interval_xml():
     detected = app.detect_utility_feed_adapter(FIXTURE)
 
     assert detected["adapter_id"] == "duke_style_interval_xml"
-    assert detected["display_name"] == "Duke-style interval XML"
+    assert detected["display_name"] == "Interval XML"
     assert detected["format_label"] == "IntervalBlock / IntervalReading XML"
 
 
@@ -562,7 +562,9 @@ def test_unknown_utility_has_guidance_directory_without_incorrect_primary(tmp_pa
     response = client.get("/customer/utility", query_string={"account_number": "unknown"})
     document = lxml_html.fromstring(response.data)
     assert not document.xpath('//*[@data-selected-utility]')
-    assert len(document.xpath('//details[@class="utility-download-option"]')) == len(app.UTILITY_DOWNLOAD_GUIDES)
+    assert len(document.xpath('//select[@name="guide"]/option[@value!=""]')) == len(app.UTILITY_DOWNLOAD_GUIDES)
+    picked = client.get("/customer/utility", query_string={"account_number": "unknown", "guide": "pge"})
+    assert lxml_html.fromstring(picked.data).xpath('//*[@data-selected-utility]/@data-selected-utility') == ["pge"]
     assert document.xpath('//a[contains(@href, "/customer/account?account_number=unknown")]')
 
 
@@ -669,28 +671,35 @@ def test_similar_utility_names_follow_selected_account_without_cross_linking(tmp
 
 
 def test_download_guide_provider_names_are_available_in_company_list():
-    assert {guide.provider for guide in app.UTILITY_DOWNLOAD_GUIDES if guide.slug != "duke"} <= set(app.list_energy_companies())
+    assert {guide.provider for guide in app.UTILITY_DOWNLOAD_GUIDES} <= set(app.list_energy_companies())
+    first_group = app.list_energy_company_groups()[0]
+    assert first_group["label"] == "Electric companies"
+    assert first_group["companies"] == sorted(first_group["companies"], key=str.lower)
 
 
-def test_download_guide_provider_suggestions_render_without_restricting_manual_input(tmp_path, monkeypatch):
+def test_provider_fields_are_dropdowns_on_signup_and_account(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     monkeypatch.setitem(app.web_app.config, "TESTING", True)
     client = app.web_app.test_client()
     signup = client.get("/signup")
     document = lxml_html.fromstring(signup.data)
-    choices = document.xpath('//datalist[@id="utility-provider-options"]/option/@value')
+    choices = document.xpath('//select[@name="energy_company"]//option/@value')
     assert "Central Maine Power" in choices
     assert "United Illuminating" in choices
     assert {"San Diego Gas & Electric", "Southern California Edison", "Pacific Gas & Electric", "Central Hudson", "Delmarva Power"} <= set(choices)
     assert {"Con Edison", "Orange & Rockland", "National Grid", "Eversource Massachusetts", "SWEPCO"} <= set(choices)
     assert {"Atlantic City Electric", "Pepco", "PECO", "ComEd"} <= set(choices)
     assert {"Hawaiian Electric", "Louisville Gas & Electric", "Kentucky Utilities", "Old Dominion Power"} <= set(choices)
-    assert document.xpath('//input[@name="energy_company" and @type="text" and @list="utility-provider-options"]')
+    assert not document.xpath('//input[@name="energy_company"]')
+    assert document.xpath('//select[@name="energy_company"]/option[@value="" and @selected]')
     authorize_account("suggestions", "suggestions@example.com")
+    app.save_account_profile("suggestions", energy_company="Public Service Company of Colorado")
     customer_sign_in(client, "suggestions@example.com")
     account = client.get("/customer/account", query_string={"account_number": "suggestions"})
     document = lxml_html.fromstring(account.data)
-    assert document.xpath('//datalist[@id="utility-provider-options"]/option[@value="PSEG Long Island"]')
+    assert document.xpath('//select[@name="energy_company"]//option[@value="PSEG Long Island"]')
+    # A company matched from the ZIP code stays selected even though it is not on the list.
+    assert document.xpath('//select[@name="energy_company"]//option[@value="Public Service Company of Colorado" and @selected]')
 
 
 @pytest.mark.parametrize("provider", [guide.provider for guide in app.UTILITY_DOWNLOAD_GUIDES])
@@ -816,10 +825,10 @@ def test_import_interval_file_returns_adapter_metadata_when_file_is_unchanged(tm
     skipped = app.import_interval_file_to_db(sample, account_number="acct-1")
 
     assert imported["adapter_id"] == "duke_style_interval_xml"
-    assert imported["adapter_name"] == "Duke-style interval XML"
+    assert imported["adapter_name"] == "Interval XML"
     assert skipped["imported"] is False
     assert skipped["adapter_id"] == "duke_style_interval_xml"
-    assert skipped["adapter_name"] == "Duke-style interval XML"
+    assert skipped["adapter_name"] == "Interval XML"
     assert skipped["added_count"] == 0
     assert skipped["already_present_count"] == skipped["interval_count"]
     assert skipped["conflicts_skipped_count"] == 0
@@ -2245,7 +2254,7 @@ def test_customer_signup_keeps_entered_values_on_validation_error(tmp_path, monk
             "email": "owner@example.com",
             "password": "ignored",
             "account_number": "",
-            "energy_company": "Blue Ridge Electric",
+            "energy_company": "BLUE RIDGE EMC",
             "meter_value": "Meter-99",
             "address": "123 Main St Charlotte NC",
             "zip_code": "28205",
@@ -2261,7 +2270,7 @@ def test_customer_signup_keeps_entered_values_on_validation_error(tmp_path, monk
     assert b'value="Home Owner"' in response.data
     assert b'value="owner@example.com"' in response.data
     assert b'name="account_number"' in response.data
-    assert b'value="Blue Ridge Electric"' in response.data
+    assert b'<option value="BLUE RIDGE EMC" selected>' in response.data
     assert b'value="Meter-99"' in response.data
     assert b'value="123 Main St Charlotte NC"' in response.data
     assert b'value="28205"' in response.data
@@ -2350,17 +2359,16 @@ def test_account_forms_keep_zip_lookup_and_allow_manual_provider_names(tmp_path,
     assert b"Matched electric company" in signup.data
     assert b"Service ZIP code" in home.data
     assert b"Service ZIP code" in signup.data
-    assert b"provider list" in home.data
-    assert b"provider list" in signup.data
+    assert b"supported utility list" in home.data
+    assert b"supported utility list" in signup.data
     assert b'name="energy_company"' in home.data
     assert b'name="energy_company"' in signup.data
     assert b'name="meter_value"' in home.data
     assert b'name="meter_value"' in signup.data
     for response in (home, signup):
         document = lxml_html.fromstring(response.data)
-        assert document.xpath('//input[@name="energy_company"]')
-        assert not document.xpath('//select[@name="energy_company"]')
-        assert document.xpath('//datalist[@id="utility-provider-options"]/option[@value="NYSEG"]')
+        assert not document.xpath('//input[@name="energy_company"]')
+        assert document.xpath('//select[@name="energy_company"]//option[@value="NYSEG"]')
     assert b"Home name" not in home.data
     assert b"Home name" not in signup.data
 
@@ -2432,7 +2440,7 @@ def test_account_profile_stores_and_searches_energy_company(tmp_path, monkeypatc
     assert page["accounts"][0]["account_number"] == "acct-1"
 
 
-def test_account_save_allows_manual_provider_meter_and_rename(tmp_path, monkeypatch):
+def test_account_save_accepts_listed_provider_meter_and_rename(tmp_path, monkeypatch):
     configure_tmp_paths(tmp_path, monkeypatch)
     app.web_app.config["TESTING"] = True
     app.save_account_profile("acct-old", display_name="Main house", energy_company="Duke Energy Progress, LLC")
@@ -2447,7 +2455,7 @@ def test_account_save_allows_manual_provider_meter_and_rename(tmp_path, monkeypa
             "original_account_number": "acct-old",
             "account_number": "acct-new",
             "display_name": "Main house",
-            "energy_company": "Metro Electric Cooperative",
+            "energy_company": "Xcel Energy",
             "meter_value": "Meter-42",
             "address": "2 New Street",
             "zip_code": "98052",
@@ -2460,7 +2468,7 @@ def test_account_save_allows_manual_provider_meter_and_rename(tmp_path, monkeypa
     assert "acct-new" in response.headers["Location"]
     assert app.find_account("acct-old") is None
     updated = app.find_account("acct-new")
-    assert updated["energy_company"] == "Metro Electric Cooperative"
+    assert updated["energy_company"] == "Xcel Energy"
     assert updated["meter_value"] == "Meter-42"
     assert app.load_household_profile("acct-new")["address"] == "2 New Street"
     assert app.customer_has_account_access("owner@example.com", "acct-new") is True
@@ -5142,7 +5150,7 @@ def test_customer_owner_can_upload_and_compare_without_active_data_permission(tm
     )
 
     assert history_page.status_code == 200
-    assert b"You can upload your own Duke or Green Button export right away." in history_page.data
+    assert b"You can upload your own utility export right away." in history_page.data
     assert b"Customer data permission must be active before new history can be added." not in history_page.data
     assert b"Customer data permission must be active before exports can be compared." not in history_page.data
     assert upload.status_code == 200
@@ -5389,7 +5397,7 @@ def test_web_routes_render_and_analyze(tmp_path, monkeypatch):
     assert b"Keep the data source clear." in client.get("/utility").data
     assert b"Household load record" in client.get("/inventory").data
     assert b"Files that work today" in client.get("/history").data
-    assert b"Duke Energy history" in client.get("/history").data
+    assert b"Utility interval history" in client.get("/history").data
     assert b"Interval spreadsheet" in client.get("/history").data
 
     with FIXTURE.open("rb") as handle:
@@ -5841,3 +5849,104 @@ def test_equipment_proposal_requires_confirmation_and_saves_confirmed_dates(tmp_
     )
     assert history.status_code == 200
     assert history.get_json()["interactions"][0]["question"] == "What is my modeled annual use?"
+
+
+def test_provider_must_come_from_the_list(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    app.save_account_profile("acct-pick", display_name="Main house", energy_company="Duke Energy Progress, LLC")
+    app.save_household_profile("acct-pick", {"address": "1 Main Street", "zip_code": "27601"})
+    authorize_account("acct-pick", email="owner@example.com")
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+    response = client.post("/account", data={
+        "original_account_number": "acct-pick", "account_number": "acct-pick",
+        "energy_company": "Made Up Power Co", "address": "1 Main Street", "zip_code": "27601",
+    }, follow_redirects=True)
+    assert b"Choose your electric company from the list" in response.data
+    assert app.find_account("acct-pick")["energy_company"] == "Duke Energy Progress, LLC"
+    # Keeping the saved company is always allowed, even when it came from a ZIP match.
+    assert app.clean_selected_energy_company("duke energy progress, llc", allowed_current="Duke Energy Progress, LLC") == "Duke Energy Progress, LLC"
+    assert app.clean_selected_energy_company("") is None
+
+
+@pytest.mark.parametrize("field,value,message", [
+    ("min_night_kw", "nan", "Enter a number for the minimum night kW"),
+    ("min_night_kw", "inf", "Enter a number for the minimum night kW"),
+    ("min_night_kw", "-1", "must be at least 0"),
+    ("night_multiplier", "abc", "Enter a number for the night multiplier"),
+    ("night_multiplier", "0.5", "must be at least 1"),
+    ("night_start", "25:00", "Enter the night start as a time"),
+    ("night_end", "noon", "Enter the night end as a time"),
+    ("tz", "Mars/Olympus_Mons", "Choose a time zone from the list"),
+])
+def test_alert_rule_settings_reject_wrong_types(field, value, message):
+    with pytest.raises(ValueError, match=message):
+        app.parse_settings({field: value})
+
+
+def test_alert_rule_settings_accept_valid_values():
+    settings = app.parse_settings({"tz": "America/Denver", "night_start": "1:30", "night_end": "04:00",
+                                   "min_night_kw": "0.5", "night_multiplier": "2"})
+    assert settings == {"tz": "America/Denver", "night_start": "01:30", "night_end": "04:00",
+                        "min_night_kw": 0.5, "night_multiplier": 2.0}
+    assert app.parse_settings({})["tz"] == app.DEFAULT_TZ
+
+
+def test_number_fields_reject_non_numbers_on_the_server(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    authorize_account("acct-num", email="owner@example.com")
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+    for quantity, watts, message in (("two", "100", b"Enter a number for the quantity"),
+                                     ("1.5", "100", b"Enter a whole number for the quantity"),
+                                     ("1", "nan", b"Enter a number for the wattage"),
+                                     ("1", "1e9", b"wattage must be no more than")):
+        client.post("/load-items", data={"account_number": "acct-num", "label": "Heater",
+                                         "quantity": quantity, "watts_each": watts})
+        with client.session_transaction() as flask_session:
+            flashed = " ".join(text for _, text in flask_session.pop("_flashes", []))
+        assert message.decode() in flashed, (quantity, watts, flashed)
+    assert app.list_load_items("acct-num") == []
+    bad_rules = client.post("/compare", data={"account_number": "acct-num", "min_night_kw": "lots",
+                                              "left_start": "2024-01-01", "left_end": "2024-01-02",
+                                              "right_start": "2024-01-03", "right_end": "2024-01-04"})
+    assert bad_rules.status_code == 302
+    with client.session_transaction() as flask_session:
+        flashed = " ".join(text for _, text in flask_session.pop("_flashes", []))
+    assert "Enter a number for the minimum night kW" in flashed
+    detail = client.get("/api/day-detail", query_string={"account_number": "acct-num", "tz": "Nowhere/Here"})
+    assert detail.status_code == 400
+
+
+def test_equipment_and_affiliate_values_are_type_checked(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="share of time running"):
+        app.add_equipment_history("acct-eq", category="heating", label="Heat strip", active_from="2024-01-01", duty_cycle="2")
+    with pytest.raises(ValueError, match="season start"):
+        app.add_equipment_history("acct-eq", category="heating", label="Heat strip", active_from="2024-01-01", season_start="13-40")
+    with pytest.raises(ValueError, match="fuel type"):
+        app.add_equipment_history("acct-eq", category="heating", label="Heat strip", active_from="2024-01-01", fuel_type="plutonium")
+    with pytest.raises(ValueError, match="active date"):
+        app.add_equipment_history("acct-eq", category="heating", label="Heat strip", active_from="last week")
+    with pytest.raises(ValueError, match="referral percentage"):
+        app.create_affiliate_account("Partner", "p@example.com", "partner", "ten")
+    with pytest.raises(ValueError, match="payout method"):
+        app.create_affiliate_account("Partner", "p@example.com", "partner", "10", "cash app", "x")
+
+
+def test_history_page_is_not_tied_to_one_utility(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    authorize_account("acct-x", email="owner@example.com")
+    app.save_account_profile("acct-x", energy_company="Xcel Energy")
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+    page = client.get("/customer/history", query_string={"account_number": "acct-x"})
+    document = lxml_html.fromstring(page.data)
+    upload_text = " ".join(document.xpath('//section[@id="history-import"]//p[contains(@class, "plain-note")]//text()'))
+    assert "Duke" not in upload_text
+    assert document.xpath('//*[@data-selected-utility]/@data-selected-utility') == ["xcel"]
+    assert document.xpath('//select[@name="tz"]/option[@value="America/Denver"]')
+    assert not document.xpath('//input[@name="tz"]')

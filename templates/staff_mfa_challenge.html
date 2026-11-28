@@ -15,7 +15,7 @@
         <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <label>
           <span>Authenticator or recovery code</span>
-          <input type="text" name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus>
+          <input type="text" name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus maxlength="32">
         </label>
         <button type="submit">Verify sign-in</button>
       </form>

@@ -15,11 +15,11 @@
         <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <label>
           <span>Name</span>
-          <input type="text" name="full_name" required>
+          <input type="text" name="full_name" required maxlength="120">
         </label>
         <label>
           <span>Email</span>
-          <input type="email" name="email" required>
+          <input type="email" name="email" required maxlength="254">
         </label>
         <label>
           <span>Password</span>

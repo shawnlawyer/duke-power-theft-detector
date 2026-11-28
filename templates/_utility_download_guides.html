@@ -17,27 +17,33 @@
   </div>
 {% endmacro %}
 
-<div class="utility-download-guides" aria-labelledby="utility-download-heading">
+{% set requested_guide_slug = request.args.get('guide', '') %}
+{% set requested_guide = (utility_download_guides|selectattr('slug', 'equalto', requested_guide_slug)|first) if requested_guide_slug else none %}
+{% set shown_guide = requested_guide or selected_download_guide %}
+
+<div class="utility-download-guides" id="utility-download" aria-labelledby="utility-download-heading">
   <h3 id="utility-download-heading">Get your utility history</h3>
-  {% if selected_download_guide %}
-    <article class="guide-row" data-selected-utility="{{ selected_download_guide.slug }}">
+  <form class="guide-picker" method="get" action="{{ request.path }}#utility-download">
+    <input type="hidden" name="account_number" value="{{ guide_account.account_number }}">
+    <label>
+      <span>Download steps for</span>
+      <select name="guide" data-auto-submit>
+        <option value="" {% if not shown_guide %}selected{% endif %}>Choose your electric company</option>
+        {% for guide in utility_download_guides|sort(attribute='provider') %}
+          <option value="{{ guide.slug }}" {% if shown_guide and guide.slug == shown_guide.slug %}selected{% endif %}>{{ guide.provider }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="button-secondary" data-auto-submit-button>Show steps</button>
+  </form>
+  {% if shown_guide %}
+    <article class="guide-row" data-selected-utility="{{ shown_guide.slug }}">
       <p class="section-kicker">Customer download</p>
-      <h4>{{ selected_download_guide.title }}</h4>
-      {{ download_steps(selected_download_guide) }}
+      <h4>{{ shown_guide.title }}</h4>
+      {{ download_steps(shown_guide) }}
     </article>
   {% else %}
-    <p class="plain-note">Choose your utility below for download instructions. You can save its name on the <a class="inline-link" href="{{ url_for('customer_account_page' if guide_customer_mode else 'account_page', account_number=guide_account.account_number) }}">Account page</a>.</p>
+    <p class="plain-note">Choose your electric company for its download steps. You can save your company on the <a class="inline-link" href="{{ url_for('customer_account_page' if guide_customer_mode else 'account_page', account_number=guide_account.account_number) }}">Account page</a>. If it isn't listed, look for "Green Button" or "Download My Data" in your utility account.</p>
   {% endif %}
   <p class="plain-note">A download guide is not an automatic connection. Files must match a supported format; a utility name alone does not guarantee that every export will work. Daily totals and bill PDFs cannot show overnight usage.</p>
-  <details class="utility-download-directory">
-    <summary>{{ 'Download instructions for other utilities' if selected_download_guide else 'Find download instructions' }}</summary>
-    {% for guide in utility_download_guides %}
-      {% if guide != selected_download_guide %}
-        <details class="utility-download-option">
-          <summary>{{ guide.provider }}</summary>
-          {{ download_steps(guide) }}
-        </details>
-      {% endif %}
-    {% endfor %}
-  </details>
 </div>

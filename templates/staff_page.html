@@ -27,9 +27,9 @@
       <form class="account-form" action="{{ url_for('create_affiliate') }}" method="post">
         <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <div class="field-grid">
-          <label><span>Name</span><input name="name" required></label>
-          <label><span>Email</span><input name="email" type="email" required></label>
-          <label><span>Referral code</span><input name="slug" pattern="[A-Za-z0-9-]+" required></label>
+          <label><span>Name</span><input name="name" required maxlength="120"></label>
+          <label><span>Email</span><input name="email" type="email" required maxlength="254"></label>
+          <label><span>Referral code</span><input name="slug" pattern="[A-Za-z0-9-]+" required maxlength="60"></label>
           <label><span>Percentage</span><input name="commission_percent" type="number" min="0" max="100" step="0.01" value="10" required></label>
         </div>
         <button type="submit">Create referral partner</button>

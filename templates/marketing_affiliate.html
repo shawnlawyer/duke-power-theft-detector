@@ -17,10 +17,10 @@
       <form class="hew-card hew-form" action="{{ url_for('affiliate_apply') }}" method="post">
         <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <h3>Get your referral link</h3>
-        <label><span>Your name</span><input name="name" required autocomplete="name"></label>
-        <label><span>Email address</span><input name="email" type="email" required autocomplete="email"></label>
+        <label><span>Your name</span><input name="name" required autocomplete="name" maxlength="120"></label>
+        <label><span>Email address</span><input name="email" type="email" required autocomplete="email" maxlength="254"></label>
         <label><span>How should we pay you?</span><select name="payout_method" required><option value="">Choose one</option><option value="paypal">PayPal</option><option value="venmo">Venmo</option><option value="other">Another method</option></select></label>
-        <label><span>Payout email or handle</span><input name="payout_destination" required placeholder="Where should payments go?"></label>
+        <label><span>Payout email or handle</span><input name="payout_destination" required placeholder="Where should payments go?" maxlength="200"></label>
         <button class="hew-btn hew-btn-primary" type="submit">Create my referral link</button>
         <p class="hew-plan-note">Your link starts at a 10% commission rate. Commission settings can be adjusted by the Home Energy Watch team.</p>
       </form>

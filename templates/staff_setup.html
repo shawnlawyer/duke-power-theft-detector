@@ -15,7 +15,7 @@
         <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
         <label>
           <span>Name</span>
-          <input type="text" name="full_name" value="{{ invited_user.full_name }}" required>
+          <input type="text" name="full_name" value="{{ invited_user.full_name }}" required maxlength="120">
         </label>
         <label>
           <span>Password</span>

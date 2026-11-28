@@ -9,9 +9,9 @@
       <h2>Upload the export.</h2>
       <p class="plain-note">
         Bring in the file you already have. The source stays attached while the timeline is added to this account's saved record.
-        If your utility is not listed here, set the utility name in Account first and upload the export you already downloaded.
+        Any utility's Green Button XML or interval CSV works. Choose your electric company below for its download steps.
         {% if customer_can_upload_own_history and not data_permission_active %}
-          You can upload your own Duke or Green Button export right away.
+          You can upload your own utility export right away.
         {% endif %}
       </p>
     </div>
@@ -49,24 +49,28 @@
       <summary>Alert rules</summary>
       <div class="field-grid">
         <label>
-          <span>Timezone</span>
-          <input type="text" name="tz" value="{{ defaults.tz }}">
+          <span>Time zone</span>
+          <select name="tz">
+            {% for zone, zone_label in supported_timezones %}
+              <option value="{{ zone }}" {% if zone == defaults.tz %}selected{% endif %}>{{ zone_label }}</option>
+            {% endfor %}
+          </select>
         </label>
         <label>
           <span>Night start</span>
-          <input type="time" name="night_start" value="{{ defaults.night_start }}">
+          <input type="time" name="night_start" value="{{ defaults.night_start }}" required>
         </label>
         <label>
           <span>Night end</span>
-          <input type="time" name="night_end" value="{{ defaults.night_end }}">
+          <input type="time" name="night_end" value="{{ defaults.night_end }}" required>
         </label>
         <label>
           <span>Minimum night kW</span>
-          <input type="number" name="min_night_kw" min="0" step="0.1" value="{{ defaults.min_night_kw }}">
+          <input type="number" name="min_night_kw" min="0" max="1000" step="0.1" inputmode="decimal" value="{{ defaults.min_night_kw }}" required>
         </label>
         <label>
           <span>Night multiplier</span>
-          <input type="number" name="night_multiplier" min="1" step="0.1" value="{{ defaults.night_multiplier }}">
+          <input type="number" name="night_multiplier" min="1" max="100" step="0.1" inputmode="decimal" value="{{ defaults.night_multiplier }}" required>
         </label>
       </div>
     </details>

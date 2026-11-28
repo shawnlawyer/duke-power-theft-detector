@@ -30,7 +30,7 @@
               <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
               <label>
                 <span>Six-digit code</span>
-                <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required>
+                <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required maxlength="32">
               </label>
               <button type="submit">Finish setup</button>
             </form>
@@ -54,7 +54,7 @@
           <p class="plain-note">The old recovery codes will stop working immediately.</p>
           <label>
             <span>Authenticator or recovery code</span>
-            <input type="text" name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required>
+            <input type="text" name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required maxlength="32">
           </label>
           <button type="submit">Create new recovery codes</button>
         </form>
@@ -70,7 +70,7 @@
             </label>
             <label>
               <span>Authenticator or recovery code</span>
-              <input type="text" name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required>
+              <input type="text" name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required maxlength="32">
             </label>
             <button type="submit" class="button-secondary">Turn off authenticator</button>
           </form>
@@ -103,12 +103,12 @@
         <div class="field-grid">
           <label class="wide-field">
             <span>Passkey label</span>
-            <input type="text" name="nickname" placeholder="Work laptop, phone, security key">
+            <input type="text" name="nickname" placeholder="Work laptop, phone, security key" maxlength="60">
           </label>
           {% if staff_user.mfa_enabled %}
           <label>
             <span>Authenticator code</span>
-            <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" required>
+            <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" required maxlength="32">
           </label>
           {% endif %}
         </div>

@@ -1615,3 +1615,16 @@
       });
   }
 })();
+
+(() => {
+  // Dropdowns that change the page submit their own form; the button stays for no-script use.
+  document.querySelectorAll("select[data-auto-submit]").forEach((select) => {
+    const form = select.form;
+    if (!form) return;
+    form.querySelectorAll("[data-auto-submit-button]").forEach((button) => { button.hidden = true; });
+    select.addEventListener("change", () => {
+      if (typeof form.requestSubmit === "function") form.requestSubmit();
+      else form.submit();
+    });
+  });
+})();
