@@ -2,10 +2,13 @@
 {% set history_endpoint = 'customer_history_page' if customer_mode|default(false) else 'history_page' %}
 {% set account_endpoint = 'customer_account_page' if customer_mode|default(false) else 'account_page' %}
 {% set inventory_endpoint = 'customer_inventory_page' if customer_mode|default(false) else 'inventory_page' %}
+{% set view = analysis_view|default('overview') %}
+{% set days_endpoint = 'customer_days_page' if customer_mode|default(false) else 'days_page' %}
 
 <div class="analysis-workspace">
 
   {# ---- Title block: what this record is, measured, in one place ---- #}
+  {% if view == 'overview' %}
   <section class="section-block record-block" aria-labelledby="record-block-title">
     <div class="record-identity">
       <div>
@@ -23,7 +26,7 @@
         {% elif analysis.report_file %}
           <a class="inline-link" href="{{ url_for('download_report', filename=analysis.report_file) }}">Download report</a>
         {% endif %}
-        <a class="inline-link" href="{{ url_for(history_endpoint, account_number=analysis.account.account_number) }}">History and imports</a>
+        <a class="inline-link" href="{{ url_for(history_endpoint, account_number=analysis.account.account_number) }}">Upload more history</a>
       </div>
     </div>
 
@@ -79,14 +82,20 @@
       </div>
     {% endif %}
   </section>
+  {% endif %}
 
   {# ---- The bench ---- #}
-  <div class="analysis-grid">
+  <div class="analysis-grid view-{{ view }}{% if view in ['alerts', 'ask'] %} is-single{% endif %}">
     <div class="analysis-main">
 
+      {% if view in ['overview', 'alerts', 'days'] %}
       <p class="plain-note analysis-caveat">Flagged intervals are prompts for review, not proof of theft, tampering, or a billing error.</p>
+      {% endif %}
 
-      {% if analysis.key_findings %}
+      {% if view == 'alerts' and not analysis.key_findings %}
+        <section class="section-block"><div class="empty-note">The current rules did not pick out anything on this history.</div></section>
+      {% endif %}
+      {% if view == 'alerts' and analysis.key_findings %}
         <section class="section-block" aria-labelledby="readout-title">
           <div class="section-header">
             <div>
@@ -106,6 +115,7 @@
         </section>
       {% endif %}
 
+      {% if view == 'overview' %}
       <section class="section-block" id="patterns">
         <div class="section-header">
           <div>
@@ -177,6 +187,9 @@
         </div>
       </section>
 
+      {% endif %}
+
+      {% if view == 'days' %}
       <section class="section-block day-browser" id="day-explorer">
         <div class="section-header">
           <div>
@@ -267,6 +280,9 @@
         </div>
       </section>
 
+      {% endif %}
+
+      {% if view == 'alerts' %}
       <section class="section-block">
         {% set spike_events = analysis.spike_intervals|default(analysis.alert_events|selectattr("is_spike")|list) %}
         {% set initial_spike_count = 25 if spike_events|length > 25 else spike_events|length %}
@@ -340,8 +356,9 @@
         </div>
         <script id="spike-interval-data" type="application/json">{{ spike_events|tojson }}</script>
       </section>
+      {% endif %}
 
-      {% if staff_user and analysis.accounts and analysis.accounts|length > 1 %}
+      {% if view == 'overview' and staff_user and analysis.accounts and analysis.accounts|length > 1 %}
         <section class="section-block review-queue">
           <div class="section-header">
             <div>
@@ -376,6 +393,7 @@
 
     {# ---- Inspector rail ---- #}
     <div class="analysis-sidebar">
+      {% if view == 'days' %}
       <section
         class="section-block detail-panel sticky-panel"
         id="day-detail-root"
@@ -436,7 +454,9 @@
 
         <script id="initial-day-detail" type="application/json">{{ analysis.initial_day_detail|tojson }}</script>
       </section>
+      {% endif %}
 
+      {% if view == 'ask' %}
       <section class="section-block assistant-panel" id="household-assistant" data-api-url="{{ url_for('api_household_assistant') }}" data-history-url="{{ url_for('api_household_assistant_history') }}" data-account-number="{{ analysis.account.account_number }}">
         <div class="section-header">
           <div>
@@ -483,6 +503,9 @@
         <button type="button" id="household-onboarding-confirm" hidden>Save confirmed timeline</button>
       </section>
 
+      {% endif %}
+
+      {% if view == 'days' %}
       <section class="section-block inventory-overview">
         <div class="section-header">
           <div>
@@ -569,7 +592,9 @@
         {% endif %}
       </section>
 
-      {% if analysis.load_overview.top_loads %}
+      {% endif %}
+
+      {% if view == 'overview' and analysis.load_overview.top_loads %}
         <section class="section-block">
           <div class="section-header">
             <div>

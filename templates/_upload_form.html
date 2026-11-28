@@ -9,7 +9,7 @@
       <h2>Upload the export.</h2>
       <p class="plain-note">
         Bring in the file you already have. The source stays attached while the timeline is added to this account's saved record.
-        Any utility's Green Button XML or interval CSV works. Choose your electric company below for its download steps.
+        Any utility's Green Button XML or interval CSV works.
         {% if customer_can_upload_own_history and not data_permission_active %}
           You can upload your own utility export right away.
         {% endif %}
@@ -30,7 +30,7 @@
     {% endfor %}
   </div>
 
-  {% include "_utility_download_guides.html" %}
+  <p class="plain-note">Don't have the file yet? <a class="inline-link" href="{{ url_for('customer_get_history_page' if is_customer_history else 'get_history_page', account_number=(analysis.account.account_number if analysis else account.account_number)) }}">See how to download it from your utility</a>.</p>
 
   {% if can_manage_history %}
     <form class="upload-form" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data">

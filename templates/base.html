@@ -39,33 +39,59 @@
           </div>
 
           <nav class="app-nav" aria-label="Main menu">
+            {% macro nav_link(endpoint, icon_name, label, hint, active_endpoints=none, account=true) -%}
+              {% set is_active = request.endpoint == endpoint or (active_endpoints and request.endpoint in active_endpoints) %}
+              <a class="{% if is_active %}active{% endif %}" href="{{ url_for(endpoint, account_number=nav_account) if account else url_for(endpoint) }}" {% if is_active %}aria-current="page"{% endif %}>{{ icon(icon_name) }}<span>{{ label }}</span><small>{{ hint }}</small></a>
+            {%- endmacro %}
             {% if staff_user %}
-              <a class="{% if request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('index', account_number=nav_account) }}">{{ icon("bars") }}<span>Review</span><small>Dashboard</small></a>
+              <p class="app-nav-group">Usage</p>
+              {{ nav_link('index', 'bars', 'Overview', 'Summary') }}
+              {{ nav_link('alerts_page', 'alert', 'Alerts', 'Flags') }}
+              {{ nav_link('days_page', 'calendar', 'Daily report', 'By date') }}
+              {{ nav_link('compare_page', 'compare', 'Compare', 'Two periods') }}
+              {{ nav_link('ask_page', 'search', 'Ask', 'Household') }}
               {% if not commission_read_only|default(false) %}
-                <a class="{% if request.endpoint == 'account_page' %}active{% endif %}" href="{{ url_for('account_page', account_number=nav_account) }}">{{ icon("home") }}<span>Customer</span><small>Profile</small></a>
-                <a class="{% if request.endpoint == 'people_page' %}active{% endif %}" href="{{ url_for('people_page', account_number=nav_account) }}">{{ icon("users") }}<span>People</span><small>Access</small></a>
-                <a class="{% if request.endpoint == 'utility_page' %}active{% endif %}" href="{{ url_for('utility_page', account_number=nav_account) }}">{{ icon("plug") }}<span>Utility</span><small>Connection</small></a>
-                <a class="{% if request.endpoint == 'inventory_page' %}active{% endif %}" href="{{ url_for('inventory_page', account_number=nav_account) }}">{{ icon("fan") }}<span>Inventory</span><small>Loads</small></a>
-                <a class="{% if request.endpoint == 'history_page' %}active{% endif %}" href="{{ url_for('history_page', account_number=nav_account) }}">{{ icon("upload") }}<span>History</span><small>Uploads</small></a>
-                <a class="{% if request.endpoint == 'staff_page' %}active{% endif %}" href="{{ url_for('staff_page') }}">{{ icon("users") }}<span>Staff</span><small>Team</small></a>
+                <p class="app-nav-group">Record</p>
+                {{ nav_link('history_page', 'upload', 'Upload', 'Add a file') }}
+                {{ nav_link('get_history_page', 'download', 'Get history', 'Utility steps') }}
+                {{ nav_link('notes_page', 'document', 'Notes', 'Dated notes') }}
+                <p class="app-nav-group">Setup</p>
+                {{ nav_link('account_page', 'home', 'Customer', 'Profile') }}
+                {{ nav_link('people_page', 'users', 'People', 'Access') }}
+                {{ nav_link('utility_page', 'plug', 'Utility', 'Connection') }}
+                {{ nav_link('inventory_page', 'fan', 'Inventory', 'Loads') }}
+                <p class="app-nav-group">Team</p>
+                {{ nav_link('staff_page', 'users', 'Staff', 'Team', account=false) }}
                 {% if staff_user.role in staff_admin_roles %}
                   <a class="{% if (request.endpoint or '').startswith('utility_onboarding_') %}active{% endif %}" href="{{ url_for('utility_onboarding_list') }}">{{ icon("grid") }}<span>Utilities</span><small>Onboarding</small></a>
                 {% endif %}
+              {% else %}
+                <p class="app-nav-group">Team</p>
               {% endif %}
-              <a class="{% if request.endpoint == 'staff_security' %}active{% endif %}" href="{{ url_for('staff_security') }}">{{ icon("shield") }}<span>Security</span><small>Access</small></a>
+              {{ nav_link('staff_security', 'shield', 'Security', 'Access', account=false) }}
               {% if staff_user.role in staff_admin_roles and not commission_read_only|default(false) %}
-                <a class="{% if request.endpoint in ['data_requests_page', 'review_data_request', 'execute_data_request', 'place_legal_hold', 'release_legal_hold'] %}active{% endif %}" href="{{ url_for('data_requests_page') }}">{{ icon("document") }}<span>Data requests</span><small>Records</small></a>
-                <a class="{% if request.endpoint == 'audit_page' %}active{% endif %}" href="{{ url_for('audit_page') }}">{{ icon("clock") }}<span>Audit</span><small>History</small></a>
+                {{ nav_link('data_requests_page', 'document', 'Data requests', 'Records', ['review_data_request', 'execute_data_request', 'place_legal_hold', 'release_legal_hold'], account=false) }}
+                {{ nav_link('audit_page', 'clock', 'Audit', 'History', account=false) }}
               {% endif %}
             {% else %}
-              <a class="{% if request.endpoint == 'customer_dashboard' %}active{% endif %}" href="{{ url_for('customer_dashboard', account_number=nav_account) }}">{{ icon("bars") }}<span>Review</span><small>Dashboard</small></a>
-              <a class="{% if request.endpoint == 'customer_account_page' %}active{% endif %}" href="{{ url_for('customer_account_page', account_number=nav_account) }}">{{ icon("home") }}<span>Account</span><small>Profile</small></a>
-              <a class="{% if request.endpoint == 'customer_utility_page' %}active{% endif %}" href="{{ url_for('customer_utility_page', account_number=nav_account) }}">{{ icon("plug") }}<span>Utility</span><small>Connection</small></a>
-              <a class="{% if request.endpoint == 'customer_inventory_page' %}active{% endif %}" href="{{ url_for('customer_inventory_page', account_number=nav_account) }}">{{ icon("fan") }}<span>Inventory</span><small>Loads</small></a>
-              <a class="{% if request.endpoint == 'customer_history_page' %}active{% endif %}" href="{{ url_for('customer_history_page', account_number=nav_account) }}">{{ icon("upload") }}<span>History</span><small>Uploads</small></a>
-              <a class="{% if request.endpoint == 'customer_admin_page' %}active{% endif %}" href="{{ url_for('customer_admin_page', account_number=nav_account) }}">{{ icon("settings") }}<span>Administration</span><small>Access</small></a>
-              <a class="{% if request.endpoint in ['customer_data_requests_page', 'request_account_deletion', 'cancel_account_deletion'] %}active{% endif %}" href="{{ url_for('customer_data_requests_page') }}">{{ icon("download") }}<span>My data</span><small>Exports</small></a>
-              <a class="{% if request.endpoint == 'customer_billing_page' %}active{% endif %}" href="{{ url_for('customer_billing_page', account_number=nav_account) }}">{{ icon("layers") }}<span>Billing</span><small>Plan</small></a>
+              <p class="app-nav-group">Usage</p>
+              {{ nav_link('customer_dashboard', 'bars', 'Overview', 'Summary') }}
+              {{ nav_link('customer_alerts_page', 'alert', 'Alerts', 'Flags') }}
+              {{ nav_link('customer_days_page', 'calendar', 'Daily report', 'By date') }}
+              {{ nav_link('customer_compare_page', 'compare', 'Compare', 'Two periods') }}
+              {{ nav_link('customer_ask_page', 'search', 'Ask', 'Your home') }}
+              <p class="app-nav-group">Record</p>
+              {{ nav_link('customer_history_page', 'upload', 'Upload', 'Add a file') }}
+              {{ nav_link('customer_get_history_page', 'download', 'Get history', 'Utility steps') }}
+              {{ nav_link('customer_notes_page', 'document', 'Notes', 'Dated notes') }}
+              <p class="app-nav-group">Setup</p>
+              {{ nav_link('customer_account_page', 'home', 'Account', 'Profile') }}
+              {{ nav_link('customer_utility_page', 'plug', 'Utility', 'Connection') }}
+              {{ nav_link('customer_inventory_page', 'fan', 'Inventory', 'Loads') }}
+              {{ nav_link('customer_admin_page', 'settings', 'Administration', 'Access') }}
+              <p class="app-nav-group">Account</p>
+              {{ nav_link('customer_data_requests_page', 'download', 'My data', 'Exports', ['request_account_deletion', 'cancel_account_deletion'], account=false) }}
+              {{ nav_link('customer_billing_page', 'layers', 'Billing', 'Plan') }}
             {% endif %}
           </nav>
 

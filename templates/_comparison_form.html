@@ -24,23 +24,29 @@
     <input type="hidden" name="baseline_date" value="{{ (analysis.account.baseline_date if analysis and analysis.account.baseline_date else account.baseline_date or '') }}">
 
     <fieldset class="form-fieldset" {% if history_permission_required %}disabled{% endif %}>
-    <div class="comparison-file-grid">
-      <label class="upload-field">
-        <span>Earlier period starts</span>
-        <input type="date" name="left_start" required>
-      </label>
-      <label class="upload-field">
-        <span>Earlier period ends</span>
-        <input type="date" name="left_end" required>
-      </label>
-      <label class="upload-field">
-        <span>Later period starts</span>
-        <input type="date" name="right_start" required>
-      </label>
-      <label class="upload-field">
-        <span>Later period ends</span>
-        <input type="date" name="right_end" required>
-      </label>
+    {% set compare_account = analysis.account if analysis else account %}
+    {% set saved_range = history_date_range(compare_account.account_number) %}
+    {% if saved_range.start %}
+      <p class="plain-note">Saved readings run from {{ saved_range.start }} to {{ saved_range.end }}.</p>
+    {% endif %}
+    <div class="range-pair">
+      {% for period, period_label in [('left', 'Earlier period'), ('right', 'Later period')] %}
+        <div class="range-field" data-range-picker data-min="{{ saved_range.start or '' }}" data-max="{{ saved_range.end or '' }}" data-start-name="{{ period }}_start" data-end-name="{{ period }}_end">
+          <p class="range-title">{{ period_label }}</p>
+          <p class="range-summary" data-range-summary aria-live="polite">Click a start day, then an end day.</p>
+          <div class="range-calendar" data-range-calendar hidden></div>
+          <div class="comparison-file-grid range-fallback" data-range-fallback>
+            <label class="upload-field">
+              <span>{{ period_label }} starts</span>
+              <input type="date" name="{{ period }}_start" {% if saved_range.start %}min="{{ saved_range.start }}" max="{{ saved_range.end }}"{% endif %} required>
+            </label>
+            <label class="upload-field">
+              <span>{{ period_label }} ends</span>
+              <input type="date" name="{{ period }}_end" {% if saved_range.start %}min="{{ saved_range.start }}" max="{{ saved_range.end }}"{% endif %} required>
+            </label>
+          </div>
+        </div>
+      {% endfor %}
     </div>
 
     <details class="advanced">

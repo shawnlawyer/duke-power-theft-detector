@@ -1447,6 +1447,74 @@ body.hew-app {
   > :is(.field-grid, label, p, details, fieldset, .form-fieldset, textarea, select)
   + :is(button, .button-row, .button-link) { margin-top: 14px; }
 
+/* Menu groups */
+.hew-app .app-nav .app-nav-group {
+  margin: 12px 12px 4px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
+.hew-app .app-nav .app-nav-group:first-child { margin-top: 2px; }
+.hew-app .app-nav a { padding: 8px 12px; }
+@media (max-width: 860px) {
+  .hew-app .app-nav .app-nav-group { display: none; }
+}
+
+/* One-topic pages */
+.hew-app .section-page { max-width: 1100px; }
+.hew-app .guide-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 16px; align-items: start; }
+.hew-app .guide-index { padding: 14px 10px; position: sticky; top: 90px; max-height: calc(100vh - 110px); overflow-y: auto; }
+.hew-app .guide-index .section-kicker { padding: 0 8px; }
+.hew-app .guide-index ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 2px; }
+.hew-app .guide-index a { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 7px 10px; border-radius: var(--hew-radius-sm); color: var(--hew-ink-2); font-size: 0.9rem; text-decoration: none; }
+.hew-app .guide-index a:hover { background: var(--hew-surface-2); color: var(--hew-ink); }
+.hew-app .guide-index a.active { background: var(--hew-teal-50); color: var(--hew-forest-900); font-weight: 600; }
+.hew-app .guide-index small { font-size: 0.7rem; font-weight: 600; color: var(--hew-forest-600); white-space: nowrap; }
+.hew-app .guide-detail h2 { margin: 4px 0 8px; }
+.hew-app .guide-steps { margin: 18px 0; padding-left: 0; list-style: none; counter-reset: step; display: grid; gap: 12px; }
+.hew-app .guide-steps li { counter-increment: step; display: grid; grid-template-columns: 32px 1fr; gap: 12px; align-items: start; line-height: 1.55; }
+.hew-app .guide-steps li::before { content: counter(step); display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--hew-forest-900); color: #fff; font-weight: 600; font-size: 0.85rem; }
+.hew-app .guide-detail .guide-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.hew-app .guide-footnote { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--hew-line); }
+@media (max-width: 860px) {
+  .hew-app .guide-layout { grid-template-columns: 1fr; }
+  .hew-app .guide-index { position: static; max-height: 260px; }
+}
+
+/* Date-range calendar */
+.hew-app .range-pair { display: grid; gap: 18px; margin: 8px 0 14px; }
+.hew-app .range-field { padding: 14px; border: 1px solid var(--hew-line); border-radius: var(--hew-radius); background: var(--hew-surface); }
+.hew-app .range-title { margin: 0; font-weight: 600; color: var(--hew-ink); }
+.hew-app .range-summary { margin: 2px 0 10px; color: var(--hew-ink-2); font-size: 0.9rem; }
+.hew-app .range-summary.is-error { color: var(--hew-red-500); font-weight: 600; }
+.hew-app .range-nav { display: flex; gap: 8px; margin-bottom: 10px; }
+.hew-app .range-months { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.hew-app .range-month-title { margin: 0 0 6px; font-weight: 600; text-align: center; }
+.hew-app .range-grid { display: grid; grid-template-columns: repeat(7, 1fr); row-gap: 2px; }
+.hew-app .range-weekday { text-align: center; font-size: 0.72rem; color: var(--hew-ink-3); padding-bottom: 4px; }
+.hew-app .range-day {
+  height: 36px; min-height: 36px; padding: 0; border: 0; border-radius: 0;
+  background: transparent; color: var(--hew-ink); font-size: 0.88rem; font-weight: 500; cursor: pointer;
+}
+.hew-app .range-day:hover:not(:disabled) { background: var(--hew-teal-100); color: var(--hew-forest-900); }
+.hew-app .range-day:disabled { color: var(--hew-line-strong); cursor: not-allowed; background: transparent; }
+.hew-app .range-day.in-range { background: var(--hew-teal-100); color: var(--hew-forest-900); }
+.hew-app .range-day.is-start,
+.hew-app .range-day.is-end { background: var(--hew-forest-900); color: #fff; }
+.hew-app .range-day.is-start { border-radius: 18px 0 0 18px; }
+.hew-app .range-day.is-end { border-radius: 0 18px 18px 0; }
+.hew-app .range-day.is-start.is-end { border-radius: 18px; }
+@media (max-width: 700px) {
+  .hew-app .range-months { grid-template-columns: 1fr; }
+}
+.hew-app .range-fallback[hidden],
+.hew-app .range-calendar[hidden] { display: none !important; }
+.hew-app .range-day.is-start:hover:not(:disabled),
+.hew-app .range-day.is-end:hover:not(:disabled) { background: var(--hew-forest-900); color: #fff; }
+
+
 /* Press page */
 .hew-press-about { display: grid; grid-template-columns: 1fr 1.4fr; gap: 48px; align-items: start; }
 .hew-press-about h2 { margin: 10px 0 0; }
