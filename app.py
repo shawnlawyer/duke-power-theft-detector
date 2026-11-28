@@ -13102,6 +13102,24 @@ def build_report_context(
     }
 
 
+def history_date_range(account_number: str | None) -> dict[str, str | None]:
+    """First and last local dates with saved readings, for date pickers."""
+    account = find_account(account_number) if account_number else None
+    if account is None:
+        return {"start": None, "end": None}
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT MIN(start_epoch) AS first_epoch, MAX(start_epoch) AS last_epoch FROM interval_readings WHERE account_id = ?",
+            (account["id"],),
+        ).fetchone()
+    if row is None or row["first_epoch"] is None:
+        return {"start": None, "end": None}
+    local_tz = tz.gettz(DEFAULT_TZ)
+    def to_date(epoch: object) -> str:
+        return datetime.fromtimestamp(int(epoch), tz=timezone.utc).astimezone(local_tz).date().isoformat()
+    return {"start": to_date(row["first_epoch"]), "end": to_date(row["last_epoch"])}
+
+
 def parse_settings(form_like) -> dict[str, object]:
     return {
         "tz": clean_timezone(form_like.get("tz")),
@@ -13951,6 +13969,7 @@ def create_web_app() -> Flask:
             "energy_company_choices": list_energy_companies(),
             "energy_company_option_groups": energy_company_option_groups,
             "supported_timezones": SUPPORTED_TIMEZONES,
+            "history_date_range": history_date_range,
             "duke_oauth_helper_download_url": DUKE_OAUTH_HELPER_DOWNLOAD_URL,
             "national_grid_available": national_grid.available(),
             "national_grid_provider_matches": national_grid.provider_matches,
@@ -13979,7 +13998,11 @@ def create_web_app() -> Flask:
         redirect_code = 307 if request.method not in {"GET", "HEAD", "OPTIONS"} else 302
         return redirect(target, code=redirect_code)
 
-    def render_customer_dashboard(customer_user: dict[str, object]):
+    def render_customer_dashboard(
+        customer_user: dict[str, object],
+        view: str = "overview",
+        page_title: str = "Your energy history",
+    ):
         ensure_data_dirs()
         defaults = build_settings_defaults()
         account_number = request.args.get("account_number")
@@ -14047,7 +14070,8 @@ def create_web_app() -> Flask:
                 account_number=str(account["account_number"]),
             ),
             active_account_number=account["account_number"],
-            page_title="Your energy history",
+            page_title=page_title,
+            analysis_view=view,
         )
 
     @app.get("/first-run")
@@ -14861,6 +14885,54 @@ def create_web_app() -> Flask:
             return customer_user
         return render_customer_dashboard(customer_user)
 
+    @app.get("/customer/alerts")
+    def customer_alerts_page():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        return render_customer_dashboard(customer_user, "alerts", "Alerts")
+
+    @app.get("/customer/days")
+    def customer_days_page():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        return render_customer_dashboard(customer_user, "days", "Daily report")
+
+    @app.get("/customer/ask")
+    def customer_ask_page():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        return render_customer_dashboard(customer_user, "ask", "Ask about your home")
+
+    def render_customer_section(customer_user: dict[str, object], template: str, page_title: str):
+        context = build_customer_account_context(customer_user, page_title)
+        if context is None:
+            return render_template("customer_empty.html", page_title=page_title, customer_mode=True, has_disabled_account=customer_has_disabled_account(str(customer_user["email"])))
+        return render_template(template, **context)
+
+    @app.get("/customer/compare")
+    def customer_compare_page():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        return render_customer_section(customer_user, "compare_page.html", "Compare periods")
+
+    @app.get("/customer/notes")
+    def customer_notes_page():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        return render_customer_section(customer_user, "notes_page.html", "Notes")
+
+    @app.get("/customer/get-history")
+    def customer_get_history_page():
+        customer_user = require_customer_user()
+        if not isinstance(customer_user, dict):
+            return customer_user
+        return render_customer_section(customer_user, "get_history_page.html", "Get your history")
+
     @app.get("/customer/account")
     def customer_account_page():
         customer_user = require_customer_user()
@@ -15060,10 +15132,7 @@ def create_web_app() -> Flask:
         customer_user = require_customer_user()
         if not isinstance(customer_user, dict):
             return customer_user
-        context = build_customer_account_context(customer_user, "History")
-        if context is None:
-            return render_template("customer_empty.html", page_title="Your energy history", customer_mode=True, has_disabled_account=customer_has_disabled_account(str(customer_user["email"])))
-        return render_template("history_page.html", **context)
+        return render_customer_section(customer_user, "history_page.html", "Upload")
 
     @app.get("/customer/billing")
     def customer_billing_page():
@@ -15989,6 +16058,51 @@ def create_web_app() -> Flask:
         staff_user = require_staff_user()
         if not isinstance(staff_user, dict):
             return staff_user
+        return render_staff_review(staff_user, "overview", "Commission Review")
+
+    @app.get("/alerts")
+    def alerts_page():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        return render_staff_review(staff_user, "alerts", "Alerts")
+
+    @app.get("/days")
+    def days_page():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        return render_staff_review(staff_user, "days", "Daily report")
+
+    @app.get("/ask")
+    def ask_page():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        return render_staff_review(staff_user, "ask", "Ask about the home")
+
+    @app.get("/compare")
+    def compare_page():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        return render_template("compare_page.html", **build_staff_account_context("Compare periods"))
+
+    @app.get("/notes")
+    def notes_page():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        return render_template("notes_page.html", **build_staff_account_context("Notes"))
+
+    @app.get("/get-history")
+    def get_history_page():
+        staff_user = require_staff_user()
+        if not isinstance(staff_user, dict):
+            return staff_user
+        return render_template("get_history_page.html", **build_staff_account_context("Get the history"))
+
+    def render_staff_review(staff_user: dict[str, object], view: str, page_title: str):
         ensure_data_dirs()
         defaults = build_settings_defaults()
         account_number = request.args.get("account_number")
@@ -16028,8 +16142,9 @@ def create_web_app() -> Flask:
             staff_team=visible_staff_team(staff_user),
             latest_invite_url=None if is_commission_staff(staff_user) else consume_latest_invite_url(),
             active_account_number=scaffold["account"]["account_number"],
-            page_title="Commission Review",
+            page_title=page_title,
             commission_read_only=commission_read_only,
+            analysis_view=view,
         )
 
     @app.post("/accounts/manage")
@@ -16115,7 +16230,7 @@ def create_web_app() -> Flask:
         staff_user = require_staff_user()
         if not isinstance(staff_user, dict):
             return staff_user
-        return render_template("history_page.html", **build_staff_account_context("History"))
+        return render_template("history_page.html", **build_staff_account_context("Upload"))
 
     @app.post("/account/notes")
     def create_account_note():

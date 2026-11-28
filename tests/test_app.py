@@ -400,9 +400,10 @@ def test_xcel_account_panel_explains_download_and_does_not_render_oauth_button(t
     )
     client = app.web_app.test_client()
     customer_sign_in(client, "xcel-owner@example.com")
-    response = client.get("/customer/utility", query_string={"account_number": "xcel-1"})
+    response = client.get("/customer/get-history", query_string={"account_number": "xcel-1"})
     assert response.status_code == 200
     body = response.get_data(as_text=True)
+    assert "Start Xcel sign-in" not in client.get("/customer/utility", query_string={"account_number": "xcel-1"}).get_data(as_text=True)
     assert "Download your Xcel history" in body
     assert "Xcel's customer download is available now" in unescape(body)
     assert "Start Xcel sign-in" not in body
@@ -508,7 +509,7 @@ def test_download_guide_names_and_aliases_are_unambiguous():
 
 
 @pytest.mark.parametrize("guide", app.UTILITY_DOWNLOAD_GUIDES, ids=lambda guide: guide.slug)
-@pytest.mark.parametrize("route", ["/customer/utility", "/customer/history"])
+@pytest.mark.parametrize("route", ["/customer/get-history"])
 def test_customer_download_guide_is_account_specific_on_utility_and_history(tmp_path, monkeypatch, guide, route):
     configure_tmp_paths(tmp_path, monkeypatch)
     monkeypatch.setitem(app.web_app.config, "TESTING", True)
@@ -531,10 +532,7 @@ def test_customer_download_guide_is_account_specific_on_utility_and_history(tmp_
     assert "not an automatic connection" in document.text_content()
     if guide.slug != "duke":
         assert not document.xpath('//form[contains(@action, "/utility-connection/duke/")]')
-    if route == "/customer/utility":
-        assert selected[0].xpath('.//a[contains(@href, "account_number=guide-account") and contains(@href, "#history-import")]')
-    else:
-        assert document.xpath('//form[@action="/analyze"]/input[@name="account_number" and @value="guide-account"]')
+    assert selected[0].xpath('.//a[contains(@href, "/customer/history?account_number=guide-account")]')
     assert app.list_utility_connections("guide-account") == []
 
 
@@ -547,7 +545,7 @@ def test_download_guidance_changes_when_customer_switches_accounts(tmp_path, mon
     client = app.web_app.test_client()
     customer_sign_in(client, "shared@example.com")
     for number, slug in [("home", "nyseg"), ("business", "pseg-long-island"), ("home", "nyseg")]:
-        response = client.get("/customer/utility", query_string={"account_number": number})
+        response = client.get("/customer/get-history", query_string={"account_number": number})
         document = lxml_html.fromstring(response.data)
         assert document.xpath('//*[@data-selected-utility]/@data-selected-utility') == [slug]
 
@@ -559,16 +557,17 @@ def test_unknown_utility_has_guidance_directory_without_incorrect_primary(tmp_pa
     app.save_account_profile("unknown", energy_company="PSE&G")
     client = app.web_app.test_client()
     customer_sign_in(client, "unknown@example.com")
-    response = client.get("/customer/utility", query_string={"account_number": "unknown"})
+    response = client.get("/customer/get-history", query_string={"account_number": "unknown"})
     document = lxml_html.fromstring(response.data)
     assert not document.xpath('//*[@data-selected-utility]')
-    assert len(document.xpath('//select[@name="guide"]/option[@value!=""]')) == len(app.UTILITY_DOWNLOAD_GUIDES)
-    picked = client.get("/customer/utility", query_string={"account_number": "unknown", "guide": "pge"})
+    assert len(document.xpath('//nav[contains(@class, "guide-index")]//a')) == len(app.UTILITY_DOWNLOAD_GUIDES)
+    assert not document.xpath('//select[@name="guide"]')
+    picked = client.get("/customer/get-history", query_string={"account_number": "unknown", "guide": "pge"})
     assert lxml_html.fromstring(picked.data).xpath('//*[@data-selected-utility]/@data-selected-utility') == ["pge"]
     assert document.xpath('//a[contains(@href, "/customer/account?account_number=unknown")]')
 
 
-@pytest.mark.parametrize("route", ["/utility", "/history"])
+@pytest.mark.parametrize("route", ["/get-history"])
 def test_staff_download_guidance_uses_staff_account_routes(tmp_path, monkeypatch, route):
     configure_tmp_paths(tmp_path, monkeypatch)
     monkeypatch.setitem(app.web_app.config, "TESTING", True)
@@ -659,14 +658,14 @@ def test_similar_utility_names_follow_selected_account_without_cross_linking(tmp
     client = app.web_app.test_client()
     customer_sign_in(client, "multi-utility@example.com")
     for number, provider, slug in [*accounts, accounts[0]]:
-        response = client.get("/customer/utility", query_string={"account_number": number})
+        response = client.get("/customer/get-history", query_string={"account_number": number})
         assert response.status_code == 200
         document = lxml_html.fromstring(response.data)
         selected = document.xpath('//*[@data-selected-utility]')
         assert len(selected) == 1
         assert selected[0].get("data-selected-utility") == slug
         assert selected[0].xpath('.//a[@target="_blank"]/@href') == [app.get_utility_download_guide(provider).url]
-        assert selected[0].xpath(f'.//a[contains(@href, "account_number={number}") and contains(@href, "#history-import")]')
+        assert selected[0].xpath(f'.//a[contains(@href, "account_number={number}") and contains(@href, "/customer/history?")]')
         assert app.list_utility_connections(number) == []
 
 
@@ -1862,10 +1861,11 @@ def test_customer_can_connect_duke_with_helper_without_exposing_tokens(tmp_path,
     assert b"Duke opens in a new tab" in response.data
     assert b"switch back to this tab" in response.data
     assert b"One-time Duke code" in response.data
-    assert b"Download your Duke history" in response.data
-    assert b"Open Duke Usage Details" in response.data
-    assert b"my-account/usage?tab=day" in response.data
-    assert b'data-selected-utility="duke"' in response.data
+    guide_page = client.get("/customer/get-history", query_string={"account_number": "acct-1"})
+    assert b"Download your Duke history" in guide_page.data
+    assert b"Open Duke Usage Details" in guide_page.data
+    assert b"my-account/usage?tab=day" in guide_page.data
+    assert b'data-selected-utility="duke"' in guide_page.data
     assert b"Upload it from History" in response.data
     assert start_response.status_code == 302
     assert start_response.headers["Location"] == "https://login.duke-energy.com/authorize-test"
@@ -2198,7 +2198,7 @@ def test_customer_signup_creates_login_and_account_access(tmp_path, monkeypatch)
     assert dashboard.status_code == 200
     assert b"Your energy history" in dashboard.data
     assert b"Billing" in dashboard.data
-    assert b"History" in dashboard.data
+    assert b"Upload" in dashboard.data
     assert b"Commission access" not in dashboard.data
 
     account_page = client.get("/customer/account")
@@ -5087,13 +5087,13 @@ def test_review_dashboard_renders_note_markers_and_modal_shell(tmp_path, monkeyp
 
     client = app.web_app.test_client()
     sign_in(client)
-    response = client.get("/", query_string={"account_number": "acct-1"})
+    response = client.get("/days", query_string={"account_number": "acct-1"})
 
     assert response.status_code == 200
     assert b'id="detail-note-button"' in response.data
     assert b'data-note-date="2024-01-01"' in response.data
     assert b'id="note-modal"' in response.data
-    assert b"Heaviest hours" in response.data
+    assert b"Heaviest hours" in client.get("/", query_string={"account_number": "acct-1"}).data
 
 
 def test_history_page_offers_saved_history_date_comparison(tmp_path, monkeypatch):
@@ -5108,11 +5108,14 @@ def test_history_page_offers_saved_history_date_comparison(tmp_path, monkeypatch
     assert response.status_code == 200
     assert b"Upload the export." in response.data
     assert b'name="xml_file"' in response.data
+    assert b"Compare two periods from your saved history." not in response.data
+    response = client.get("/compare")
+    assert response.status_code == 200
     assert b"Compare two periods from your saved history." in response.data
+    assert b"data-range-picker" in response.data
     assert b'action="/compare"' in response.data
     assert b'name="left_start"' in response.data
     assert b'name="right_start"' in response.data
-    assert b'name="energy_company"' not in response.data
     assert b"Build comparison packet" in response.data
     assert b"Customer data permission must be active" in response.data
 
@@ -5239,7 +5242,7 @@ def test_history_notes_are_account_scoped_newest_first_and_owner_deletable(tmp_p
     assert notes[0]["can_delete"] is True
     assert app.list_account_notes("acct-2") == []
 
-    history_page = client.get("/customer/history", query_string={"account_number": "acct-1"})
+    history_page = client.get("/customer/notes", query_string={"account_number": "acct-1"})
     assert history_page.status_code == 200
     assert b"Notes" in history_page.data
     assert b"Save note" in history_page.data
@@ -5277,7 +5280,7 @@ def test_history_notes_are_account_scoped_newest_first_and_owner_deletable(tmp_p
     ]
 
     sign_in(client)
-    staff_history = client.get("/history", query_string={"account_number": "acct-1"})
+    staff_history = client.get("/notes", query_string={"account_number": "acct-1"})
     assert staff_history.status_code == 200
     assert b"First note" in staff_history.data
     assert notes[0]["created_at"].replace("T", " ").encode() in staff_history.data
@@ -5418,10 +5421,12 @@ def test_web_routes_render_and_analyze(tmp_path, monkeypatch):
         )
 
     assert response.status_code == 200
-    assert b"Day inspector" in response.data
-    assert b"Pick a day in the table to load its curve" in response.data
-    assert b"All-on check" in response.data
-    assert b"Spike intervals" in response.data
+    assert b"Last import" in response.data
+    days = client.get("/days", query_string={"account_number": "acct-1"}).data
+    assert b"Day inspector" in days
+    assert b"Pick a day in the table to load its curve" in days
+    assert b"All-on check" in days
+    assert b"Spike intervals" in client.get("/alerts", query_string={"account_number": "acct-1"}).data
     assert b"Download CSV" in response.data
     assert b"Download JSON" in response.data
     assert b"Readings added" in response.data
@@ -5493,6 +5498,8 @@ def test_spike_table_renders_from_and_to_readings(tmp_path, monkeypatch):
         )
 
     assert response.status_code == 200
+    response = client.get("/alerts", query_string={"account_number": "acct-1"})
+    assert response.status_code == 200
     assert b"From kW" in response.data
     assert b"To kW" in response.data
     assert b"Above normal" in response.data
@@ -5522,8 +5529,9 @@ def test_index_shows_latest_analysis_for_default_account(tmp_path, monkeypatch):
 
     assert home.status_code == 200
     assert b"Commission Review" in home.data
-    assert b"What the current rules picked out" in home.data
-    assert b"Day inspector" in home.data
+    assert b"Median kilowatts by hour" in home.data
+    assert b"What the current rules picked out" in client.get("/alerts").data
+    assert b"Day inspector" in client.get("/days").data
 
 
 def test_commissioner_can_invite_staff(tmp_path, monkeypatch):
@@ -5947,6 +5955,46 @@ def test_history_page_is_not_tied_to_one_utility(tmp_path, monkeypatch):
     document = lxml_html.fromstring(page.data)
     upload_text = " ".join(document.xpath('//section[@id="history-import"]//p[contains(@class, "plain-note")]//text()'))
     assert "Duke" not in upload_text
-    assert document.xpath('//*[@data-selected-utility]/@data-selected-utility') == ["xcel"]
+    assert document.xpath('//a[contains(@href, "/customer/get-history?account_number=acct-x")]')
+    guide = lxml_html.fromstring(client.get("/customer/get-history", query_string={"account_number": "acct-x"}).data)
+    assert guide.xpath('//*[@data-selected-utility]/@data-selected-utility') == ["xcel"]
     assert document.xpath('//select[@name="tz"]/option[@value="America/Denver"]')
     assert not document.xpath('//input[@name="tz"]')
+
+
+def test_each_section_has_its_own_page_and_menu_entry(tmp_path, monkeypatch):
+    configure_tmp_paths(tmp_path, monkeypatch)
+    app.web_app.config["TESTING"] = True
+    history = tmp_path / "input" / "history.xml"
+    history.write_bytes(FIXTURE.read_bytes())
+    app.import_interval_file_to_db(history, account_number="acct-1", display_name="Test Home")
+    authorize_account("acct-1", email="owner@example.com")
+    client = app.web_app.test_client()
+    customer_sign_in(client)
+    pages = {
+        "/customer": b"Median kilowatts by hour",
+        "/customer/alerts": b"Interval-level jumps",
+        "/customer/days": b"Day inspector",
+        "/customer/ask": b"Ask what happened",
+        "/customer/compare": b"data-range-picker",
+        "/customer/history": b'name="xml_file"',
+        "/customer/get-history": b"guide-index",
+        "/customer/notes": b"Save note",
+    }
+    for path, marker in pages.items():
+        response = client.get(path, query_string={"account_number": "acct-1"})
+        assert response.status_code == 200, path
+        assert marker in response.data, path
+        document = lxml_html.fromstring(response.data)
+        assert document.xpath(f'//nav[@aria-label="Main menu"]//a[@aria-current="page" and starts-with(@href, "{path}?")]'), path
+    alerts = client.get("/customer/alerts", query_string={"account_number": "acct-1"}).data
+    assert b"Day inspector" not in alerts and b"Ask what happened" not in alerts
+    days = client.get("/customer/days", query_string={"account_number": "acct-1"}).data
+    assert b"Interval-level jumps" not in days
+    compare = lxml_html.fromstring(client.get("/customer/compare", query_string={"account_number": "acct-1"}).data)
+    picker = compare.xpath('//*[@data-range-picker]')[0]
+    assert picker.get("data-min") and picker.get("data-max") and picker.get("data-min") <= picker.get("data-max")
+
+    sign_in(client)
+    for path in ("/", "/alerts", "/days", "/ask", "/compare", "/history", "/get-history", "/notes"):
+        assert client.get(path, query_string={"account_number": "acct-1"}).status_code == 200, path

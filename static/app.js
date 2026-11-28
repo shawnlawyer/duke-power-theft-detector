@@ -1628,3 +1628,166 @@
     });
   });
 })();
+
+(() => {
+  // Date-range calendar: click a start day, move to an end day (the days between highlight), click to finish.
+  const pickers = document.querySelectorAll("[data-range-picker]");
+  if (!pickers.length) return;
+  const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  const WEEKDAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const parse = (value) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return null;
+    const [y, m, d] = value.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  };
+  const pretty = (value) => {
+    const d = parse(value);
+    return d ? `${MONTHS[d.getMonth()].slice(0, 3)} ${d.getDate()}, ${d.getFullYear()}` : "";
+  };
+  const daysBetween = (a, b) => Math.round((parse(b) - parse(a)) / 86400000) + 1;
+
+  pickers.forEach((picker) => {
+    const calendar = picker.querySelector("[data-range-calendar]");
+    const summary = picker.querySelector("[data-range-summary]");
+    const fallback = picker.querySelector("[data-range-fallback]");
+    const startInput = picker.querySelector(`input[name="${picker.dataset.startName}"]`);
+    const endInput = picker.querySelector(`input[name="${picker.dataset.endName}"]`);
+    if (!calendar || !startInput || !endInput) return;
+    const min = picker.dataset.min || "";
+    const max = picker.dataset.max || "";
+    let start = startInput.value || "";
+    let end = endInput.value || "";
+    let hover = "";
+    const anchor = parse(max) || new Date();
+    let view = new Date(anchor.getFullYear(), anchor.getMonth() - 1, 1);
+
+    fallback.hidden = true;
+    calendar.hidden = false;
+
+    const inRange = (value) => {
+      const last = end || hover;
+      if (!start || !last) return false;
+      const [a, b] = start <= last ? [start, last] : [last, start];
+      return value >= a && value <= b;
+    };
+    const disabled = (value) => (min && value < min) || (max && value > max);
+
+    const sync = () => {
+      startInput.value = start;
+      endInput.value = end;
+      if (start && end) summary.textContent = `${pretty(start)} to ${pretty(end)} · ${daysBetween(start, end)} day${daysBetween(start, end) === 1 ? "" : "s"}`;
+      else if (start) summary.textContent = `Starts ${pretty(start)}. Now click the end day.`;
+      else summary.textContent = "Click a start day, then an end day.";
+    };
+
+    const monthGrid = (first) => {
+      const wrap = document.createElement("div");
+      wrap.className = "range-month";
+      const title = document.createElement("p");
+      title.className = "range-month-title";
+      title.textContent = `${MONTHS[first.getMonth()]} ${first.getFullYear()}`;
+      wrap.append(title);
+      const grid = document.createElement("div");
+      grid.className = "range-grid";
+      grid.setAttribute("role", "grid");
+      WEEKDAYS.forEach((w) => {
+        const head = document.createElement("span");
+        head.className = "range-weekday";
+        head.textContent = w;
+        grid.append(head);
+      });
+      for (let i = 0; i < first.getDay(); i += 1) grid.append(document.createElement("span"));
+      const daysInMonth = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+      for (let day = 1; day <= daysInMonth; day += 1) {
+        const value = iso(new Date(first.getFullYear(), first.getMonth(), day));
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "range-day";
+        button.textContent = String(day);
+        button.dataset.date = value;
+        button.setAttribute("aria-label", pretty(value));
+        if (disabled(value)) button.disabled = true;
+        if (inRange(value)) button.classList.add("in-range");
+        const last = end || hover;
+        if (value === start) button.classList.add("is-start");
+        if (start && value === last) button.classList.add("is-end");
+        button.setAttribute("aria-pressed", value === start || value === end ? "true" : "false");
+        grid.append(button);
+      }
+      wrap.append(grid);
+      return wrap;
+    };
+
+    const render = () => {
+      calendar.replaceChildren();
+      const nav = document.createElement("div");
+      nav.className = "range-nav";
+      const prev = document.createElement("button");
+      prev.type = "button";
+      prev.className = "button-secondary button-small";
+      prev.textContent = "‹ Earlier";
+      prev.addEventListener("click", () => { view = new Date(view.getFullYear(), view.getMonth() - 1, 1); render(); });
+      const next = document.createElement("button");
+      next.type = "button";
+      next.className = "button-secondary button-small";
+      next.textContent = "Later ›";
+      next.addEventListener("click", () => { view = new Date(view.getFullYear(), view.getMonth() + 1, 1); render(); });
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "button-secondary button-small";
+      clear.textContent = "Clear";
+      clear.addEventListener("click", () => { start = ""; end = ""; hover = ""; sync(); render(); });
+      nav.append(prev, next, clear);
+      const months = document.createElement("div");
+      months.className = "range-months";
+      months.append(monthGrid(view), monthGrid(new Date(view.getFullYear(), view.getMonth() + 1, 1)));
+      calendar.append(nav, months);
+    };
+
+    const paintPreview = () => {
+      calendar.querySelectorAll(".range-day").forEach((button) => {
+        const value = button.dataset.date;
+        button.classList.toggle("in-range", inRange(value));
+        button.classList.toggle("is-end", Boolean(start) && value === (end || hover));
+      });
+    };
+
+    calendar.addEventListener("click", (event) => {
+      const button = event.target.closest(".range-day");
+      if (!button || button.disabled) return;
+      const value = button.dataset.date;
+      if (!start || end) {
+        start = value; end = ""; hover = "";
+      } else if (value < start) {
+        end = start; start = value;
+      } else {
+        end = value;
+      }
+      sync();
+      render();
+    });
+    calendar.addEventListener("mouseover", (event) => {
+      const button = event.target.closest(".range-day");
+      if (!button || !start || end) return;
+      hover = button.dataset.date;
+      paintPreview();
+    });
+    calendar.addEventListener("mouseleave", () => {
+      if (end) return;
+      hover = "";
+      paintPreview();
+    });
+    picker.closest("form")?.addEventListener("submit", (event) => {
+      if (!start || !end) {
+        event.preventDefault();
+        summary.textContent = "Pick both a start day and an end day for this period.";
+        summary.classList.add("is-error");
+        calendar.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    });
+
+    sync();
+    render();
+  });
+})();

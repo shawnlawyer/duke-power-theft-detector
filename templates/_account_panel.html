@@ -486,7 +486,7 @@
     {% endif %}
   </div>
 
-  {% include "_utility_download_guides.html" %}
+  <p class="plain-note">Prefer to upload a file? <a class="inline-link" href="{{ url_for('customer_get_history_page' if is_customer else 'get_history_page', account_number=current_account.account_number) }}">See how to download your history from your utility</a>.</p>
 
   {% set provider_is_duke = 'duke' in ((selected_connection_provider or '')|lower) %}
   {% if xcel_provider_matches(selected_connection_provider) %}
