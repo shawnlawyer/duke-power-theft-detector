@@ -518,6 +518,36 @@ COMMISSION_REGISTRY_SEED = (
     },
 )
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+DEFAULT_SHARE_IMAGE = (
+    "social/home-energy-watch-share.jpg",
+    1200,
+    630,
+    "Home Energy Watch: see the pattern behind your electric bill.",
+)
+# Advertising images offered on /press. Each has a full-size download and a 720px preview.
+PRESS_IMAGES = (
+    {"slug": "ad-electric-bill-birthday", "title": "The birthday surprise",
+     "line": "Surprise! And it's not even your birthday.",
+     "alt": "A woman at her kitchen table reading an electric bill with a surprised look."},
+    {"slug": "ad-attic-space-program", "title": "The attic space program",
+     "line": "You took your son to the Air and Space Museum. Now your electric bill is funding the space program.",
+     "alt": "A house cross-section with a brightly lit attic workshop above a father checking his phone."},
+    {"slug": "ad-neighbor-air-conditioner", "title": "The generous neighbor",
+     "line": "Feeling generous? Your neighbors may be staying cooler than you are.",
+     "alt": "A woman looking toward a neighbor relaxing on his porch beside an air conditioner."},
+    {"slug": "ad-neighbor-ev-charging", "title": "The neighbor's electric car",
+     "line": "Your neighbor thought an electric car would be cheap to charge.",
+     "alt": "A man at his window watching a neighbor plug an electric car into the outside of his house."},
+    {"slug": "ad-village-homeenergywatch", "title": "The village",
+     "line": "You didn't realize you were powering the village that popped up behind your house.",
+     "alt": "A woman on her back deck looking at a lit-up village of small cabins behind her house."},
+    {"slug": "ad-magnifying-glass-pattern", "title": "The magnifying glass",
+     "line": "Your house isn't mysterious. It's just very good at hiding the evidence.",
+     "alt": "A friendly magnifying glass examining a house at dusk, with energy lines flowing from it."},
+    {"slug": "attic-energy-use", "title": "The attic",
+     "line": "What changed while the house was asleep?",
+     "alt": "A house cross-section with a busy attic workshop and a puzzled homeowner downstairs."},
+)
 SUPPORT_EMAIL = os.getenv("POWER_SUPPORT_EMAIL", "support@homeenergywatch.com")
 DEFAULT_MARKETING_HOSTS = ("homeenergywatch.com", "www.homeenergywatch.com")
 DEFAULT_APP_HOSTS = ("app.homeenergywatch.com",)
@@ -13303,7 +13333,9 @@ def create_web_app() -> Flask:
         "features_page",
         "for_professionals_page",
         "about_page",
+        "press_page",
         "contact_page",
+        "favicon_ico",
         "terms_page",
         "privacy_page",
         "utility_data_authorization_page",
@@ -13703,10 +13735,17 @@ def create_web_app() -> Flask:
         page_title: str,
         page_description: str,
         active_page: str,
+        share_image: tuple[str, int, int, str] | None = None,
     ) -> dict[str, object]:
         marketing_base_url = build_marketing_base_url(request.url_root)
         app_base_url = build_public_base_url(request.url_root)
+        share_file, share_width, share_height, share_alt = share_image or DEFAULT_SHARE_IMAGE
         return {
+            "share_image_url": build_absolute_url(marketing_base_url, url_for("static", filename=share_file)),
+            "share_image_width": share_width,
+            "share_image_height": share_height,
+            "share_image_alt": share_alt,
+            "press_url": build_absolute_url(marketing_base_url, "/press"),
             "page_title": page_title,
             "page_description": page_description,
             "active_page": active_page,
@@ -14689,6 +14728,22 @@ def create_web_app() -> Flask:
                 active_page="about",
             ),
         )
+
+    @app.get("/press")
+    def press_page():
+        return render_template(
+            "marketing_press.html",
+            press_images=PRESS_IMAGES,
+            **build_marketing_page_context(
+                page_title="Press",
+                page_description="Images, logos and background on Home Energy Watch for press and partners.",
+                active_page="press",
+            ),
+        )
+
+    @app.get("/favicon.ico")
+    def favicon_ico():
+        return send_from_directory(STATIC_DIR, "favicon.ico", mimetype="image/vnd.microsoft.icon", max_age=86400)
 
     @app.get("/contact")
     def contact_page():
@@ -16525,6 +16580,7 @@ def create_web_app() -> Flask:
             build_absolute_url(marketing_base_url, "/features"),
             build_absolute_url(marketing_base_url, "/for-professionals"),
             build_absolute_url(marketing_base_url, "/about"),
+            build_absolute_url(marketing_base_url, "/press"),
             build_absolute_url(marketing_base_url, "/contact"),
             build_absolute_url(marketing_base_url, "/terms"),
             build_absolute_url(marketing_base_url, "/privacy"),

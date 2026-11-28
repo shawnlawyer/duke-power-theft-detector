@@ -9,6 +9,23 @@
     <meta name="robots" content="{{ robots_meta or 'index,follow' }}">
     <meta name="theme-color" content="#0b3a35">
     <link rel="canonical" href="{{ canonical_url }}">
+    {% include "_site_icons.html" %}
+    {% set share_title = page_title if page_title == "Home Energy Watch" else page_title ~ " · Home Energy Watch" %}
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Home Energy Watch">
+    <meta property="og:title" content="{{ share_title }}">
+    <meta property="og:description" content="{{ page_description }}">
+    <meta property="og:url" content="{{ canonical_url }}">
+    <meta property="og:image" content="{{ share_image_url }}">
+    <meta property="og:image:width" content="{{ share_image_width }}">
+    <meta property="og:image:height" content="{{ share_image_height }}">
+    <meta property="og:image:alt" content="{{ share_image_alt }}">
+    <meta property="og:locale" content="en_US">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="{{ share_title }}">
+    <meta name="twitter:description" content="{{ page_description }}">
+    <meta name="twitter:image" content="{{ share_image_url }}">
+    <meta name="twitter:image:alt" content="{{ share_image_alt }}">
     <link rel="preload" href="{{ url_for('static', filename='fonts/poppins-latin-700-normal.woff2') }}" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="{{ url_for('static', filename='hew-design.css') }}">
     <script defer src="{{ url_for('static', filename='marketing.js') }}"></script>
@@ -32,6 +49,7 @@
               <a href="{{ utilities_url }}">Supported Utilities</a>
               <a href="{{ for_commissions_url }}">For Commissions</a>
               <a href="{{ about_url }}">About Us</a>
+              <a href="{{ press_url }}">Press</a>
               <a href="{{ contact_url }}">Contact</a>
               <a href="{{ affiliate_url }}">Referral Partners</a>
             </div>
@@ -71,6 +89,7 @@
           <div>
             <h4>Company</h4>
             <a href="{{ about_url }}">About Us</a>
+            <a href="{{ press_url }}">Press</a>
             <a href="{{ contact_url }}">Contact</a>
             <a href="{{ for_homeowners_url }}">For Homeowners</a>
             <a href="{{ utilities_url }}">Supported Utilities</a>
